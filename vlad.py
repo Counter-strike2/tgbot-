@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessConnection, Update
+from aiohttp import web
 
 BOT_TOKEN = "8959860095:AAFsRWRSFQOQ84ww_HwxQ2IaI_24DYxTN2o"
 DB_NAME = "sessions.db"
@@ -19,7 +20,7 @@ typing_tasks = {}
 user_spam_texts = {}    
 link_chats = set()      
 reply_guard_chats = set() 
-typing_disabled_chats = set() # чаты, где выключена печать
+typing_disabled_chats = set()
 substitutions = {}      
 msg_cache = {}          
 active_chats = set()    
@@ -398,7 +399,23 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         print(f"❌ Ошибка обработчика удалений: {e}")
 
+# ===== ЗАЩИТА ДЛЯ RENDER WEB SERVICE =====
+async def health_check(request):
+    return web.Response(text="Bot is running!")
+
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    print("✅ Health check server started on port 10000")
+
 async def main():
+    # Запускаем health-сервер для Render
+    await start_health_server()
+    
     print("🔥 БОТ УСПЕШНО ЗАПУЩЕН!")
     await dp.start_polling(bot)
 
