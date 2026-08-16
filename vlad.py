@@ -189,7 +189,7 @@ async def handle(message: Message):
                 return
             return
 
-        # Команды владельца
+        # ===== КОМАНДЫ ВЛАДЕЛЬЦА =====
         if low == "ss":
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
