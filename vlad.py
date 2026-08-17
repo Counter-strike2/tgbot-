@@ -87,7 +87,9 @@ init_db()
 @dp.business_connection()
 async def business_conn_handler(bc: BusinessConnection):
     global owner_id
-    owner_id = bc.user.id
+    if owner_id is None:
+        owner_id = bc.user.id
+        print(f"✅ Owner ID установлен: {owner_id}")
 
 async def delete_msg(chat_id, msg_id, bc_id):
     try:
@@ -148,8 +150,10 @@ async def handle(message: Message):
         if not bc_id:
             return
 
+        # Если owner_id ещё не установлен, устанавливаем из первого бизнес-подключения
         if owner_id is None:
             owner_id = uid
+            print(f"✅ Owner ID установлен из сообщения: {owner_id}")
 
         if chat_id not in active_chats:
             if len(active_chats) >= 50:
@@ -187,6 +191,31 @@ async def handle(message: Message):
             if uid in mutes and datetime.now() < mutes[uid]["until"]:
                 await delete_msg(chat_id, message.message_id, bc_id)
                 return
+            
+            # Добавляем обработку ссылок и подмены для всех пользователей
+            # Проверяем, не является ли сообщение командой
+            is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид"] or \
+                         low.startswith(("set ", ".мут ", "подмена ", "+линк"))
+
+            if not is_command:
+                if chat_id in link_chats:
+                    try:
+                        if not message.entities and CHANNEL_LINK not in text_raw:
+                            new_text = f'<a href="{CHANNEL_LINK}"><u>{text_raw}</u></a>'
+                            await bot.edit_message_text(chat_id, message.message_id, new_text, parse_mode="HTML", disable_web_page_preview=True, business_connection_id=bc_id)
+                            return
+                    except:
+                        pass
+                
+                if chat_id in substitutions:
+                    try:
+                        sub = substitutions[chat_id]
+                        new_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
+                        await bot.edit_message_text(chat_id, message.message_id, new_text, business_connection_id=bc_id)
+                        return
+                    except:
+                        pass
+            return
 
         # ===== КОМАНДЫ ВЛАДЕЛЬЦА =====
         if uid == owner_id:
@@ -334,7 +363,7 @@ async def handle(message: Message):
                 )
                 return
 
-        # ===== ПОДМЕНА И ССЫЛКИ ДЛЯ ВСЕХ СООБЩЕНИЙ =====
+        # ===== ПОДМЕНА И ССЫЛКИ ДЛЯ ВСЕХ СООБЩЕНИЙ (если не команда) =====
         is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид"] or \
                      low.startswith(("set ", ".мут ", "подмена ", "+линк"))
 
