@@ -12,26 +12,20 @@ CHANNEL_LINK = "https://t.me/gotrollholl"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== ПОДКЛЮЧЕНИЕ К SUPABASE =====
-DB_HOST = "db.godgagzlxhccvdoqbjjt.supabase.co"
-DB_NAME = "postgres"
-DB_USER = "postgres"
-DB_PASSWORD = "norik228norik228ffv"  # ИСПРАВЬ НА СВОЙ ПАРОЛЬ (ТОЛЬКО ЛАТИНИЦА!)
+# ===== ПОДКЛЮЧЕНИЕ К SUPABASE (ГОТОВАЯ СТРОКА) =====
+DATABASE_URL = "postgresql://postgres:norik228norik228ffv@db.godgagzlxhccvdoqbjjt.supabase.co:5432/postgres"
 
 db_pool = None
 
 async def init_db_pool():
     global db_pool
-    db_pool = await asyncpg.create_pool(
-        host=DB_HOST,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        ssl=True
-    )
-    await create_tables()
-    await load_settings()
-    print("✅ Подключение к Supabase установлено!")
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        await create_tables()
+        await load_settings()
+        print("✅ Подключение к Supabase установлено!")
+    except Exception as e:
+        print(f"❌ Ошибка подключения к базе: {e}")
 
 async def create_tables():
     async with db_pool.acquire() as conn:
