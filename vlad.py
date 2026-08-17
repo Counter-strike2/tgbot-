@@ -13,14 +13,13 @@ engine = create_async_engine(DATABASE_URL, echo=True)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 Base = declarative_base()
 
-# Модель таблицы в бд с поддержкой больших ID
 class UserMemory(Base):
     __tablename__ = 'user_memory'
     id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, unique=True, nullable=False)  # Исправлено на BigInteger
+    user_id = Column(BigInteger, unique=True, nullable=False)
     text = Column(String, nullable=False)
 
-# 2. ИНИЦИАЛИЗАЦИЯ БОТА С ВАШИМ АКТУАЛЬНЫМ ТОКЕНОМ
+# 2. ИНИЦИАЛИЗАЦИЯ БОТА
 TOKEN = "8959860095:AAG2K8ng2mpiukjTRbhxEWmsdFmVa3Sm9Q8"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -34,12 +33,19 @@ async def cmd_start(message: types.Message):
 async def handle_message(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
+    words = text.split()  # Разбиваем текст на отдельные слова
 
-    # Логика: Запомни (работает с любым регистром букв)
-    if text.lower().startswith("запомни"):
-        data_to_save = text[7:].strip()
+    if not words:
+        return
+
+    first_word = words[0].lower()  # Берем только первое слово в нижнем регистре
+
+    # Логика: Запомни
+    if first_word == "запомни":
+        data_to_save = " ".join(words[1:]).strip()
+        
         if not data_to_save:
-            await message.answer("А что запомнить-то? Напиши: Запомни привет")
+            await message.answer("А что запомнить-то? Напиши: запомни привет")
             return
             
         async with async_session() as session:
@@ -54,8 +60,8 @@ async def handle_message(message: types.Message):
                     session.add(UserMemory(user_id=user_id, text=data_to_save))
         await message.answer(f"Записал в базу данных Aiven: '{data_to_save}'")
 
-    # Логика: Скажи (работает с любым регистром букв)
-    elif text.lower() == "скажи":
+    # Логика: Скажи
+    elif first_word == "скажи":
         async with async_session() as session:
             from sqlalchemy import select
             result = await session.execute(select(UserMemory).filter_by(user_id=user_id))
