@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessConnection, Update
 from aiohttp import web
 
-BOT_TOKEN = "8959860095:AAFsRWRSFQOQ84ww_HwxQ2IaI_24DYxTN2o"
+BOT_TOKEN = "8959860095:AAG2K8ng2mpiukjTRbhxEWmsdFmVa3Sm9Q8"
 DB_NAME = "sessions.db"
 CHANNEL_LINK = "https://t.me/gotrollholl"
 
