@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 import re
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import Message, BusinessConnection, Update
 from aiohttp import web
 
@@ -400,15 +400,21 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         print(f"❌ Ошибка обработчика удалений: {e}")
 
-# ===== WEBHOOK =====
+# ===== ПРАВИЛЬНЫЙ WEBHOOK =====
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
 async def handle_webhook(request):
     try:
-        data = await request.json()
-        update = Update(**data)
-        await dp.process_update(update)
+        data = await request.text()
+        if data:
+            try:
+                update_data = await request.json()
+                update = Update(**update_data)
+                await dp.process_update(update)
+            except Exception as e:
+                print(f"⚠️ JSON error: {e}")
+                return web.Response(text="Invalid JSON", status=400)
         return web.Response(text="OK", status=200)
     except Exception as e:
         print(f"❌ Webhook error: {e}")
