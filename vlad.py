@@ -57,7 +57,7 @@ def main():
     dp.startup.register(on_startup)
 
     # Получаем порт от Render (или 8080 для локалхоста)
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     
     # Запуск сервера
     web.run_app(app, host="0.0.0.0", port=port)
