@@ -10,7 +10,7 @@ BOT_TOKEN = "8959860095:AAFsRWRSFQOQ84ww_HwxQ2IaI_24DYxTN2o"
 DB_NAME = "sessions.db"
 CHANNEL_LINK = "https://t.me/gotrollholl"
 WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = "https://tgbot--1-wobb.onrender.com" + WEBHOOK_PATH
+WEBHOOK_URL = "https://tgbot-1-qiyl.onrender.com" + WEBHOOK_PATH
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
