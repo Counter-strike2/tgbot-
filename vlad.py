@@ -13,10 +13,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ===== ПОДКЛЮЧЕНИЕ К SUPABASE =====
-DB_HOST = "db.xhccvdoqbjjt.supabase.co"
+DB_HOST = "db.godgagzlxhccvdoqbjjt.supabase.co"
 DB_NAME = "postgres"
 DB_USER = "postgres"
-DB_PASSWORD = "norik228norik228ффв"
+DB_PASSWORD = "norik228norik228ffv"  # ИСПРАВЬ НА СВОЙ ПАРОЛЬ (ТОЛЬКО ЛАТИНИЦА!)
 
 db_pool = None
 
