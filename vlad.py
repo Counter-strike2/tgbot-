@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 import re
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessConnection, Update
 from aiohttp import web
 
@@ -405,7 +405,6 @@ async def health_check(request):
     return web.Response(text="OK", status=200)
 
 async def handle_webhook(request):
-    """Обработчик входящих обновлений от Telegram."""
     try:
         data = await request.json()
         update = Update(**data)
@@ -416,23 +415,24 @@ async def handle_webhook(request):
         return web.Response(status=500)
 
 async def main():
-    # 1. Устанавливаем вебхук
+    # Удаляем старый вебхук на случай глюков
+    await bot.delete_webhook()
+    
+    # Устанавливаем новый вебхук
     await bot.set_webhook(WEBHOOK_URL)
     print(f"✅ Webhook установлен: {WEBHOOK_URL}")
     
-    # 2. Создаём aiohttp приложение
+    # Запускаем aiohttp сервер
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
     
-    # 3. Запускаем сервер на порту 10000
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
     print("🔥 БОТ ЗАПУЩЕН НА WEBHOOKE!")
     
-    # 4. Держим сервер запущенным
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
