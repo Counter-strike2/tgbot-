@@ -1,41 +1,60 @@
 import asyncio
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message, Update
+import logging
+import sys
+import os
 from aiohttp import web
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
+# Ваши данные
 BOT_TOKEN = "8959860095:AAFsRWRSFQOQ84ww_HwxQ2IaI_24DYxTN2o"
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = "https://tgbot-1-qiyl.onrender.com" + WEBHOOK_PATH
 
+# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-@dp.message()
-async def echo(message: Message):
-    await message.answer(f"✅ Webhook alive! Your text: {message.text}")
+# Простые команды для проверки работы вебхука
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("Привет! Вебхук на aiogram v3 успешно работает! 🚀")
 
-async def health_check(request):
-    return web.Response(text="OK", status=200)
+@dp.message(Command("ping"))
+async def cmd_ping(message: types.Message):
+    await message.answer("Pong! 🏓 Бот на связи и отвечает через вебхук.")
 
-async def handle_webhook(request):
-    data = await request.json()
-    update = Update(**data)
-    await dp.process_update(update)
-    return web.Response(text="OK", status=200)
-
-async def main():
-    await bot.delete_webhook()
+# Функция, которая выполнится при старте бота
+async def on_startup(bot: Bot) -> None:
     await bot.set_webhook(WEBHOOK_URL)
-    print(f"✅ Webhook set to {WEBHOOK_URL}")
+    logging.info(f"Вебхук успешно установлен: {WEBHOOK_URL}")
+
+def main():
+    # Настройка логирования в консоль
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+    
+    # Создаем приложение aiohttp
     app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_post(WEBHOOK_PATH, handle_webhook)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 10000)
-    await site.start()
-    print("🔥 TEST BOT RUNNING")
-    await asyncio.Event().wait()
+
+    # Регистрируем стандартный обработчик вебхуков aiogram
+    webhook_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_handler.register(app, path=WEBHOOK_PATH)
+
+    # Привязываем жизненный цикл бота к приложению aiohttp
+    setup_application(app, dp, bot=bot)
+    
+    # Регистрируем событие запуска для установки вебхука
+    dp.startup.register(on_startup)
+
+    # Получаем порт от Render (либо используем 8080 по умолчанию)
+    port = int(os.environ.get("PORT", 8080))
+    
+    # Запускаем веб-сервер
+    web.run_app(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
