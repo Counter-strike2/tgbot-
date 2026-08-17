@@ -470,12 +470,23 @@ async def start_health_server():
     await site.start()
     print("✅ Health check server started on port 10000")
 
-async def main():
-    await init_db()
-    await load_settings()
-    await start_health_server()
-    print("🔥 БОТ ЗАПУЩЕН НА POLLING!")
-    await dp.start_polling(bot)
+async def handle(request):
+    return web.Response(text="Bot is running!")
 
-if __name__ == "__main__":
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+async def main():
+    await start_web_server()
+    # ТУТ ВАША СТРОКА ЗАПУСКА БОТА, НАПРИМЕР:
+    # await dp.start_polling(bot)
+
+if __name__ == '__main__':
     asyncio.run(main())
+
