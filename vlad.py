@@ -335,12 +335,10 @@ async def handle(message: Message):
                 return
 
         # ===== ПОДМЕНА И ССЫЛКИ ДЛЯ ВСЕХ СООБЩЕНИЙ =====
-        # Проверяем, не является ли сообщение командой
         is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид"] or \
                      low.startswith(("set ", ".мут ", "подмена ", "+линк"))
 
         if not is_command:
-            # Сначала проверяем ссылки
             if chat_id in link_chats:
                 try:
                     if not message.entities and CHANNEL_LINK not in text_raw:
@@ -350,7 +348,6 @@ async def handle(message: Message):
                 except:
                     pass
             
-            # Потом подмену текста
             if chat_id in substitutions:
                 try:
                     sub = substitutions[chat_id]
@@ -363,7 +360,6 @@ async def handle(message: Message):
     except Exception as e:
         print(f"❌ Ошибка в обработчике: {e}")
 
-# Кэширование входящих сообщений
 @dp.business_message()
 async def cache_incoming(message: Message):
     if not message.from_user or not message.text:
@@ -379,7 +375,6 @@ async def cache_incoming(message: Message):
         if len(msg_cache) > 3000:
             msg_cache.pop(next(iter(msg_cache)))
 
-# Обработка удалений через глобальный хендлер апдейтов aiogram 3
 @dp.update()
 async def global_update_handler(update: Update, bot: Bot):
     try:
@@ -403,9 +398,9 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         print(f"❌ Ошибка обработчика удалений: {e}")
 
-# ===== ЗАЩИТА ДЛЯ RENDER WEB SERVICE =====
+# ===== ПРАВИЛЬНЫЙ HEALTH-CHECK =====
 async def health_check(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="OK", status=200)
 
 async def start_health_server():
     app = web.Application()
