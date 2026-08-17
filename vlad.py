@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiohttp import web
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, BigInteger
 
 # 1. ПОДКЛЮЧЕНИЕ БАЗЫ ДАННЫХ AIVEN
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -13,14 +13,14 @@ engine = create_async_engine(DATABASE_URL, echo=True)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 Base = declarative_base()
 
-# Модель таблицы в бд
+# Модель таблицы в бд с поддержкой больших ID
 class UserMemory(Base):
     __tablename__ = 'user_memory'
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, unique=True, nullable=False)
+    user_id = Column(BigInteger, unique=True, nullable=False)  # Исправлено на BigInteger
     text = Column(String, nullable=False)
 
-# 2. ИНИЦИАЛИЗАЦИЯ БОТА С НОВЫМ ТОКЕНОМ
+# 2. ИНИЦИАЛИЗАЦИЯ БОТА С ВАШИМ АКТУАЛЬНЫМ ТОКЕНОМ
 TOKEN = "8959860095:AAG2K8ng2mpiukjTRbhxEWmsdFmVa3Sm9Q8"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -35,7 +35,7 @@ async def handle_message(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
 
-    # Логика: Запомни
+    # Логика: Запомни (работает с любым регистром букв)
     if text.lower().startswith("запомни"):
         data_to_save = text[7:].strip()
         if not data_to_save:
@@ -54,7 +54,7 @@ async def handle_message(message: types.Message):
                     session.add(UserMemory(user_id=user_id, text=data_to_save))
         await message.answer(f"Записал в базу данных Aiven: '{data_to_save}'")
 
-    # Логика: Скажи
+    # Логика: Скажи (работает с любым регистром букв)
     elif text.lower() == "скажи":
         async with async_session() as session:
             from sqlalchemy import select
