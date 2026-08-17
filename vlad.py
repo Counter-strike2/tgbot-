@@ -12,7 +12,7 @@ CHANNEL_LINK = "https://t.me/gotrollholl"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== ПОДКЛЮЧЕНИЕ К SUPABASE (ГОТОВАЯ СТРОКА) =====
+# ===== ПОДКЛЮЧЕНИЕ К SUPABASE =====
 DATABASE_URL = "postgresql://postgres:norik228norik228ffv@db.godgagzlxhccvdoqbjjt.supabase.co:5432/postgres"
 
 db_pool = None
@@ -25,7 +25,7 @@ async def init_db_pool():
         await load_settings()
         print("✅ Подключение к Supabase установлено!")
     except Exception as e:
-        print(f"❌ Ошибка подключения к базе: {e}")
+        print(f"❌ Ошибка подключения: {e}")
 
 async def create_tables():
     async with db_pool.acquire() as conn:
@@ -143,6 +143,7 @@ async def business_conn_handler(bc: BusinessConnection):
     global owner_id
     if owner_id is None:
         owner_id = bc.user.id
+        print(f"✅ Owner ID установлен: {owner_id}")
 
 async def delete_msg(chat_id, msg_id, bc_id):
     try:
@@ -215,6 +216,7 @@ async def handle(message: Message):
 
         if owner_id is None:
             owner_id = uid
+            print(f"✅ Owner ID установлен из сообщения: {owner_id}")
 
         if chat_id not in active_chats:
             if len(active_chats) >= 50:
@@ -233,6 +235,7 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
 
+        # Сохраняем в кэш для лога удалений
         if owner_id is not None and uid != owner_id:
             msg_cache[message.message_id] = {
                 "text": text_raw, 
@@ -252,10 +255,13 @@ async def handle(message: Message):
                 await delete_msg(chat_id, message.message_id, bc_id)
                 return
 
+        # ===== ОБРАБОТКА КОМАНД =====
+        # Определяем, является ли сообщение командой
         is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид"] or \
                      low.startswith(("set ", ".мут ", "подмена ", "+линк"))
 
-        if not is_command:
+        # Если это не команда и не сообщение от бота — применяем подмену и ссылки
+        if not is_command and uid != bot_id:
             if chat_id in link_chats:
                 try:
                     if not message.entities and CHANNEL_LINK not in text_raw:
@@ -274,6 +280,7 @@ async def handle(message: Message):
                 except:
                     pass
 
+        # Если это сообщение от владельца — обрабатываем команды
         if uid == owner_id:
             if low == "!команды":
                 await clear_cmd(chat_id, message.message_id, bc_id)
