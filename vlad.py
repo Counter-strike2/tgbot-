@@ -25,7 +25,6 @@ substitutions = {}
 msg_cache = {}          
 active_chats = set()    
 bot_id = None
-owner_id = None         
 
 def get_db():
     return sqlite3.connect(DB_NAME, timeout=20)
@@ -84,13 +83,6 @@ def save_substitution(chat_id, text, mode):
 
 init_db()
 
-@dp.business_connection()
-async def business_conn_handler(bc: BusinessConnection):
-    global owner_id
-    if owner_id is None:
-        owner_id = bc.user.id
-        print(f"✅ Owner ID установлен: {owner_id}")
-
 async def delete_msg(chat_id, msg_id, bc_id):
     try:
         await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[msg_id])
@@ -130,7 +122,7 @@ async def unmute(user_id):
 
 @dp.business_message()
 async def handle(message: Message):
-    global bot_id, owner_id, CHANNEL_LINK
+    global bot_id, CHANNEL_LINK
     
     try:
         if not message.from_user:
@@ -150,11 +142,6 @@ async def handle(message: Message):
         if not bc_id:
             return
 
-        # Если owner_id ещё не установлен, устанавливаем из первого бизнес-подключения
-        if owner_id is None:
-            owner_id = uid
-            print(f"✅ Owner ID установлен из сообщения: {owner_id}")
-
         if chat_id not in active_chats:
             if len(active_chats) >= 50:
                 old_chat = active_chats.pop()
@@ -172,201 +159,31 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
 
-        # Защита от чужих команд + кеш для лога удалений
-        if owner_id is not None and uid != owner_id:
-            msg_cache[message.message_id] = {
-                "text": text_raw, 
-                "user": message.from_user.first_name,
-                "user_id": uid,
-                "chat_id": chat_id,
-                "bc_id": bc_id
-            }
-            if len(msg_cache) > 3000:
-                msg_cache.pop(next(iter(msg_cache)))
-                
-            if chat_id in reply_guard_chats and message.reply_to_message:
-                await delete_msg(chat_id, message.message_id, bc_id)
-                return
-                
-            if uid in mutes and datetime.now() < mutes[uid]["until"]:
-                await delete_msg(chat_id, message.message_id, bc_id)
-                return
+        # Кеш для лога удалений
+        msg_cache[message.message_id] = {
+            "text": text_raw, 
+            "user": message.from_user.first_name,
+            "user_id": uid,
+            "chat_id": chat_id,
+            "bc_id": bc_id
+        }
+        if len(msg_cache) > 3000:
+            msg_cache.pop(next(iter(msg_cache)))
             
-            # Добавляем обработку ссылок и подмены для всех пользователей
-            # Проверяем, не является ли сообщение командой
-            is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид"] or \
-                         low.startswith(("set ", ".мут ", "подмена ", "+линк"))
-
-            if not is_command:
-                if chat_id in link_chats:
-                    try:
-                        if not message.entities and CHANNEL_LINK not in text_raw:
-                            new_text = f'<a href="{CHANNEL_LINK}"><u>{text_raw}</u></a>'
-                            await bot.edit_message_text(chat_id, message.message_id, new_text, parse_mode="HTML", disable_web_page_preview=True, business_connection_id=bc_id)
-                            return
-                    except:
-                        pass
-                
-                if chat_id in substitutions:
-                    try:
-                        sub = substitutions[chat_id]
-                        new_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
-                        await bot.edit_message_text(chat_id, message.message_id, new_text, business_connection_id=bc_id)
-                        return
-                    except:
-                        pass
+        # Проверка на реплай-защиту и мут - работает для ВСЕХ
+        if chat_id in reply_guard_chats and message.reply_to_message:
+            await delete_msg(chat_id, message.message_id, bc_id)
+            return
+            
+        if uid in mutes and datetime.now() < mutes[uid]["until"]:
+            await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # ===== КОМАНДЫ ВЛАДЕЛЬЦА =====
-        if uid == owner_id:
-            if low == "ss":
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                reply_to = message.reply_to_message.message_id if message.reply_to_message else None
-                text = user_spam_texts.get(uid, "Ты фрик!")
-                if chat_id in spam_tasks:
-                    spam_tasks[chat_id].cancel()
-                task = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
-                spam_tasks[chat_id] = task
-                await bot.send_message(chat_id, "🚀 Спам запущен!", business_connection_id=bc_id)
-                return
-
-            if low == "dd":
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                if chat_id in spam_tasks:
-                    spam_tasks[chat_id].cancel()
-                    del spam_tasks[chat_id]
-                    await bot.send_message(chat_id, "🛑 Спам остановлен!", business_connection_id=bc_id)
-                return
-
-            if low.startswith("set "):
-                new_spam_text = text_raw[4:].strip()
-                user_spam_texts[uid] = new_spam_text
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id, f"📝 Текст спама изменен на: <i>{new_spam_text}</i>", parse_mode="html", business_connection_id=bc_id)
-                return
-
-            if low.startswith(".мут "):
-                try:
-                    minutes = int(re.search(r"\d+", text_raw).group())
-                    target = message.reply_to_message.from_user.id if message.reply_to_message else chat_id
-                    mutes[target] = {"time": timedelta(minutes=minutes), "until": datetime.now() + timedelta(minutes=minutes)}
-                    asyncio.create_task(unmute(target))
-                    await clear_cmd(chat_id, message.message_id, bc_id)
-                    await bot.send_message(chat_id, f"🔇 Пользователь замучен на {minutes} мин.", business_connection_id=bc_id)
-                except:
-                    pass
-                return
-
-            if low == ".размут":
-                target = message.reply_to_message.from_user.id if message.reply_to_message else chat_id
-                if target in mutes:
-                    del mutes[target]
-                    await clear_cmd(chat_id, message.message_id, bc_id)
-                    await bot.send_message(chat_id, "🔊 Мут успешно снят!", business_connection_id=bc_id)
-                return
-
-            if low == ".стоп":
-                save_setting(chat_id, 'enabled_links', False)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id, "🛑 Авто-ссылки в чате выключены.", business_connection_id=bc_id)
-                return
-
-            if low == ".старт":
-                save_setting(chat_id, 'enabled_links', True)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id, "✅ Авто-ссылки в чате включены!", business_connection_id=bc_id)
-                return
-
-            if low == "печать -":
-                save_setting(chat_id, 'typing_disabled', True)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id, "⌨️ В этом чате печать выключена и сохранена.", business_connection_id=bc_id)
-                return
-
-            if low == "печать +":
-                save_setting(chat_id, 'typing_disabled', False)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                if chat_id not in typing_tasks:
-                    typing_tasks[chat_id] = asyncio.create_task(typing_worker(chat_id, bc_id))
-                await bot.send_message(chat_id, "⌨️ В этом чате печать включена и сохранена!", business_connection_id=bc_id)
-                return
-
-            if low.startswith("подмена "):
-                parts = text_raw.split(maxsplit=2)
-                if len(parts) >= 2:
-                    if parts[1].lower() == "выкл":
-                        save_substitution(chat_id, None, None)
-                        await bot.send_message(chat_id, "❌ Подмена текста выключена.", business_connection_id=bc_id)
-                    else:
-                        mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
-                        sub_text = parts[1]
-                        save_substitution(chat_id, sub_text, mode)
-                        await bot.send_message(chat_id, f"🔄 Подмена сохранена!\nШаблон: <b>{sub_text}</b> (Режим {mode})", parse_mode="html", business_connection_id=bc_id)
-                    await clear_cmd(chat_id, message.message_id, bc_id)
-                return
-
-            if low.startswith("+линк"):
-                parts = text_raw.split(maxsplit=1)
-                if len(parts) == 1:
-                    await bot.send_message(chat_id, f"🔗 Текущая ссылка: {CHANNEL_LINK}", business_connection_id=bc_id)
-                else:
-                    new_link = parts[1].strip()
-                    if not new_link.startswith("http"):
-                        new_link = "https://t.me/" + new_link.lstrip("@")
-                    CHANNEL_LINK = new_link
-                    await clear_cmd(chat_id, message.message_id, bc_id)
-                    await bot.send_message(chat_id, f"🔗 Ссылка изменена на: {CHANNEL_LINK}", business_connection_id=bc_id)
-                return
-
-            if low == "+реплай":
-                save_setting(chat_id, 'reply_guard', True)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id, "🛡 Защита от реплаев включена!", business_connection_id=bc_id)
-                return
-
-            if low == "-реплай":
-                save_setting(chat_id, 'reply_guard', False)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id, "🛡 Защита от реплаев выключена.", business_connection_id=bc_id)
-                return
-
-            if low in ["мой ид", "моид"]:
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id, f"🆔 Твой ID: <code>{uid}</code>", parse_mode="html", business_connection_id=bc_id)
-                return
-
-            if low in ["твой ид", "твоид"]:
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                if message.reply_to_message:
-                    await bot.send_message(chat_id, f"🆔 ID пользователя: <code>{message.reply_to_message.from_user.id}</code>", parse_mode="html", business_connection_id=bc_id)
-                else:
-                    await bot.send_message(chat_id, "❌ Ответьте на сообщение пользователя!", business_connection_id=bc_id)
-                return
-
-            if low == "!команды":
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id,
-                    "📋 **КОМАНДЫ БОТА:**\n\n"
-                    "`.мут X` — мут\n"
-                    "`.размут` — снять мут\n"
-                    "`.стоп` / `.старт` — ссылки\n"
-                    "`печать +` / `печать -` — вечная печать (сохраняется)\n"
-                    "`подмена текст 1/2` — подмена (сохраняется)\n"
-                    "`подмена выкл` — выкл подмену\n"
-                    "`ss` — спам\n"
-                    "`dd` — стоп спам\n"
-                    "`set текст` — текст спама\n"
-                    "`+реплай` / `-реплай` — защита\n"
-                    "`+линк` — сменить ссылку\n"
-                    "`мой ид` / `твой ид` — ID",
-                    parse_mode="Markdown", business_connection_id=bc_id
-                )
-                return
-
-        # ===== ПОДМЕНА И ССЫЛКИ ДЛЯ ВСЕХ СООБЩЕНИЙ (если не команда) =====
-        is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид"] or \
+        # Проверка, является ли сообщение командой
+        is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид", "ss", "dd"] or \
                      low.startswith(("set ", ".мут ", "подмена ", "+линк"))
 
+        # ===== ОБРАБОТКА ССЫЛОК И ПОДМЕНЫ ДЛЯ ВСЕХ (если не команда) =====
         if not is_command:
             if chat_id in link_chats:
                 try:
@@ -385,6 +202,152 @@ async def handle(message: Message):
                     return
                 except:
                     pass
+            return
+
+        # ===== КОМАНДЫ РАБОТАЮТ ДЛЯ ВСЕХ В ЧАТЕ =====
+        if low == "ss":
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            reply_to = message.reply_to_message.message_id if message.reply_to_message else None
+            text = user_spam_texts.get(chat_id, "Ты фрик!")
+            if chat_id in spam_tasks:
+                spam_tasks[chat_id].cancel()
+            task = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
+            spam_tasks[chat_id] = task
+            await bot.send_message(chat_id, "🚀 Спам запущен!", business_connection_id=bc_id)
+            return
+
+        if low == "dd":
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            if chat_id in spam_tasks:
+                spam_tasks[chat_id].cancel()
+                del spam_tasks[chat_id]
+                await bot.send_message(chat_id, "🛑 Спам остановлен!", business_connection_id=bc_id)
+            return
+
+        if low.startswith("set "):
+            new_spam_text = text_raw[4:].strip()
+            user_spam_texts[chat_id] = new_spam_text
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, f"📝 Текст спама изменен на: <i>{new_spam_text}</i>", parse_mode="html", business_connection_id=bc_id)
+            return
+
+        if low.startswith(".мут "):
+            try:
+                minutes = int(re.search(r"\d+", text_raw).group())
+                target = message.reply_to_message.from_user.id if message.reply_to_message else chat_id
+                mutes[target] = {"time": timedelta(minutes=minutes), "until": datetime.now() + timedelta(minutes=minutes)}
+                asyncio.create_task(unmute(target))
+                await clear_cmd(chat_id, message.message_id, bc_id)
+                await bot.send_message(chat_id, f"🔇 Пользователь замучен на {minutes} мин.", business_connection_id=bc_id)
+            except:
+                pass
+            return
+
+        if low == ".размут":
+            target = message.reply_to_message.from_user.id if message.reply_to_message else chat_id
+            if target in mutes:
+                del mutes[target]
+                await clear_cmd(chat_id, message.message_id, bc_id)
+                await bot.send_message(chat_id, "🔊 Мут успешно снят!", business_connection_id=bc_id)
+            return
+
+        if low == ".стоп":
+            save_setting(chat_id, 'enabled_links', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, "🛑 Авто-ссылки в чате выключены.", business_connection_id=bc_id)
+            return
+
+        if low == ".старт":
+            save_setting(chat_id, 'enabled_links', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, "✅ Авто-ссылки в чате включены!", business_connection_id=bc_id)
+            return
+
+        if low == "печать -":
+            save_setting(chat_id, 'typing_disabled', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, "⌨️ В этом чате печать выключена и сохранена.", business_connection_id=bc_id)
+            return
+
+        if low == "печать +":
+            save_setting(chat_id, 'typing_disabled', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            if chat_id not in typing_tasks:
+                typing_tasks[chat_id] = asyncio.create_task(typing_worker(chat_id, bc_id))
+            await bot.send_message(chat_id, "⌨️ В этом чате печать включена и сохранена!", business_connection_id=bc_id)
+            return
+
+        if low.startswith("подмена "):
+            parts = text_raw.split(maxsplit=2)
+            if len(parts) >= 2:
+                if parts[1].lower() == "выкл":
+                    save_substitution(chat_id, None, None)
+                    await bot.send_message(chat_id, "❌ Подмена текста выключена.", business_connection_id=bc_id)
+                else:
+                    mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
+                    sub_text = parts[1]
+                    save_substitution(chat_id, sub_text, mode)
+                    await bot.send_message(chat_id, f"🔄 Подмена сохранена!\nШаблон: <b>{sub_text}</b> (Режим {mode})", parse_mode="html", business_connection_id=bc_id)
+                await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+
+        if low.startswith("+линк"):
+            parts = text_raw.split(maxsplit=1)
+            if len(parts) == 1:
+                await bot.send_message(chat_id, f"🔗 Текущая ссылка: {CHANNEL_LINK}", business_connection_id=bc_id)
+            else:
+                new_link = parts[1].strip()
+                if not new_link.startswith("http"):
+                    new_link = "https://t.me/" + new_link.lstrip("@")
+                CHANNEL_LINK = new_link
+                await clear_cmd(chat_id, message.message_id, bc_id)
+                await bot.send_message(chat_id, f"🔗 Ссылка изменена на: {CHANNEL_LINK}", business_connection_id=bc_id)
+            return
+
+        if low == "+реплай":
+            save_setting(chat_id, 'reply_guard', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, "🛡 Защита от реплаев включена!", business_connection_id=bc_id)
+            return
+
+        if low == "-реплай":
+            save_setting(chat_id, 'reply_guard', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, "🛡 Защита от реплаев выключена.", business_connection_id=bc_id)
+            return
+
+        if low in ["мой ид", "моид"]:
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, f"🆔 Твой ID: <code>{uid}</code>", parse_mode="html", business_connection_id=bc_id)
+            return
+
+        if low in ["твой ид", "твоид"]:
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            if message.reply_to_message:
+                await bot.send_message(chat_id, f"🆔 ID пользователя: <code>{message.reply_to_message.from_user.id}</code>", parse_mode="html", business_connection_id=bc_id)
+            else:
+                await bot.send_message(chat_id, "❌ Ответьте на сообщение пользователя!", business_connection_id=bc_id)
+            return
+
+        if low == "!команды":
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id,
+                "📋 **КОМАНДЫ БОТА:**\n\n"
+                "`.мут X` — мут на X минут\n"
+                "`.размут` — снять мут\n"
+                "`.стоп` / `.старт` — авто-ссылки\n"
+                "`печать +` / `печать -` — вечная печать\n"
+                "`подмена текст 1/2` — подмена текста\n"
+                "`подмена выкл` — выкл подмену\n"
+                "`ss` — спам (с ответа)\n"
+                "`dd` — стоп спам\n"
+                "`set текст` — текст спама\n"
+                "`+реплай` / `-реплай` — защита от реплаев\n"
+                "`+линк` — сменить ссылку\n"
+                "`мой ид` / `твой ид` — ID",
+                parse_mode="Markdown", business_connection_id=bc_id
+            )
+            return
                 
     except Exception as e:
         print(f"❌ Ошибка в обработчике: {e}")
@@ -393,16 +356,15 @@ async def handle(message: Message):
 async def cache_incoming(message: Message):
     if not message.from_user or not message.text:
         return
-    if owner_id is not None and message.from_user.id != owner_id:
-        msg_cache[message.message_id] = {
-            "text": message.text,
-            "user": message.from_user.first_name,
-            "user_id": message.from_user.id,
-            "chat_id": message.chat.id,
-            "bc_id": message.business_connection_id
-        }
-        if len(msg_cache) > 3000:
-            msg_cache.pop(next(iter(msg_cache)))
+    msg_cache[message.message_id] = {
+        "text": message.text,
+        "user": message.from_user.first_name,
+        "user_id": message.from_user.id,
+        "chat_id": message.chat.id,
+        "bc_id": message.business_connection_id
+    }
+    if len(msg_cache) > 3000:
+        msg_cache.pop(next(iter(msg_cache)))
 
 @dp.update()
 async def global_update_handler(update: Update, bot: Bot):
