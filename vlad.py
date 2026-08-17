@@ -179,32 +179,50 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # Проверка, является ли сообщение командой
-        is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид", "ss", "dd"] or \
-                     low.startswith(("set ", ".мут ", "подмена ", "+линк"))
-
-        # ===== ОБРАБОТКА ССЫЛОК И ПОДМЕНЫ ДЛЯ ВСЕХ (если не команда) =====
-        if not is_command:
-            if chat_id in link_chats:
-                try:
-                    if not message.entities and CHANNEL_LINK not in text_raw:
-                        new_text = f'<a href="{CHANNEL_LINK}"><u>{text_raw}</u></a>'
-                        await bot.edit_message_text(chat_id, message.message_id, new_text, parse_mode="HTML", disable_web_page_preview=True, business_connection_id=bc_id)
-                        return
-                except:
-                    pass
-            
-            if chat_id in substitutions:
-                try:
-                    sub = substitutions[chat_id]
-                    new_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
-                    await bot.edit_message_text(chat_id, message.message_id, new_text, business_connection_id=bc_id)
-                    return
-                except:
-                    pass
+        # ===== ОБРАБОТКА КОМАНД =====
+        # Команды настройки ссылок
+        if low == ".стоп":
+            save_setting(chat_id, 'enabled_links', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, "🛑 Авто-ссылки в чате выключены.", business_connection_id=bc_id)
             return
 
-        # ===== КОМАНДЫ РАБОТАЮТ ДЛЯ ВСЕХ В ЧАТЕ =====
+        if low == ".старт":
+            save_setting(chat_id, 'enabled_links', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            await bot.send_message(chat_id, "✅ Авто-ссылки в чате включены!", business_connection_id=bc_id)
+            return
+
+        # Команда смены ссылки
+        if low.startswith("+линк"):
+            parts = text_raw.split(maxsplit=1)
+            if len(parts) == 1:
+                await bot.send_message(chat_id, f"🔗 Текущая ссылка: {CHANNEL_LINK}", business_connection_id=bc_id)
+            else:
+                new_link = parts[1].strip()
+                if not new_link.startswith("http"):
+                    new_link = "https://t.me/" + new_link.lstrip("@")
+                CHANNEL_LINK = new_link
+                await clear_cmd(chat_id, message.message_id, bc_id)
+                await bot.send_message(chat_id, f"🔗 Ссылка изменена на: {CHANNEL_LINK}", business_connection_id=bc_id)
+            return
+
+        # Команда подмены
+        if low.startswith("подмена "):
+            parts = text_raw.split(maxsplit=2)
+            if len(parts) >= 2:
+                if parts[1].lower() == "выкл":
+                    save_substitution(chat_id, None, None)
+                    await bot.send_message(chat_id, "❌ Подмена текста выключена.", business_connection_id=bc_id)
+                else:
+                    mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
+                    sub_text = parts[1]
+                    save_substitution(chat_id, sub_text, mode)
+                    await bot.send_message(chat_id, f"🔄 Подмена сохранена!\nШаблон: <b>{sub_text}</b> (Режим {mode})", parse_mode="html", business_connection_id=bc_id)
+                await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+
+        # Остальные команды
         if low == "ss":
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
@@ -251,18 +269,6 @@ async def handle(message: Message):
                 await bot.send_message(chat_id, "🔊 Мут успешно снят!", business_connection_id=bc_id)
             return
 
-        if low == ".стоп":
-            save_setting(chat_id, 'enabled_links', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            await bot.send_message(chat_id, "🛑 Авто-ссылки в чате выключены.", business_connection_id=bc_id)
-            return
-
-        if low == ".старт":
-            save_setting(chat_id, 'enabled_links', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            await bot.send_message(chat_id, "✅ Авто-ссылки в чате включены!", business_connection_id=bc_id)
-            return
-
         if low == "печать -":
             save_setting(chat_id, 'typing_disabled', True)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -275,33 +281,6 @@ async def handle(message: Message):
             if chat_id not in typing_tasks:
                 typing_tasks[chat_id] = asyncio.create_task(typing_worker(chat_id, bc_id))
             await bot.send_message(chat_id, "⌨️ В этом чате печать включена и сохранена!", business_connection_id=bc_id)
-            return
-
-        if low.startswith("подмена "):
-            parts = text_raw.split(maxsplit=2)
-            if len(parts) >= 2:
-                if parts[1].lower() == "выкл":
-                    save_substitution(chat_id, None, None)
-                    await bot.send_message(chat_id, "❌ Подмена текста выключена.", business_connection_id=bc_id)
-                else:
-                    mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
-                    sub_text = parts[1]
-                    save_substitution(chat_id, sub_text, mode)
-                    await bot.send_message(chat_id, f"🔄 Подмена сохранена!\nШаблон: <b>{sub_text}</b> (Режим {mode})", parse_mode="html", business_connection_id=bc_id)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-
-        if low.startswith("+линк"):
-            parts = text_raw.split(maxsplit=1)
-            if len(parts) == 1:
-                await bot.send_message(chat_id, f"🔗 Текущая ссылка: {CHANNEL_LINK}", business_connection_id=bc_id)
-            else:
-                new_link = parts[1].strip()
-                if not new_link.startswith("http"):
-                    new_link = "https://t.me/" + new_link.lstrip("@")
-                CHANNEL_LINK = new_link
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                await bot.send_message(chat_id, f"🔗 Ссылка изменена на: {CHANNEL_LINK}", business_connection_id=bc_id)
             return
 
         if low == "+реплай":
@@ -335,19 +314,52 @@ async def handle(message: Message):
                 "📋 **КОМАНДЫ БОТА:**\n\n"
                 "`.мут X` — мут на X минут\n"
                 "`.размут` — снять мут\n"
-                "`.стоп` / `.старт` — авто-ссылки\n"
+                "`.стоп` / `.старт` — включить/выключить ссылки\n"
                 "`печать +` / `печать -` — вечная печать\n"
-                "`подмена текст 1/2` — подмена текста\n"
-                "`подмена выкл` — выкл подмену\n"
-                "`ss` — спам (с ответа)\n"
+                "`подмена текст 1` — текст в начало\n"
+                "`подмена текст 2` — текст в конец\n"
+                "`подмена выкл` — выключить подмену\n"
+                "`ss` — спам\n"
                 "`dd` — стоп спам\n"
-                "`set текст` — текст спама\n"
+                "`set текст` — текст для спама\n"
                 "`+реплай` / `-реплай` — защита от реплаев\n"
-                "`+линк` — сменить ссылку\n"
+                "`+линк ссылка` — сменить ссылку\n"
                 "`мой ид` / `твой ид` — ID",
                 parse_mode="Markdown", business_connection_id=bc_id
             )
             return
+
+        # ===== ЕСЛИ НЕ КОМАНДА - ПРИМЕНЯЕМ ПОДМЕНУ И ССЫЛКИ =====
+        # Сначала подмена
+        if chat_id in substitutions:
+            try:
+                sub = substitutions[chat_id]
+                if sub["mode"] == 1:
+                    new_text = f"{sub['text']} {text_raw}"
+                else:
+                    new_text = f"{text_raw} {sub['text']}"
+                await bot.edit_message_text(chat_id, message.message_id, new_text, business_connection_id=bc_id)
+                return
+            except:
+                pass
+        
+        # Потом ссылка (если подмена не сработала)
+        if chat_id in link_chats:
+            try:
+                # Проверяем, есть ли уже ссылка в сообщении
+                has_link = False
+                if message.entities:
+                    for entity in message.entities:
+                        if entity.type in ["url", "text_link"]:
+                            has_link = True
+                            break
+                
+                if not has_link and CHANNEL_LINK not in text_raw:
+                    new_text = f'<a href="{CHANNEL_LINK}"><u>{text_raw}</u></a>'
+                    await bot.edit_message_text(chat_id, message.message_id, new_text, parse_mode="HTML", disable_web_page_preview=True, business_connection_id=bc_id)
+                    return
+            except:
+                pass
                 
     except Exception as e:
         print(f"❌ Ошибка в обработчике: {e}")
