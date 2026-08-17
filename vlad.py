@@ -94,9 +94,12 @@ async def delete_msg(chat_id, msg_id, bc_id):
 
 async def clear_cmd(chat_id, msg_id, bc_id):
     try:
-        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=".", business_connection_id=bc_id)
+        await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[msg_id])
     except:
-        pass
+        try:
+            await bot.delete_message(chat_id, msg_id)
+        except:
+            pass
 
 async def typing_worker(chat_id, bc_id):
     try:
@@ -327,6 +330,7 @@ async def handle(message: Message):
 
         # ===== ЕСЛИ НЕ КОМАНДА - ПРИМЕНЯЕМ ПОДМЕНУ И ССЫЛКИ =====
         final_text = text_raw
+        need_modify = False
         
         # 1. Сначала применяем подмену
         if chat_id in substitutions:
@@ -336,6 +340,7 @@ async def handle(message: Message):
                     final_text = f"{sub['text']} {text_raw}"
                 else:
                     final_text = f"{text_raw} {sub['text']}"
+                need_modify = True
             except:
                 pass
         
@@ -350,34 +355,42 @@ async def handle(message: Message):
                             has_link = True
                             break
                 
-                # Проверяем, есть ли ссылка в тексте
                 if not has_link and CHANNEL_LINK not in text_raw:
-                    # Оборачиваем ВЕСЬ финальный текст в ссылку
                     final_text = f'<a href="{CHANNEL_LINK}"><u>{final_text}</u></a>'
-                    await bot.edit_message_text(
-                        chat_id, 
-                        message.message_id, 
-                        final_text, 
-                        parse_mode="HTML", 
-                        disable_web_page_preview=True, 
-                        business_connection_id=bc_id
-                    )
-                    return
+                    need_modify = True
             except:
                 pass
         
-        # Если ничего не изменилось, но была подмена без ссылки
-        if final_text != text_raw and chat_id not in link_chats:
+        # Если нужно модифицировать - удаляем оригинал и отправляем новое
+        if need_modify:
+            # Удаляем оригинальное сообщение
             try:
-                await bot.edit_message_text(
-                    chat_id, 
-                    message.message_id, 
-                    final_text, 
-                    business_connection_id=bc_id
-                )
-                return
+                await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[message.message_id])
             except:
-                pass
+                try:
+                    await bot.delete_message(chat_id, message.message_id)
+                except:
+                    pass
+            
+            # Отправляем новое сообщение с модифицированным текстом
+            try:
+                if chat_id in link_chats and '<a href=' in final_text:
+                    await bot.send_message(
+                        chat_id,
+                        final_text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                        business_connection_id=bc_id
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id,
+                        final_text,
+                        business_connection_id=bc_id
+                    )
+            except Exception as e:
+                print(f"Ошибка отправки модифицированного сообщения: {e}")
+                # Если не получилось отправить новое - ничего не делаем
                 
     except Exception as e:
         print(f"❌ Ошибка в обработчике: {e}")
