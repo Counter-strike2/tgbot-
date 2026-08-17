@@ -1,4 +1,5 @@
 aiogram
 aiohttp
+sqlalchemy
 asyncpg
-sqlalchemy 
+psycopg2
