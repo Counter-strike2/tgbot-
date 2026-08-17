@@ -22,7 +22,7 @@ class UserMemory(Base):
     text = Column(String, nullable=False)
 
 # 2. ИНИЦИАЛИЗАЦИЯ БОТА (Вставьте ваш токен вместо заглушки)
-TOKEN = "8959860095:ВСТАВЬ_СЮДА_НОВЫЙ_ТОКЕН_ИЗ_BOTFATHER"
+TOKEN = "8959860095:AAFsRWRSFQOQ84ww_HwxQ2IaI_24DYxTN2o"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
