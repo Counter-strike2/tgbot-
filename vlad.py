@@ -170,7 +170,7 @@ async def handle(message: Message):
         if len(msg_cache) > 3000:
             msg_cache.pop(next(iter(msg_cache)))
             
-        # Проверка на реплай-защиту и мут - работает для ВСЕХ
+        # Проверка на реплай-защиту и мут
         if chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
@@ -180,7 +180,6 @@ async def handle(message: Message):
             return
 
         # ===== ОБРАБОТКА КОМАНД =====
-        # Команды настройки ссылок
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -193,7 +192,6 @@ async def handle(message: Message):
             await bot.send_message(chat_id, "✅ Авто-ссылки в чате включены!", business_connection_id=bc_id)
             return
 
-        # Команда смены ссылки
         if low.startswith("+линк"):
             parts = text_raw.split(maxsplit=1)
             if len(parts) == 1:
@@ -207,7 +205,6 @@ async def handle(message: Message):
                 await bot.send_message(chat_id, f"🔗 Ссылка изменена на: {CHANNEL_LINK}", business_connection_id=bc_id)
             return
 
-        # Команда подмены
         if low.startswith("подмена "):
             parts = text_raw.split(maxsplit=2)
             if len(parts) >= 2:
@@ -222,7 +219,6 @@ async def handle(message: Message):
                 await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # Остальные команды
         if low == "ss":
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
@@ -330,20 +326,20 @@ async def handle(message: Message):
             return
 
         # ===== ЕСЛИ НЕ КОМАНДА - ПРИМЕНЯЕМ ПОДМЕНУ И ССЫЛКИ =====
-        # Сначала подмена
+        final_text = text_raw
+        
+        # 1. Сначала применяем подмену
         if chat_id in substitutions:
             try:
                 sub = substitutions[chat_id]
                 if sub["mode"] == 1:
-                    new_text = f"{sub['text']} {text_raw}"
+                    final_text = f"{sub['text']} {text_raw}"
                 else:
-                    new_text = f"{text_raw} {sub['text']}"
-                await bot.edit_message_text(chat_id, message.message_id, new_text, business_connection_id=bc_id)
-                return
+                    final_text = f"{text_raw} {sub['text']}"
             except:
                 pass
         
-        # Потом ссылка (если подмена не сработала)
+        # 2. Потом добавляем ссылку (если включено)
         if chat_id in link_chats:
             try:
                 # Проверяем, есть ли уже ссылка в сообщении
@@ -354,10 +350,32 @@ async def handle(message: Message):
                             has_link = True
                             break
                 
+                # Проверяем, есть ли ссылка в тексте
                 if not has_link and CHANNEL_LINK not in text_raw:
-                    new_text = f'<a href="{CHANNEL_LINK}"><u>{text_raw}</u></a>'
-                    await bot.edit_message_text(chat_id, message.message_id, new_text, parse_mode="HTML", disable_web_page_preview=True, business_connection_id=bc_id)
+                    # Оборачиваем ВЕСЬ финальный текст в ссылку
+                    final_text = f'<a href="{CHANNEL_LINK}"><u>{final_text}</u></a>'
+                    await bot.edit_message_text(
+                        chat_id, 
+                        message.message_id, 
+                        final_text, 
+                        parse_mode="HTML", 
+                        disable_web_page_preview=True, 
+                        business_connection_id=bc_id
+                    )
                     return
+            except:
+                pass
+        
+        # Если ничего не изменилось, но была подмена без ссылки
+        if final_text != text_raw and chat_id not in link_chats:
+            try:
+                await bot.edit_message_text(
+                    chat_id, 
+                    message.message_id, 
+                    final_text, 
+                    business_connection_id=bc_id
+                )
+                return
             except:
                 pass
                 
