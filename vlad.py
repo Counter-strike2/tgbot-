@@ -1,10 +1,15 @@
+import os
 import asyncio
 import re
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessConnection, Update
 from aiohttp import web
-import asyncpg
+from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import Column, BigInteger, String, Integer, DateTime
+from sqlalchemy.ext.declarative import declarative_base
 
 BOT_TOKEN = "8959860095:AAFsRWRSFQOQ84ww_HwxQ2IaI_24DYxTN2o"
 CHANNEL_LINK = "https://t.me/gotrollholl"
@@ -12,79 +17,110 @@ CHANNEL_LINK = "https://t.me/gotrollholl"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== ПОДКЛЮЧЕНИЕ К SUPABASE =====
-DATABASE_URL = "postgresql://postgres:norik228norik228ffv@db.godgagzlxhccvdoqbjjt.supabase.co:5432/postgres"
+# ===== ПОДКЛЮЧЕНИЕ К БАЗЕ ЧЕРЕЗ ПЕРЕМЕННУЮ ОКРУЖЕНИЯ =====
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL не установлена в переменных окружения Render!")
 
-db_pool = None
+# Конвертируем синхронную URL в асинхронную для asyncpg
+ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-async def init_db_pool():
-    global db_pool
-    try:
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
-        await create_tables()
-        await load_settings()
-        print("✅ Подключение к Supabase установлено!")
-    except Exception as e:
-        print(f"❌ Ошибка подключения: {e}")
+Base = declarative_base()
+engine = create_async_engine(ASYNC_DATABASE_URL, echo=True)
+AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-async def create_tables():
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_settings (
-                chat_id BIGINT,
-                setting_type TEXT,
-                PRIMARY KEY (chat_id, setting_type)
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS substitutions (
-                chat_id BIGINT PRIMARY KEY,
-                text TEXT,
-                mode INTEGER
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_spam (
-                user_id BIGINT PRIMARY KEY,
-                spam_text TEXT
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS mutes (
-                user_id BIGINT PRIMARY KEY,
-                until TIMESTAMP,
-                chat_id BIGINT
-            )
-        """)
-        print("✅ Таблицы созданы!")
+class ChatSetting(Base):
+    __tablename__ = 'chat_settings'
+    chat_id = Column(BigInteger, primary_key=True)
+    setting_type = Column(String, primary_key=True)
+
+class Substitution(Base):
+    __tablename__ = 'substitutions'
+    chat_id = Column(BigInteger, primary_key=True)
+    text = Column(String)
+    mode = Column(Integer)
+
+class UserSpam(Base):
+    __tablename__ = 'user_spam'
+    user_id = Column(BigInteger, primary_key=True)
+    spam_text = Column(String)
+
+class Mute(Base):
+    __tablename__ = 'mutes'
+    user_id = Column(BigInteger, primary_key=True)
+    until = Column(DateTime)
+    chat_id = Column(BigInteger)
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 async def load_settings():
     global link_chats, reply_guard_chats, typing_disabled_chats, substitutions, user_spam_texts, mutes
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT chat_id FROM chat_settings WHERE setting_type = 'enabled_links'")
-        link_chats = {row['chat_id'] for row in rows}
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(text("SELECT chat_id FROM chat_settings WHERE setting_type = 'enabled_links'"))
+        link_chats = {row[0] for row in result.fetchall()}
         
-        rows = await conn.fetch("SELECT chat_id FROM chat_settings WHERE setting_type = 'reply_guard'")
-        reply_guard_chats = {row['chat_id'] for row in rows}
+        result = await session.execute(text("SELECT chat_id FROM chat_settings WHERE setting_type = 'reply_guard'"))
+        reply_guard_chats = {row[0] for row in result.fetchall()}
         
-        rows = await conn.fetch("SELECT chat_id FROM chat_settings WHERE setting_type = 'typing_disabled'")
-        typing_disabled_chats = {row['chat_id'] for row in rows}
+        result = await session.execute(text("SELECT chat_id FROM chat_settings WHERE setting_type = 'typing_disabled'"))
+        typing_disabled_chats = {row[0] for row in result.fetchall()}
         
-        rows = await conn.fetch("SELECT chat_id, text, mode FROM substitutions")
-        substitutions = {row['chat_id']: {"text": row['text'], "mode": row['mode']} for row in rows}
+        result = await session.execute(text("SELECT chat_id, text, mode FROM substitutions"))
+        substitutions = {row[0]: {"text": row[1], "mode": row[2]} for row in result.fetchall()}
         
-        rows = await conn.fetch("SELECT user_id, spam_text FROM user_spam")
-        user_spam_texts = {row['user_id']: row['spam_text'] for row in rows}
+        result = await session.execute(text("SELECT user_id, spam_text FROM user_spam"))
+        user_spam_texts = {row[0]: row[1] for row in result.fetchall()}
         
-        rows = await conn.fetch("SELECT user_id, until, chat_id FROM mutes")
-        for row in rows:
-            if row['until'] > datetime.now():
-                mutes[row['user_id']] = {
-                    "until": row['until'],
-                    "chat_id": row['chat_id'],
-                    "time": row['until'] - datetime.now()
-                }
-        print(f"✅ Загружено: ссылок={len(link_chats)}, подмен={len(substitutions)}")
+        result = await session.execute(text("SELECT user_id, until, chat_id FROM mutes"))
+        for row in result.fetchall():
+            if row[1] > datetime.now():
+                mutes[row[0]] = {"until": row[1], "chat_id": row[2], "time": row[1] - datetime.now()}
+        print(f"✅ Загружено из БД: ссылок={len(link_chats)}, подмен={len(substitutions)}")
+
+async def save_setting(chat_id, setting_type, enabled):
+    async with AsyncSessionLocal() as session:
+        if enabled:
+            await session.execute(text("INSERT OR IGNORE INTO chat_settings VALUES (:chat_id, :setting_type)"), {"chat_id": chat_id, "setting_type": setting_type})
+        else:
+            await session.execute(text("DELETE FROM chat_settings WHERE chat_id = :chat_id AND setting_type = :setting_type"), {"chat_id": chat_id, "setting_type": setting_type})
+        await session.commit()
+    
+    if setting_type == 'enabled_links':
+        if enabled: link_chats.add(chat_id)
+        else: link_chats.discard(chat_id)
+    elif setting_type == 'reply_guard':
+        if enabled: reply_guard_chats.add(chat_id)
+        else: reply_guard_chats.discard(chat_id)
+    else:
+        if enabled: typing_disabled_chats.add(chat_id)
+        else: typing_disabled_chats.discard(chat_id)
+
+async def save_substitution(chat_id, text, mode):
+    async with AsyncSessionLocal() as session:
+        if text is None:
+            await session.execute(text("DELETE FROM substitutions WHERE chat_id = :chat_id"), {"chat_id": chat_id})
+            substitutions.pop(chat_id, None)
+        else:
+            await session.execute(text("INSERT OR REPLACE INTO substitutions VALUES (:chat_id, :text, :mode)"), {"chat_id": chat_id, "text": text, "mode": mode})
+            substitutions[chat_id] = {"text": text, "mode": mode}
+        await session.commit()
+
+async def save_user_spam(user_id, text):
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("INSERT OR REPLACE INTO user_spam VALUES (:user_id, :spam_text)"), {"user_id": user_id, "spam_text": text})
+        await session.commit()
+
+async def save_mute(user_id, until, chat_id):
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("INSERT OR REPLACE INTO mutes VALUES (:user_id, :until, :chat_id)"), {"user_id": user_id, "until": until, "chat_id": chat_id})
+        await session.commit()
+
+async def delete_mute(user_id):
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("DELETE FROM mutes WHERE user_id = :user_id"), {"user_id": user_id})
+        await session.commit()
 
 # ===== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ =====
 mutes = {}              
@@ -100,50 +136,11 @@ active_chats = set()
 bot_id = None
 owner_id = None         
 
-async def save_setting(chat_id, setting_type, enabled):
-    async with db_pool.acquire() as conn:
-        if enabled:
-            await conn.execute("INSERT OR IGNORE INTO chat_settings VALUES ($1, $2)", chat_id, setting_type)
-        else:
-            await conn.execute("DELETE FROM chat_settings WHERE chat_id = $1 AND setting_type = $2", chat_id, setting_type)
-    
-    if setting_type == 'enabled_links':
-        if enabled: link_chats.add(chat_id)
-        else: link_chats.discard(chat_id)
-    elif setting_type == 'reply_guard':
-        if enabled: reply_guard_chats.add(chat_id)
-        else: reply_guard_chats.discard(chat_id)
-    else:
-        if enabled: typing_disabled_chats.add(chat_id)
-        else: typing_disabled_chats.discard(chat_id)
-
-async def save_substitution(chat_id, text, mode):
-    async with db_pool.acquire() as conn:
-        if text is None:
-            await conn.execute("DELETE FROM substitutions WHERE chat_id = $1", chat_id)
-            substitutions.pop(chat_id, None)
-        else:
-            await conn.execute("INSERT OR REPLACE INTO substitutions VALUES ($1, $2, $3)", chat_id, text, mode)
-            substitutions[chat_id] = {"text": text, "mode": mode}
-
-async def save_user_spam(user_id, text):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT OR REPLACE INTO user_spam VALUES ($1, $2)", user_id, text)
-
-async def save_mute(user_id, until, chat_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT OR REPLACE INTO mutes VALUES ($1, $2, $3)", user_id, until, chat_id)
-
-async def delete_mute(user_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM mutes WHERE user_id = $1", user_id)
-
 @dp.business_connection()
 async def business_conn_handler(bc: BusinessConnection):
     global owner_id
     if owner_id is None:
         owner_id = bc.user.id
-        print(f"✅ Owner ID установлен: {owner_id}")
 
 async def delete_msg(chat_id, msg_id, bc_id):
     try:
@@ -187,10 +184,6 @@ async def unmute(user_id):
     if user_id in mutes:
         del mutes[user_id]
         await delete_mute(user_id)
-        try:
-            await bot.send_message(mutes[user_id]["chat_id"], "🔊 **Мут снят!**")
-        except:
-            pass
 
 @dp.business_message()
 async def handle(message: Message):
@@ -216,7 +209,6 @@ async def handle(message: Message):
 
         if owner_id is None:
             owner_id = uid
-            print(f"✅ Owner ID установлен из сообщения: {owner_id}")
 
         if chat_id not in active_chats:
             if len(active_chats) >= 50:
@@ -235,7 +227,6 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
 
-        # Сохраняем в кэш для лога удалений
         if owner_id is not None and uid != owner_id:
             msg_cache[message.message_id] = {
                 "text": text_raw, 
@@ -255,13 +246,10 @@ async def handle(message: Message):
                 await delete_msg(chat_id, message.message_id, bc_id)
                 return
 
-        # ===== ОБРАБОТКА КОМАНД =====
-        # Определяем, является ли сообщение командой
         is_command = low in ["ss", "dd", ".стоп", ".старт", "печать -", "печать +", "+реплай", "-реплай", ".размут", "!команды", "мой ид", "моид", "твой ид", "твоид"] or \
                      low.startswith(("set ", ".мут ", "подмена ", "+линк"))
 
-        # Если это не команда и не сообщение от бота — применяем подмену и ссылки
-        if not is_command and uid != bot_id:
+        if not is_command:
             if chat_id in link_chats:
                 try:
                     if not message.entities and CHANNEL_LINK not in text_raw:
@@ -280,7 +268,6 @@ async def handle(message: Message):
                 except:
                     pass
 
-        # Если это сообщение от владельца — обрабатываем команды
         if uid == owner_id:
             if low == "!команды":
                 await clear_cmd(chat_id, message.message_id, bc_id)
@@ -484,7 +471,8 @@ async def start_health_server():
     print("✅ Health check server started on port 10000")
 
 async def main():
-    await init_db_pool()
+    await init_db()
+    await load_settings()
     await start_health_server()
     print("🔥 БОТ ЗАПУЩЕН НА POLLING!")
     await dp.start_polling(bot)
