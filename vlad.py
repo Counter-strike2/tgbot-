@@ -8,7 +8,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import Column, Integer, String
 
 # 1. ПОДКЛЮЧЕНИЕ БАЗЫ ДАННЫХ AIVEN
-# Берем ссылку, которую мы настроили в панели Render
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_async_engine(DATABASE_URL, echo=True)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -21,12 +20,12 @@ class UserMemory(Base):
     user_id = Column(Integer, unique=True, nullable=False)
     text = Column(String, nullable=False)
 
-# 2. ИНИЦИАЛИЗАЦИЯ БОТА (Вставьте ваш токен вместо заглушки)
-TOKEN = "8959860095:AAFsRWRSFQOQ84ww_HwxQ2IaI_24DYxTN2o"
+# 2. ИНИЦИАЛИЗАЦИЯ БОТА С НОВЫМ ТОКЕНОМ
+TOKEN = "8959860095:AAG2K8ng2mpiukjTRbhxEWmsdFmVa3Sm9Q8"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# 3. ЛОГИКА БОТА (ЗАПОМНИ И СКАЖИ)
+# 3. ЛОГИКА БОТА
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer("Привет! Напиши мне: Запомни [текст] — чтобы сохранить его в базу. Или: Скажи — чтобы вернуть.")
@@ -45,7 +44,6 @@ async def handle_message(message: types.Message):
             
         async with async_session() as session:
             async with session.begin():
-                # Проверяем, есть ли уже запись
                 from sqlalchemy import select
                 result = await session.execute(select(UserMemory).filter_by(user_id=user_id))
                 user_data = result.scalar_one_or_none()
@@ -82,12 +80,11 @@ async def start_web_server():
     await site.start()
 
 async def main():
-    # Создаем таблицы в Aiven, если их еще нет
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         
-    await start_web_server()  # Запускаем порт
-    await dp.start_polling(bot)  # Включаем бота
+    await start_web_server()
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
