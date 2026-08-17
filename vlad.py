@@ -409,20 +409,16 @@ async def handle_webhook(request):
         data = await request.json()
         update = Update(**data)
         await dp.process_update(update)
-        return web.Response(status=200)
+        return web.Response(text="OK", status=200)
     except Exception as e:
         print(f"❌ Webhook error: {e}")
-        return web.Response(status=500)
+        return web.Response(text="ERROR", status=500)
 
 async def main():
-    # Удаляем старый вебхук на случай глюков
     await bot.delete_webhook()
-    
-    # Устанавливаем новый вебхук
     await bot.set_webhook(WEBHOOK_URL)
     print(f"✅ Webhook установлен: {WEBHOOK_URL}")
     
-    # Запускаем aiohttp сервер
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
