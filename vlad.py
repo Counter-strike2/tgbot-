@@ -2,13 +2,16 @@ import asyncio
 import sqlite3
 import re
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import Message, BusinessConnection, Update
+from aiogram.webhook.aiohttp_server import SimpleWebhookResponse, setup_webhook
 from aiohttp import web
 
 BOT_TOKEN = "8959860095:AAFsRWRSFQOQ84ww_HwxQ2IaI_24DYxTN2o"
 DB_NAME = "sessions.db"
 CHANNEL_LINK = "https://t.me/gotrollholl"
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = "https://tgbot-wobb.onrender.com" + WEBHOOK_PATH
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -398,23 +401,28 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         print(f"❌ Ошибка обработчика удалений: {e}")
 
-# ===== ПРАВИЛЬНЫЙ HEALTH-CHECK =====
+# ===== WEBHOOK =====
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
-async def start_health_server():
+async def main():
+    # Устанавливаем вебхук
+    await bot.set_webhook(WEBHOOK_URL)
+    print(f"✅ Webhook установлен: {WEBHOOK_URL}")
+    
+    # Создаём aiohttp приложение
     app = web.Application()
     app.router.add_get('/', health_check)
+    app.router.add_post(WEBHOOK_PATH, SimpleWebhookResponse(dp.bot, dp.webhook.process_update))
+    
+    # Запускаем сервер
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
-    print("✅ Health check server started on port 10000")
-
-async def main():
-    await start_health_server()
-    print("🔥 БОТ УСПЕШНО ЗАПУЩЕН!")
-    await dp.start_polling(bot)
+    print("🔥 БОТ ЗАПУЩЕН НА WEBHOOKE!")
+    
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
