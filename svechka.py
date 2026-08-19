@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+from threading import Thread
 from typing import Optional, Dict
 
 from aiogram import Bot, Dispatcher, types, F
@@ -10,6 +11,23 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+# ==================== ВЕБ-СЕРВЕР ДЛЯ RENDER ====================
+from flask import Flask
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "🕷️ Бот работает!", 200
+
+@flask_app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ==================== КОНФИГ ====================
 TOKEN = "8518936477:AAGHks_mt0ucVc8FGg_1GHX_009qnq5H3Jg"
@@ -90,7 +108,7 @@ def find_user_by_username_or_id(text: str) -> Optional[Dict]:
             pass
     return None
 
-# ==================== FSM СОСТОЯНИЯ (исправлено) ====================
+# ==================== FSM СОСТОЯНИЯ ====================
 class GameStates(StatesGroup):
     guess_waiting_stake = State()
     guess_waiting_number = State()
@@ -103,7 +121,7 @@ class GameStates(StatesGroup):
     admin_ban_waiting_input = State()
     admin_unban_waiting_input = State()
     admin_addcoins_waiting_input = State()
-    admin_addcoins_waiting_amount = State()   # ✅ теперь добавлено заранее
+    admin_addcoins_waiting_amount = State()
 
 # ==================== КЛАВИАТУРЫ ====================
 def main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -190,7 +208,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         return
 
     try:
-        await message.answer_sticker("CAACAgIAAxkBAAEIXl1nNwlCbAAA")  # стикер паука, замени на свой
+        await message.answer_sticker("CAACAgIAAxkBAAEIXl1nNwlCbAAA")
     except:
         pass
 
@@ -398,7 +416,7 @@ async def rps_move(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     data = await state.get_data()
     stake = data.get("stake", 0)
-    move = callback.data.split("_")[1]  # rock, paper, scissors
+    move = callback.data.split("_")[1]
     bot_move = random.choice(["rock", "paper", "scissors"])
     if move == bot_move:
         result = "draw"
@@ -806,8 +824,12 @@ async def admin_cancel(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Действие отменено.", reply_markup=main_menu_keyboard(user_id))
     await callback.answer()
 
-# ---------- ЗАПУСК ----------
+# ==================== ЗАПУСК ====================
 async def main():
+    # Запускаем Flask в отдельном потоке
+    Thread(target=run_flask, daemon=True).start()
+    
+    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
