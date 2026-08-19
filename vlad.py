@@ -463,7 +463,9 @@ async def start_health_server():
 async def main():
     await start_health_server()
     logging.info("🔥 БОТ УСПЕШНО ЗАПУЩЕН НА POLLING!")
-    await dp.start_polling(bot)
+    # Явно указываем Telegram присылать и обычные сообщения (message), и бизнес-сообщения
+    allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
+    await dp.start_polling(bot, allowed_updates=allowed_updates)
 
 if __name__ == "__main__":
     asyncio.run(main())
