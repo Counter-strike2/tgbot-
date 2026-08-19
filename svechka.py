@@ -1,35 +1,26 @@
 import asyncio
 import json
 import os
-from datetime import datetime
-from typing import Optional, Dict, Any
+import random
+from typing import Optional, Dict
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ==================== КОНФИГ ====================
 TOKEN = "8518936477:AAGHks_mt0ucVc8FGg_1GHX_009qnq5H3Jg"
-ADMIN_IDS = [5825717381, 8649099800]  # кто видит админку
-SUPPORT_USERNAME = "WestTwopeek"      # юзер для поддержки
-
-# ==================== БАЗА ДАННЫХ (JSON) ====================
+ADMIN_IDS = [5825717381, 8649099800]
+SUPPORT_USERNAME = "WestTwopeek"
 DB_FILE = "database.json"
 
+# ==================== БАЗА ДАННЫХ ====================
 def load_db() -> Dict:
     if not os.path.exists(DB_FILE):
-        # создаём пустую базу
-        return {
-            "users": {},
-            "total_stats": {
-                "total_users": 0,
-                "total_games": 0,
-                "total_coins": 0
-            }
-        }
+        return {"users": {}, "total_stats": {"total_users": 0, "total_games": 0, "total_coins": 0}}
     with open(DB_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -38,27 +29,22 @@ def save_db(data: Dict):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 def get_user(user_id: int) -> Optional[Dict]:
-    db = load_db()
-    return db["users"].get(str(user_id))
+    return load_db()["users"].get(str(user_id))
 
 def create_user(user_id: int, first_name: str, username: Optional[str] = None) -> Dict:
     db = load_db()
-    user_data = {
+    user = {
         "id": user_id,
         "first_name": first_name,
         "username": username,
         "balance": 5000,
-        "stats": {
-            "total_games": 0,
-            "wins": 0,
-            "losses": 0
-        },
+        "stats": {"total_games": 0, "wins": 0, "losses": 0},
         "banned": False
     }
-    db["users"][str(user_id)] = user_data
+    db["users"][str(user_id)] = user
     db["total_stats"]["total_users"] += 1
     save_db(db)
-    return user_data
+    return user
 
 def update_user(user_id: int, data: Dict):
     db = load_db()
@@ -74,7 +60,7 @@ def add_coins(user_id: int, amount: int):
         db["total_stats"]["total_coins"] += amount
         save_db(db)
 
-def remove_coins(user_id: int, amount: int):
+def remove_coins(user_id: int, amount: int) -> bool:
     db = load_db()
     user = db["users"].get(str(user_id))
     if user and user["balance"] >= amount:
@@ -89,7 +75,6 @@ def is_banned(user_id: int) -> bool:
     return user and user.get("banned", False)
 
 def find_user_by_username_or_id(text: str) -> Optional[Dict]:
-    """Ищет пользователя по @username или ID (число)"""
     db = load_db()
     text = text.strip()
     if text.startswith("@"):
@@ -98,7 +83,6 @@ def find_user_by_username_or_id(text: str) -> Optional[Dict]:
             if data.get("username") and data["username"].lower() == username:
                 return data
     else:
-        # пытаемся как ID
         try:
             uid = int(text)
             return db["users"].get(str(uid))
@@ -106,24 +90,20 @@ def find_user_by_username_or_id(text: str) -> Optional[Dict]:
             pass
     return None
 
-# ==================== FSM СОСТОЯНИЯ ====================
+# ==================== FSM СОСТОЯНИЯ (исправлено) ====================
 class GameStates(StatesGroup):
-    # Угадай число
     guess_waiting_stake = State()
     guess_waiting_number = State()
-    # Камень-ножницы-бумага
     rps_waiting_stake = State()
     rps_waiting_move = State()
-    # Кости
     dice_waiting_stake = State()
     dice_waiting_roll = State()
-    # Минное поле
     mine_waiting_stake = State()
     mine_waiting_cell = State()
-    # Админка - бан
     admin_ban_waiting_input = State()
     admin_unban_waiting_input = State()
     admin_addcoins_waiting_input = State()
+    admin_addcoins_waiting_amount = State()   # ✅ теперь добавлено заранее
 
 # ==================== КЛАВИАТУРЫ ====================
 def main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -150,11 +130,9 @@ def games_menu_keyboard() -> InlineKeyboardMarkup:
 
 def number_buttons_1_10() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    row = []
     for i in range(1, 11):
-        row.append(InlineKeyboardButton(text=str(i), callback_data=f"num_{i}"))
-    builder.row(*row[:5])
-    builder.row(*row[5:])
+        builder.button(text=str(i), callback_data=f"num_{i}")
+    builder.adjust(5)
     builder.row(InlineKeyboardButton(text="🎲 Рандом", callback_data="num_random"))
     builder.row(InlineKeyboardButton(text="❌ Сдаться", callback_data="num_giveup"))
     return builder.as_markup()
@@ -169,8 +147,7 @@ def rps_buttons() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu_games"))
     return builder.as_markup()
 
-def mine_field_buttons(step: int = 0) -> InlineKeyboardMarkup:
-    """Генерирует поле 5x5 с номерами 1-25"""
+def mine_field_buttons() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for i in range(1, 26):
         builder.button(text=str(i), callback_data=f"mine_{i}")
@@ -193,11 +170,11 @@ def admin_cancel_keyboard() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel"))
     return builder.as_markup()
 
-# ==================== ОБРАБОТЧИКИ ====================
+# ==================== БОТ И ДИСПЕТЧЕР ====================
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ---------- СТАРТ / ПРИВЕТСТВИЕ ----------
+# ---------- СТАРТ ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -212,19 +189,18 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await message.answer("🚫 Вы забанены и не можете пользоваться ботом.")
         return
 
-    # Приветствие с именем (кликабельное)
-    text = (
-        f"🕷️ <b>{first_name}</b>, ДОБРО ПОЖАЛОВАТЬ!\n\n"
-        f"Я твой игровой бот, выбирай и погнали! 🚀"
-    )
-    # Отправляем стикер паука (можно использовать любой стикерпак)
     try:
-        await message.answer_sticker("CAACAgIAAxkBAAEIXl1nNwlCbAAA")  # пример стикера паука (замени на свой)
+        await message.answer_sticker("CAACAgIAAxkBAAEIXl1nNwlCbAAA")  # стикер паука, замени на свой
     except:
         pass
-    await message.answer(text, reply_markup=main_menu_keyboard(user_id), parse_mode="HTML")
 
-# ---------- ГЛАВНОЕ МЕНЮ (callback) ----------
+    await message.answer(
+        f"🕷️ <b>{first_name}</b>, ДОБРО ПОЖАЛОВАТЬ!\n\nЯ твой игровой бот, выбирай и погнали! 🚀",
+        reply_markup=main_menu_keyboard(user_id),
+        parse_mode="HTML"
+    )
+
+# ---------- МЕНЮ ----------
 @dp.callback_query(F.data == "menu_main")
 async def menu_main(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -245,11 +221,7 @@ async def menu_games(callback: types.CallbackQuery):
     if is_banned(user_id):
         await callback.answer("Вы забанены!", show_alert=True)
         return
-    await callback.message.edit_text(
-        "🎮 <b>Выбери игру:</b>",
-        reply_markup=games_menu_keyboard(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text("🎮 <b>Выбери игру:</b>", reply_markup=games_menu_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "menu_profile")
@@ -263,26 +235,18 @@ async def menu_profile(callback: types.CallbackQuery):
         await callback.answer("Профиль не найден", show_alert=True)
         return
     stats = user["stats"]
-    total = stats["total_games"] or 1  # чтобы не делить на ноль
-    winrate = round(stats["wins"] / total * 100, 1) if total > 0 else 0
+    total = stats["total_games"] or 1
+    winrate = round(stats["wins"] / total * 100, 1)
     text = (
         f"👤 <b>МОЙ ПРОФИЛЬ</b>\n\n"
-        f"Имя: {user['first_name']}\n"
-        f"ID: <code>{user_id}</code>\n\n"
-        f"📊 <b>Статистика:</b>\n"
-        f"Всего игр: {stats['total_games']}\n"
-        f"Побед: {stats['wins']}\n"
-        f"Поражений: {stats['losses']}\n"
-        f"Процент побед: {winrate}%\n\n"
+        f"Имя: {user['first_name']}\nID: <code>{user_id}</code>\n\n"
+        f"📊 <b>Статистика:</b>\nВсего игр: {stats['total_games']}\nПобед: {stats['wins']}\nПоражений: {stats['losses']}\nПроцент побед: {winrate}%\n\n"
         f"💰 Баланс: {user['balance']} монет"
     )
     await callback.message.edit_text(text, reply_markup=main_menu_keyboard(user_id), parse_mode="HTML")
     await callback.answer()
 
-# ---------- ПОДДЕРЖКА (уже есть url-кнопка) ----------
-
-# ---------- ИГРЫ ----------
-# === Угадай число ===
+# ---------- ИГРА: УГАДАЙ ЧИСЛО ----------
 @dp.callback_query(F.data == "game_guess")
 async def game_guess_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -292,11 +256,8 @@ async def game_guess_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(GameStates.guess_waiting_stake)
     user = get_user(user_id)
     await callback.message.edit_text(
-        f"🔢 <b>Угадай число (1-10)</b>\n\n"
-        f"Попыток: 4\n"
-        f"💰 Твой баланс: {user['balance']} монет\n\n"
-        f"Введи сумму ставки (числом):",
-        reply_markup=admin_cancel_keyboard(),  # кнопка отмены
+        f"🔢 <b>Угадай число (1-10)</b>\n\nПопыток: 4\n💰 Твой баланс: {user['balance']} монет\n\nВведи сумму ставки (числом):",
+        reply_markup=admin_cancel_keyboard(),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -319,22 +280,15 @@ async def guess_stake_received(message: types.Message, state: FSMContext):
     if stake > user["balance"]:
         await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']}")
         return
-    # Сохраняем ставку
-    await state.update_data(stake=stake, attempts=4)
-    # Списываем ставку сразу?
-    # Лучше списать при победе/поражении, но для простоты спишем сейчас
     if not remove_coins(user_id, stake):
         await message.answer("Ошибка списания.")
         await state.clear()
         return
-    await state.set_state(GameStates.guess_waiting_number)
-    # Загадываем число
-    import random
     number = random.randint(1, 10)
-    await state.update_data(number=number)
+    await state.update_data(stake=stake, number=number, attempts=4)
+    await state.set_state(GameStates.guess_waiting_number)
     await message.answer(
-        f"✅ Ставка {stake} монет принята!\n"
-        f"Угадай число от 1 до 10 (осталось 4 попытки):",
+        f"✅ Ставка {stake} монет принята!\nУгадай число от 1 до 10 (осталось 4 попытки):",
         reply_markup=number_buttons_1_10()
     )
 
@@ -351,66 +305,50 @@ async def guess_number_click(callback: types.CallbackQuery, state: FSMContext):
             f"❌ Ты сдался! Загадано было число {number}.",
             reply_markup=main_menu_keyboard(user_id)
         )
-        # проигрыш, монеты уже списаны
         await state.clear()
         await callback.answer()
         return
 
-    if callback.data == "num_random":
-        import random
-        guess = random.randint(1, 10)
-    else:
-        guess = int(callback.data.split("_")[1])
-
+    guess = random.randint(1, 10) if callback.data == "num_random" else int(callback.data.split("_")[1])
     attempts -= 1
     await state.update_data(attempts=attempts)
 
     if guess == number:
-        # победа
         win_amount = stake * 2
         add_coins(user_id, win_amount)
-        # обновляем статистику
         user = get_user(user_id)
         user["stats"]["total_games"] += 1
         user["stats"]["wins"] += 1
         update_user(user_id, {"stats": user["stats"]})
         await callback.message.edit_text(
-            f"🎉 Поздравляю! Ты угадал число {number}!\n"
-            f"Твой выигрыш: {win_amount} монет (ставка {stake} × 2).\n"
-            f"Баланс: {user['balance']} монет.",
+            f"🎉 Поздравляю! Ты угадал число {number}!\nТвой выигрыш: {win_amount} монет.\nБаланс: {user['balance']} монет.",
             reply_markup=main_menu_keyboard(user_id)
         )
         await state.clear()
         await callback.answer()
         return
 
-    # не угадал
     if attempts == 0:
-        # проигрыш
         user = get_user(user_id)
         user["stats"]["total_games"] += 1
         user["stats"]["losses"] += 1
         update_user(user_id, {"stats": user["stats"]})
         await callback.message.edit_text(
-            f"😵 Ты проиграл! Загадано было число {number}.\n"
-            f"Ты потерял {stake} монет.\n"
-            f"Баланс: {user['balance']} монет.",
+            f"😵 Ты проиграл! Загадано было число {number}.\nПотеряно {stake} монет.\nБаланс: {user['balance']} монет.",
             reply_markup=main_menu_keyboard(user_id)
         )
         await state.clear()
         await callback.answer()
         return
 
-    # продолжаем
     hint = "больше" if guess < number else "меньше"
     await callback.message.edit_text(
-        f"❌ Не угадал! Загаданное число {hint}.\n"
-        f"Осталось попыток: {attempts}",
+        f"❌ Не угадал! Загаданное число {hint}.\nОсталось попыток: {attempts}",
         reply_markup=number_buttons_1_10()
     )
     await callback.answer()
 
-# === Камень-ножницы-бумага ===
+# ---------- ИГРА: КАМЕНЬ-НОЖНИЦЫ-БУМАГА ----------
 @dp.callback_query(F.data == "game_rps")
 async def game_rps_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -420,9 +358,7 @@ async def game_rps_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(GameStates.rps_waiting_stake)
     user = get_user(user_id)
     await callback.message.edit_text(
-        f"✊ <b>Камень-ножницы-бумага</b>\n\n"
-        f"💰 Твой баланс: {user['balance']} монет\n\n"
-        f"Введи сумму ставки (числом):",
+        f"✊ <b>Камень-ножницы-бумага</b>\n\n💰 Твой баланс: {user['balance']} монет\n\nВведи сумму ставки (числом):",
         reply_markup=admin_cancel_keyboard(),
         parse_mode="HTML"
     )
@@ -463,9 +399,7 @@ async def rps_move(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     stake = data.get("stake", 0)
     move = callback.data.split("_")[1]  # rock, paper, scissors
-    import random
     bot_move = random.choice(["rock", "paper", "scissors"])
-    # определяем победителя
     if move == bot_move:
         result = "draw"
     elif (move == "rock" and bot_move == "scissors") or \
@@ -475,7 +409,7 @@ async def rps_move(callback: types.CallbackQuery, state: FSMContext):
     else:
         result = "lose"
 
-    emoji_map = {"rock": "✊", "paper": "🤚", "scissors": "✌️"}
+    emoji = {"rock": "✊", "paper": "🤚", "scissors": "✌️"}
     user = get_user(user_id)
     if result == "win":
         win_amount = stake * 2
@@ -483,33 +417,20 @@ async def rps_move(callback: types.CallbackQuery, state: FSMContext):
         user["stats"]["total_games"] += 1
         user["stats"]["wins"] += 1
         update_user(user_id, {"stats": user["stats"]})
-        text = (
-            f"Ты: {emoji_map[move]}\nБот: {emoji_map[bot_move]}\n\n"
-            f"🎉 Ты победил! +{win_amount} монет (ставка {stake} × 2).\n"
-            f"Баланс: {user['balance']}"
-        )
+        text = f"Ты: {emoji[move]}\nБот: {emoji[bot_move]}\n\n🎉 Ты победил! +{win_amount} монет.\nБаланс: {user['balance']}"
     elif result == "lose":
         user["stats"]["total_games"] += 1
         user["stats"]["losses"] += 1
         update_user(user_id, {"stats": user["stats"]})
-        text = (
-            f"Ты: {emoji_map[move]}\nБот: {emoji_map[bot_move]}\n\n"
-            f"😵 Ты проиграл! Потеряно {stake} монет.\n"
-            f"Баланс: {user['balance']}"
-        )
+        text = f"Ты: {emoji[move]}\nБот: {emoji[bot_move]}\n\n😵 Ты проиграл! Потеряно {stake} монет.\nБаланс: {user['balance']}"
     else:
-        # ничья, возвращаем ставку
         add_coins(user_id, stake)
-        text = (
-            f"Ты: {emoji_map[move]}\nБот: {emoji_map[bot_move]}\n\n"
-            f"🤝 Ничья! Ставка {stake} возвращена.\n"
-            f"Баланс: {user['balance']}"
-        )
+        text = f"Ты: {emoji[move]}\nБот: {emoji[bot_move]}\n\n🤝 Ничья! Ставка {stake} возвращена.\nБаланс: {user['balance']}"
     await callback.message.edit_text(text, reply_markup=main_menu_keyboard(user_id))
     await state.clear()
     await callback.answer()
 
-# === Кости ===
+# ---------- ИГРА: КОСТИ ----------
 @dp.callback_query(F.data == "game_dice")
 async def game_dice_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -519,9 +440,7 @@ async def game_dice_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(GameStates.dice_waiting_stake)
     user = get_user(user_id)
     await callback.message.edit_text(
-        f"🎲 <b>Кости</b>\n\n"
-        f"💰 Твой баланс: {user['balance']} монет\n\n"
-        f"Введи сумму ставки (числом):",
+        f"🎲 <b>Кости</b>\n\n💰 Твой баланс: {user['balance']} монет\n\nВведи сумму ставки (числом):",
         reply_markup=admin_cancel_keyboard(),
         parse_mode="HTML"
     )
@@ -563,7 +482,6 @@ async def dice_roll(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     data = await state.get_data()
     stake = data.get("stake", 0)
-    import random
     user_roll = random.randint(1, 6)
     bot_roll = random.randint(1, 6)
     user = get_user(user_id)
@@ -573,32 +491,20 @@ async def dice_roll(callback: types.CallbackQuery, state: FSMContext):
         user["stats"]["total_games"] += 1
         user["stats"]["wins"] += 1
         update_user(user_id, {"stats": user["stats"]})
-        text = (
-            f"🎲 Ты: {user_roll}\n🎲 Бот: {bot_roll}\n\n"
-            f"🎉 Ты выиграл! +{win_amount} монет.\n"
-            f"Баланс: {user['balance']}"
-        )
+        text = f"🎲 Ты: {user_roll}\n🎲 Бот: {bot_roll}\n\n🎉 Ты выиграл! +{win_amount} монет.\nБаланс: {user['balance']}"
     elif user_roll < bot_roll:
         user["stats"]["total_games"] += 1
         user["stats"]["losses"] += 1
         update_user(user_id, {"stats": user["stats"]})
-        text = (
-            f"🎲 Ты: {user_roll}\n🎲 Бот: {bot_roll}\n\n"
-            f"😵 Ты проиграл! Потеряно {stake} монет.\n"
-            f"Баланс: {user['balance']}"
-        )
+        text = f"🎲 Ты: {user_roll}\n🎲 Бот: {bot_roll}\n\n😵 Ты проиграл! Потеряно {stake} монет.\nБаланс: {user['balance']}"
     else:
         add_coins(user_id, stake)
-        text = (
-            f"🎲 Ты: {user_roll}\n🎲 Бот: {bot_roll}\n\n"
-            f"🤝 Ничья! Ставка {stake} возвращена.\n"
-            f"Баланс: {user['balance']}"
-        )
+        text = f"🎲 Ты: {user_roll}\n🎲 Бот: {bot_roll}\n\n🤝 Ничья! Ставка {stake} возвращена.\nБаланс: {user['balance']}"
     await callback.message.edit_text(text, reply_markup=main_menu_keyboard(user_id))
     await state.clear()
     await callback.answer()
 
-# === Минное поле ===
+# ---------- ИГРА: МИННОЕ ПОЛЕ ----------
 @dp.callback_query(F.data == "game_mine")
 async def game_mine_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -608,11 +514,7 @@ async def game_mine_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(GameStates.mine_waiting_stake)
     user = get_user(user_id)
     await callback.message.edit_text(
-        f"💣 <b>Минное поле</b>\n\n"
-        f"Поле 5×5, спрятано 5 мин.\n"
-        f"Выигрыш: ставка × 2.\n"
-        f"💰 Твой баланс: {user['balance']} монет\n\n"
-        f"Введи сумму ставки (числом):",
+        f"💣 <b>Минное поле</b>\n\nПоле 5×5, спрятано 5 мин.\nВыигрыш: ставка × 2.\n💰 Твой баланс: {user['balance']} монет\n\nВведи сумму ставки (числом):",
         reply_markup=admin_cancel_keyboard(),
         parse_mode="HTML"
     )
@@ -640,8 +542,6 @@ async def mine_stake_received(message: types.Message, state: FSMContext):
         await message.answer("Ошибка списания.")
         await state.clear()
         return
-    # Генерируем поле: 5 мин, остальное безопасно
-    import random
     mines = set(random.sample(range(1, 26), 5))
     await state.update_data(stake=stake, mines=mines, opened=set(), game_over=False)
     await state.set_state(GameStates.mine_waiting_cell)
@@ -668,7 +568,6 @@ async def mine_cell_click(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(opened=opened)
 
     if cell in mines:
-        # попал на мину
         data["game_over"] = True
         await state.update_data(game_over=True)
         user = get_user(user_id)
@@ -676,18 +575,14 @@ async def mine_cell_click(callback: types.CallbackQuery, state: FSMContext):
         user["stats"]["losses"] += 1
         update_user(user_id, {"stats": user["stats"]})
         await callback.message.edit_text(
-            f"💥 БАБАХ! Ты наступил на мину!\n"
-            f"Потеряно {stake} монет.\n"
-            f"Баланс: {user['balance']}",
+            f"💥 БАБАХ! Ты наступил на мину!\nПотеряно {stake} монет.\nБаланс: {user['balance']}",
             reply_markup=main_menu_keyboard(user_id)
         )
         await state.clear()
         await callback.answer()
         return
 
-    # проверяем, все ли мины найдены (открыто 20 клеток)
     if len(opened) == 20:
-        # победа
         data["game_over"] = True
         await state.update_data(game_over=True)
         win_amount = stake * 2
@@ -697,17 +592,13 @@ async def mine_cell_click(callback: types.CallbackQuery, state: FSMContext):
         user["stats"]["wins"] += 1
         update_user(user_id, {"stats": user["stats"]})
         await callback.message.edit_text(
-            f"🎉 Поздравляю! Ты обезвредил все мины!\n"
-            f"Выигрыш: {win_amount} монет.\n"
-            f"Баланс: {user['balance']}",
+            f"🎉 Поздравляю! Ты обезвредил все мины!\nВыигрыш: {win_amount} монет.\nБаланс: {user['balance']}",
             reply_markup=main_menu_keyboard(user_id)
         )
         await state.clear()
         await callback.answer()
         return
 
-    # продолжаем
-    # обновляем поле (можно показать текущее состояние, но для простоты оставляем кнопки)
     await callback.message.edit_text(
         f"💣 Минное поле (открыто {len(opened)} клеток, нужно найти все 5 мин).",
         reply_markup=mine_field_buttons()
@@ -741,7 +632,7 @@ async def admin_list(callback: types.CallbackQuery):
         await callback.answer()
         return
     text = "📋 <b>Список пользователей:</b>\n\n"
-    for uid, data in list(users.items())[:20]:  # ограничим 20
+    for uid, data in list(users.items())[:20]:
         name = data.get("first_name", "Без имени")
         username = data.get("username")
         username_str = f"(@{username})" if username else ""
@@ -764,8 +655,7 @@ async def admin_ban_start(callback: types.CallbackQuery, state: FSMContext):
         return
     await state.set_state(GameStates.admin_ban_waiting_input)
     await callback.message.edit_text(
-        "🚫 <b>Забанить пользователя</b>\n\n"
-        "Введите @username или ID пользователя:",
+        "🚫 <b>Забанить пользователя</b>\n\nВведите @username или ID пользователя:",
         reply_markup=admin_cancel_keyboard(),
         parse_mode="HTML"
     )
@@ -778,8 +668,7 @@ async def admin_ban_process(message: types.Message, state: FSMContext):
         await message.answer("Нет прав.")
         await state.clear()
         return
-    text = message.text.strip()
-    target = find_user_by_username_or_id(text)
+    target = find_user_by_username_or_id(message.text.strip())
     if not target:
         await message.answer("❌ Пользователь не найден.", reply_markup=admin_menu_keyboard())
         await state.clear()
@@ -788,10 +677,9 @@ async def admin_ban_process(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Пользователь уже забанен.")
         await state.clear()
         return
-    target_id = target["id"]
-    update_user(target_id, {"banned": True})
+    update_user(target["id"], {"banned": True})
     await message.answer(
-        f"✅ Пользователь {target['first_name']} (ID: {target_id}) забанен.",
+        f"✅ Пользователь {target['first_name']} (ID: {target['id']}) забанен.",
         reply_markup=admin_menu_keyboard()
     )
     await state.clear()
@@ -804,8 +692,7 @@ async def admin_unban_start(callback: types.CallbackQuery, state: FSMContext):
         return
     await state.set_state(GameStates.admin_unban_waiting_input)
     await callback.message.edit_text(
-        "✅ <b>Разбанить пользователя</b>\n\n"
-        "Введите @username или ID пользователя:",
+        "✅ <b>Разбанить пользователя</b>\n\nВведите @username или ID пользователя:",
         reply_markup=admin_cancel_keyboard(),
         parse_mode="HTML"
     )
@@ -818,8 +705,7 @@ async def admin_unban_process(message: types.Message, state: FSMContext):
         await message.answer("Нет прав.")
         await state.clear()
         return
-    text = message.text.strip()
-    target = find_user_by_username_or_id(text)
+    target = find_user_by_username_or_id(message.text.strip())
     if not target:
         await message.answer("❌ Пользователь не найден.", reply_markup=admin_menu_keyboard())
         await state.clear()
@@ -828,10 +714,9 @@ async def admin_unban_process(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Пользователь не забанен.")
         await state.clear()
         return
-    target_id = target["id"]
-    update_user(target_id, {"banned": False})
+    update_user(target["id"], {"banned": False})
     await message.answer(
-        f"✅ Пользователь {target['first_name']} (ID: {target_id}) разбанен.",
+        f"✅ Пользователь {target['first_name']} (ID: {target['id']}) разбанен.",
         reply_markup=admin_menu_keyboard()
     )
     await state.clear()
@@ -844,48 +729,27 @@ async def admin_addcoins_start(callback: types.CallbackQuery, state: FSMContext)
         return
     await state.set_state(GameStates.admin_addcoins_waiting_input)
     await callback.message.edit_text(
-        "💰 <b>Выдать монеты</b>\n\n"
-        "Введите @username или ID пользователя:",
+        "💰 <b>Выдать монеты</b>\n\nВведите @username или ID пользователя:",
         reply_markup=admin_cancel_keyboard(),
         parse_mode="HTML"
     )
     await callback.answer()
 
 @dp.message(GameStates.admin_addcoins_waiting_input)
-async def admin_addcoins_process(message: types.Message, state: FSMContext):
+async def admin_addcoins_input(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         await message.answer("Нет прав.")
         await state.clear()
         return
-    text = message.text.strip()
-    target = find_user_by_username_or_id(text)
+    target = find_user_by_username_or_id(message.text.strip())
     if not target:
-        await message.answer("❌ Пользователь не найден.")
+        await message.answer("❌ Пользователь не найден.", reply_markup=admin_menu_keyboard())
         await state.clear()
         return
     await state.update_data(target_id=target["id"])
-    await message.answer(f"Введите сумму монет для выдачи пользователю {target['first_name']}:")
-    # ожидаем следующее сообщение с суммой
-    @dp.message(F.text.regexp(r'^\d+$'))
-    async def addcoins_amount(msg: types.Message, state: FSMContext):
-        data = await state.get_data()
-        target_id = data.get("target_id")
-        if not target_id:
-            return
-        amount = int(msg.text)
-        add_coins(target_id, amount)
-        user = get_user(target_id)
-        await msg.answer(
-            f"✅ Выдано {amount} монет пользователю {user['first_name']}.\n"
-            f"Теперь баланс: {user['balance']} монет.",
-            reply_markup=admin_menu_keyboard()
-        )
-        await state.clear()
-    # регистрируем временный хендлер – используем фильтр, но лучше сделать через FSM, но для простоты оставим так
-    # Однако это не сработает, так как хендлер определен внутри. Переделаем: запросим сумму и перейдем в новое состояние.
-    # Сделаем отдельное состояние для суммы.
     await state.set_state(GameStates.admin_addcoins_waiting_amount)
+    await message.answer(f"Введите сумму монет для выдачи пользователю {target['first_name']}:")
 
 @dp.message(GameStates.admin_addcoins_waiting_amount)
 async def admin_addcoins_amount(message: types.Message, state: FSMContext):
@@ -910,14 +774,10 @@ async def admin_addcoins_amount(message: types.Message, state: FSMContext):
     add_coins(target_id, amount)
     user = get_user(target_id)
     await message.answer(
-        f"✅ Выдано {amount} монет пользователю {user['first_name']}.\n"
-        f"Теперь баланс: {user['balance']} монет.",
+        f"✅ Выдано {amount} монет пользователю {user['first_name']}.\nТеперь баланс: {user['balance']} монет.",
         reply_markup=admin_menu_keyboard()
     )
     await state.clear()
-
-# Зарегистрируем состояние для суммы
-GameStates.admin_addcoins_waiting_amount = State()
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
@@ -943,10 +803,7 @@ async def admin_stats(callback: types.CallbackQuery):
 async def admin_cancel(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     user_id = callback.from_user.id
-    await callback.message.edit_text(
-        "Действие отменено.",
-        reply_markup=main_menu_keyboard(user_id)
-    )
+    await callback.message.edit_text("Действие отменено.", reply_markup=main_menu_keyboard(user_id))
     await callback.answer()
 
 # ---------- ЗАПУСК ----------
