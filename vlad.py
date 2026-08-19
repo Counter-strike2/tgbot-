@@ -1,5 +1,6 @@
 import asyncio
-import sqlite3
+import os
+import psycopg2  # Используем psycopg2 вместо sqlite3
 import re
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
@@ -7,7 +8,8 @@ from aiogram.types import Message, BusinessConnection, Update
 from aiohttp import web
 
 BOT_TOKEN = "8959860095:AAG2K8ng2mpiukjTRbhxEWmsdFmVa3Sm9Q8"
-DB_NAME = "sessions.db"
+# DATABASE_URL будет автоматически считываться из настроек Render, которые вы заполнили
+DATABASE_URL = os.environ.get('DATABASE_URL')
 CHANNEL_LINK = "https://t.me/gotrollholl"
 
 bot = Bot(token=BOT_TOKEN)
@@ -26,61 +28,79 @@ msg_cache = {}
 active_chats = set()    
 bot_id = None
 
+# Функция подключения к PostgreSQL
 def get_db():
-    return sqlite3.connect(DB_NAME, timeout=20)
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
+# Инициализация таблиц базы данных
 def init_db():
     with get_db() as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id INTEGER, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
-        conn.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id INTEGER PRIMARY KEY, text TEXT, mode INTEGER)")
-        conn.commit()
-        
-        cur = conn.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
-        for row in cur:
-            link_chats.add(row[0])
+        with conn.cursor() as cur:
+            # Используем BIGINT для chat_id, так как ID чатов в Telegram могут превышать лимиты стандартного INTEGER
+            cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
+            cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
+            conn.commit()
             
-        cur = conn.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
-        for row in cur:
-            reply_guard_chats.add(row[0])
+            cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
+            for row in cur.fetchall():
+                link_chats.add(row[0])
+                
+            cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
+            for row in cur.fetchall():
+                reply_guard_chats.add(row[0])
 
-        cur = conn.execute("SELECT chat_id FROM chat_settings WHERE setting_type='typing_disabled'")
-        for row in cur:
-            typing_disabled_chats.add(row[0])
-        
-        cur = conn.execute("SELECT chat_id, text, mode FROM substitutions")
-        for row in cur:
-            substitutions[row[0]] = {"text": row[1], "mode": row[2]}
+            cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='typing_disabled'")
+            for row in cur.fetchall():
+                typing_disabled_chats.add(row[0])
+            
+            cur.execute("SELECT chat_id, text, mode FROM substitutions")
+            for row in cur.fetchall():
+                substitutions[row[0]] = {"text": row[1], "mode": row[2]}
 
+# Сохранение настроек в PostgreSQL
 def save_setting(chat_id, setting_type, enabled):
     with get_db() as conn:
-        if enabled:
-            conn.execute("INSERT OR IGNORE INTO chat_settings VALUES (?, ?)", (chat_id, setting_type))
-        else:
-            conn.execute("DELETE FROM chat_settings WHERE chat_id = ? AND setting_type = ?", (chat_id, setting_type))
-        conn.commit()
-        
-        if setting_type == 'enabled_links':
-            target_set = link_chats
-        elif setting_type == 'reply_guard':
-            target_set = reply_guard_chats
-        else:
-            target_set = typing_disabled_chats
+        with conn.cursor() as cur:
+            if enabled:
+                # Синтаксис ON CONFLICT (аналог INSERT OR IGNORE в SQLite)
+                cur.execute(
+                    "INSERT INTO chat_settings (chat_id, setting_type) VALUES (%s, %s) ON CONFLICT (chat_id, setting_type) DO NOTHING", 
+                    (chat_id, setting_type)
+                )
+            else:
+                cur.execute("DELETE FROM chat_settings WHERE chat_id = %s AND setting_type = %s", (chat_id, setting_type))
+            conn.commit()
+            
+            if setting_type == 'enabled_links':
+                target_set = link_chats
+            elif setting_type == 'reply_guard':
+                target_set = reply_guard_chats
+            else:
+                target_set = typing_disabled_chats
 
-        if enabled:
-            target_set.add(chat_id)
-        else:
-            target_set.discard(chat_id)
+            if enabled:
+                target_set.add(chat_id)
+            else:
+                target_set.discard(chat_id)
 
+# Сохранение подмены в PostgreSQL
 def save_substitution(chat_id, text, mode):
     with get_db() as conn:
-        if text is None:
-            conn.execute("DELETE FROM substitutions WHERE chat_id = ?", (chat_id,))
-            substitutions.pop(chat_id, None)
-        else:
-            conn.execute("INSERT OR REPLACE INTO substitutions VALUES (?, ?, ?)", (chat_id, text, mode))
-            substitutions[chat_id] = {"text": text, "mode": mode}
-        conn.commit()
+        with conn.cursor() as cur:
+            if text is None:
+                cur.execute("DELETE FROM substitutions WHERE chat_id = %s", (chat_id,))
+                substitutions.pop(chat_id, None)
+            else:
+                # Синтаксис ON CONFLICT DO UPDATE (аналог INSERT OR REPLACE в SQLite)
+                cur.execute(
+                    "INSERT INTO substitutions (chat_id, text, mode) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (chat_id) DO UPDATE SET text = EXCLUDED.text, mode = EXCLUDED.mode", 
+                    (chat_id, text, mode)
+                )
+                substitutions[chat_id] = {"text": text, "mode": mode}
+            conn.commit()
 
+# Инициализируем БД при старте
 init_db()
 
 async def delete_msg(chat_id, msg_id, bc_id):
@@ -347,7 +367,6 @@ async def handle(message: Message):
         # 2. Потом добавляем ссылку (если включено)
         if chat_id in link_chats:
             try:
-                # Проверяем, есть ли уже ссылка в сообщении
                 has_link = False
                 if message.entities:
                     for entity in message.entities:
@@ -363,7 +382,6 @@ async def handle(message: Message):
         
         # Если нужно модифицировать - удаляем оригинал и отправляем новое
         if need_modify:
-            # Удаляем оригинальное сообщение
             try:
                 await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[message.message_id])
             except:
@@ -372,7 +390,6 @@ async def handle(message: Message):
                 except:
                     pass
             
-            # Отправляем новое сообщение с модифицированным текстом
             try:
                 if chat_id in link_chats and '<a href=' in final_text:
                     await bot.send_message(
@@ -390,7 +407,6 @@ async def handle(message: Message):
                     )
             except Exception as e:
                 print(f"Ошибка отправки модифицированного сообщения: {e}")
-                # Если не получилось отправить новое - ничего не делаем
                 
     except Exception as e:
         print(f"❌ Ошибка в обработчике: {e}")
