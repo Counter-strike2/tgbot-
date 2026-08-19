@@ -3,3 +3,6 @@ aiohttp
 sqlalchemy
 asyncpg
 psycopg2-binary
+aiogram==3.4.1
+Flask==3.0.0
+aiohttp==3.9.0
