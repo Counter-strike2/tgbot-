@@ -1,14 +1,17 @@
 import asyncio
 import os
-import psycopg2  # Используем psycopg2 вместо sqlite3
+import psycopg2
 import re
+import logging  # Добавили логирование
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessConnection, Update
 from aiohttp import web
 
+# Настройка логирования для мгновенного вывода в Render
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 BOT_TOKEN = "8959860095:AAG2K8ng2mpiukjTRbhxEWmsdFmVa3Sm9Q8"
-# DATABASE_URL будет автоматически считываться из настроек Render, которые вы заполнили
 DATABASE_URL = os.environ.get('DATABASE_URL')
 CHANNEL_LINK = "https://t.me/gotrollholl"
 
@@ -28,98 +31,95 @@ msg_cache = {}
 active_chats = set()    
 bot_id = None
 
-# Функция подключения к PostgreSQL
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
-# Инициализация таблиц базы данных
 def init_db():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            # Используем BIGINT для chat_id, так как ID чатов в Telegram могут превышать лимиты стандартного INTEGER
-            cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
-            cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
-            conn.commit()
-            
-            cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
-            for row in cur.fetchall():
-                link_chats.add(row[0])
+    logging.info("🔌 Подключение к базе данных PostgreSQL (Neon.tech)...")
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
+                cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
+                conn.commit()
+                logging.info("✅ Таблицы базы данных успешно созданы или уже существуют!")
                 
-            cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
-            for row in cur.fetchall():
-                reply_guard_chats.add(row[0])
+                cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
+                for row in cur.fetchall():
+                    link_chats.add(row[0])
+                    
+                cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
+                for row in cur.fetchall():
+                    reply_guard_chats.add(row[0])
 
-            cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='typing_disabled'")
-            for row in cur.fetchall():
-                typing_disabled_chats.add(row[0])
-            
-            cur.execute("SELECT chat_id, text, mode FROM substitutions")
-            for row in cur.fetchall():
-                substitutions[row[0]] = {"text": row[1], "mode": row[2]}
+                cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='typing_disabled'")
+                for row in cur.fetchall():
+                    typing_disabled_chats.add(row[0])
+                
+                cur.execute("SELECT chat_id, text, mode FROM substitutions")
+                for row in cur.fetchall():
+                    substitutions[row[0]] = {"text": row[1], "mode": row[2]}
+                logging.info("💾 Данные настроек успешно загружены в память бота.")
+    except Exception as e:
+        logging.error(f"❌ Ошибка подключения к базе данных: {e}", exc_info=True)
+        raise e
 
-# Сохранение настроек в PostgreSQL
 def save_setting(chat_id, setting_type, enabled):
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            if enabled:
-                # Синтаксис ON CONFLICT (аналог INSERT OR IGNORE в SQLite)
-                cur.execute(
-                    "INSERT INTO chat_settings (chat_id, setting_type) VALUES (%s, %s) ON CONFLICT (chat_id, setting_type) DO NOTHING", 
-                    (chat_id, setting_type)
-                )
-            else:
-                cur.execute("DELETE FROM chat_settings WHERE chat_id = %s AND setting_type = %s", (chat_id, setting_type))
-            conn.commit()
-            
-            if setting_type == 'enabled_links':
-                target_set = link_chats
-            elif setting_type == 'reply_guard':
-                target_set = reply_guard_chats
-            else:
-                target_set = typing_disabled_chats
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if enabled:
+                    cur.execute(
+                        "INSERT INTO chat_settings (chat_id, setting_type) VALUES (%s, %s) ON CONFLICT (chat_id, setting_type) DO NOTHING", 
+                        (chat_id, setting_type)
+                    )
+                else:
+                    cur.execute("DELETE FROM chat_settings WHERE chat_id = %s AND setting_type = %s", (chat_id, setting_type))
+                conn.commit()
+                
+                target_set = link_chats if setting_type == 'enabled_links' else (reply_guard_chats if setting_type == 'reply_guard' else typing_disabled_chats)
+                if enabled:
+                    target_set.add(chat_id)
+                else:
+                    target_set.discard(chat_id)
+                logging.info(f"Настройка {setting_type} для чата {chat_id} изменена на {enabled}")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения настройки: {e}")
 
-            if enabled:
-                target_set.add(chat_id)
-            else:
-                target_set.discard(chat_id)
-
-# Сохранение подмены в PostgreSQL
 def save_substitution(chat_id, text, mode):
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            if text is None:
-                cur.execute("DELETE FROM substitutions WHERE chat_id = %s", (chat_id,))
-                substitutions.pop(chat_id, None)
-            else:
-                # Синтаксис ON CONFLICT DO UPDATE (аналог INSERT OR REPLACE в SQLite)
-                cur.execute(
-                    "INSERT INTO substitutions (chat_id, text, mode) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (chat_id) DO UPDATE SET text = EXCLUDED.text, mode = EXCLUDED.mode", 
-                    (chat_id, text, mode)
-                )
-                substitutions[chat_id] = {"text": text, "mode": mode}
-            conn.commit()
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if text is None:
+                    cur.execute("DELETE FROM substitutions WHERE chat_id = %s", (chat_id,))
+                    substitutions.pop(chat_id, None)
+                else:
+                    cur.execute(
+                        "INSERT INTO substitutions (chat_id, text, mode) VALUES (%s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET text = EXCLUDED.text, mode = EXCLUDED.mode", 
+                        (chat_id, text, mode)
+                    )
+                    substitutions[chat_id] = {"text": text, "mode": mode}
+                conn.commit()
+                logging.info(f"Подмена для чата {chat_id} изменена на {text} (режим {mode})")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения подмены: {e}")
 
-# Инициализируем БД при старте
 init_db()
 
 async def delete_msg(chat_id, msg_id, bc_id):
-    try:
-        await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[msg_id])
-    except:
+    if bc_id:
         try:
-            await bot.delete_message(chat_id, msg_id)
+            await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[msg_id])
+            return
         except:
             pass
+    try:
+        await bot.delete_message(chat_id, msg_id)
+    except:
+        pass
 
 async def clear_cmd(chat_id, msg_id, bc_id):
-    try:
-        await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[msg_id])
-    except:
-        try:
-            await bot.delete_message(chat_id, msg_id)
-        except:
-            pass
+    await delete_msg(chat_id, msg_id, bc_id)
 
 async def typing_worker(chat_id, bc_id):
     try:
@@ -143,6 +143,8 @@ async def unmute(user_id):
     await asyncio.sleep(mutes[user_id]["time"].total_seconds())
     mutes.pop(user_id, None)
 
+# Бот теперь слушает и обычные сообщения в личке, и бизнес-сообщения!
+@dp.message()
 @dp.business_message()
 async def handle(message: Message):
     global bot_id, CHANNEL_LINK
@@ -161,9 +163,6 @@ async def handle(message: Message):
             
         chat_id = message.chat.id
         bc_id = message.business_connection_id
-        
-        if not bc_id:
-            return
 
         if chat_id not in active_chats:
             if len(active_chats) >= 50:
@@ -406,10 +405,10 @@ async def handle(message: Message):
                         business_connection_id=bc_id
                     )
             except Exception as e:
-                print(f"Ошибка отправки модифицированного сообщения: {e}")
+                logging.error(f"Ошибка отправки модифицированного сообщения: {e}")
                 
     except Exception as e:
-        print(f"❌ Ошибка в обработчике: {e}")
+        logging.error(f"❌ Ошибка в обработчике: {e}")
 
 @dp.business_message()
 async def cache_incoming(message: Message):
@@ -446,7 +445,7 @@ async def global_update_handler(update: Update, bot: Bot):
                     )
                     msg_cache.pop(msg_id, None)
     except Exception as e:
-        print(f"❌ Ошибка обработчика удалений: {e}")
+        logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
 # ===== HEALTH-CHECK ДЛЯ RENDER =====
 async def health_check(request):
@@ -459,11 +458,11 @@ async def start_health_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
-    print("✅ Health check server started on port 10000")
+    logging.info("✅ Health check server started on port 10000")
 
 async def main():
     await start_health_server()
-    print("🔥 БОТ УСПЕШНО ЗАПУЩЕН НА POLLING!")
+    logging.info("🔥 БОТ УСПЕШНО ЗАПУЩЕН НА POLLING!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
