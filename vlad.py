@@ -22,7 +22,7 @@ dp = Dispatcher()
 mutes = {}              
 spam_tasks = {}         
 typing_tasks = {}       
-user_spam_texts = {}    # Ключ: (chat_id, bc_id)
+user_spam_texts = {}    
 link_chats = set()      
 reply_guard_chats = set() 
 typing_disabled_chats = set()
@@ -32,7 +32,6 @@ active_chats = set()
 bot_id = None
 CHANNEL_LINK = DEFAULT_CHANNEL_LINK
 
-# Кэш владельцев бизнес-подключений: bc_id -> user_id владельца
 bc_owners = {}
 
 def get_db():
@@ -46,7 +45,19 @@ def init_db():
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
                 cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
+                
+                # Автоматическая миграция таблицы spam_texts
                 cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)")
+                cur.execute("""
+                    DO $$ 
+                    BEGIN 
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='spam_texts' AND column_name='chat_id') THEN
+                            ALTER TABLE spam_texts RENAME COLUMN chat_id TO key_id;
+                            ALTER TABLE spam_texts ALTER COLUMN key_id TYPE TEXT USING key_id::text;
+                        END IF;
+                    END $$;
+                """)
+
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 conn.commit()
                 
@@ -68,7 +79,7 @@ def init_db():
 
                 cur.execute("SELECT key_id, text FROM spam_texts")
                 for row in cur.fetchall():
-                    user_spam_texts[row[0]] = row[1]
+                    user_spam_texts[str(row[0])] = row[1]
 
                 cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
                 row = cur.fetchone()
@@ -185,7 +196,6 @@ async def unmute(user_id):
     await asyncio.sleep(mutes[user_id]["time"].total_seconds())
     mutes.pop(user_id, None)
 
-# Отслеживаем новые бизнес-подключения, чтобы четко знать, кто владелец соединения
 @dp.business_connection()
 async def handle_bc(bc):
     bc_owners[bc.id] = bc.user.id
@@ -207,18 +217,16 @@ async def handle(message: Message):
         chat_id = message.chat.id
         bc_id = message.business_connection_id
 
-        # 🎯 СТРОГОЕ ОПРЕДЕЛЕНИЕ: МОЁ ЛИ ЭТО СООБЩЕНИЕ
+        # Проверка прав доступа бизнес-подключения
+        is_from_me = False
         if bc_id:
-            # Если еще нет в кэше владельца подключения — пытаемся запросить
             if bc_id not in bc_owners:
                 try:
                     conn_info = await bot.get_business_connection(bc_id)
                     bc_owners[bc_id] = conn_info.user.id
                 except:
                     pass
-            
             owner_id = bc_owners.get(bc_id)
-            # Сообщение считается МОИМ, только если sender_id совпадает с владельцем бизнеса!
             is_from_me = (uid == owner_id) if owner_id else False
         else:
             is_from_me = (uid == chat_id)
@@ -242,7 +250,7 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # 🛑 ЕСЛИ НАПИСАЛ СОБЕСЕДНИК (НЕ ВЛАДЕЛЕЦ БИЗНЕСА) — ИГНОРИРУЕМ И НЕ ВЫПОЛНЯЕМ КОМАНДЫ
+        # Игнорирование команд от собеседников
         if not is_from_me:
             return
 
@@ -264,7 +272,7 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
 
-        # ===== КОМАНДЫ =====
+        # Команды управления
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -301,7 +309,6 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
             
-            # Раздельное хранение спам-текста по ключу "chat_id:bc_id"
             spam_db_key = f"{chat_id}:{bc_id}"
             text = user_spam_texts.get(spam_db_key, user_spam_texts.get(str(chat_id), "Ты фрик!"))
             
@@ -403,7 +410,7 @@ async def handle(message: Message):
             )
             return
 
-        # ===== МОДИФИКАЦИЯ ТЕКСТА =====
+        # Модификация текста
         final_text = text_raw
         need_modify = False
         
@@ -515,7 +522,7 @@ async def main():
     except Exception as e:
         logging.error(f"Ошибка сброса вебхука: {e}")
 
-    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V4 (ИЗОЛЯЦИЯ АККАУНТОВ)")
+    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V5 (ИСПРАВЛЕНА БД И ДОСТУПЫ)")
     allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
     await dp.start_polling(bot, allowed_updates=allowed_updates)
 
