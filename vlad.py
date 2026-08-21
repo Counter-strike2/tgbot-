@@ -19,7 +19,8 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
 BOT_USERNAME = "norikKodBot"
 
-BIND_LINK = f"tg://resolve?domain={BOT_USERNAME}&startattach=biz"
+# Прямая ссылка в настройки Telegram для бизнеса внутри приложения:
+BIND_LINK = "tg://settings/business"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -190,6 +191,32 @@ async def delete_msg(chat_id, msg_id, bc_id):
         await bot.delete_message(chat_id, msg_id)
     except: pass
 
+async def edit_msg(chat_id, msg_id, text, bc_id, parse_mode=None):
+    """Редактирует сообщение прямо на месте без его удаления"""
+    if bc_id:
+        try:
+            await bot.edit_business_message_text(
+                business_connection_id=bc_id,
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode=parse_mode,
+                disable_web_page_preview=True
+            )
+            return
+        except Exception as e:
+            logging.error(f"Ошибка ред. бизнес-сообщения: {e}")
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=text,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logging.error(f"Ошибка ред. обычного сообщения: {e}")
+
 async def clear_cmd(chat_id, msg_id, bc_id):
     await delete_msg(chat_id, msg_id, bc_id)
 
@@ -231,11 +258,11 @@ async def handle_bc(bc):
 async def cmd_start(message: Message):
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡️ Привязать бота к аккаунту", url=BIND_LINK)]
+        [InlineKeyboardButton(text="⚡️ Открыть настройки Telegram для бизнеса", url=BIND_LINK)]
     ])
     await message.answer(
         "👋 **Привет!**\n\n"
-        "Нажми кнопку ниже, чтобы привязать бота к своему аккаунту в настройках Telegram для бизнеса.",
+        "Нажми кнопку ниже, чтобы сразу перейти в настройки Telegram для бизнеса и привязать бота.",
         reply_markup=kb,
         parse_mode="Markdown"
     )
@@ -244,7 +271,7 @@ def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Бизнес-клиенты", callback_data="admin_users")],
-        [InlineKeyboardButton(text="⚡️ Ссылка подключения", url=BIND_LINK)],
+        [InlineKeyboardButton(text="⚡️ Настройки бизнеса", url=BIND_LINK)],
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
@@ -347,14 +374,15 @@ async def handle(message: Message):
 
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
-        # 🛑 1. ПРОВЕРКА НА БАН
+        # 🛑 1. ПРОВЕРКА НА БАН С ССЫЛКОЙ НА ИМЯ ВЛАДЕЛЬЦА
         if uid in banned_users or (owner_id and owner_id in banned_users):
-            owner_name = user_names.get(ADMIN_ID, "Владельцем")
-            owner_link = f"<a href='tg://user?id={ADMIN_ID}'>{owner_name}</a>"
+            target_owner = owner_id or ADMIN_ID
+            owner_name = user_names.get(target_owner, message.from_user.first_name or "Владельцем")
+            owner_link = f"<a href='tg://user?id={target_owner}'>{owner_name}</a>"
             try:
                 await bot.send_message(
                     chat_id, 
-                    f"⛔ Вы были забанены владельцем {owner_link}.", 
+                    f"⛔ Вы были забанены пользователем {owner_link}.", 
                     parse_mode="HTML", 
                     business_connection_id=bc_id
                 )
@@ -381,9 +409,8 @@ async def handle(message: Message):
             if bc_id not in active_chats: active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
-        # 💾 2. ТОЧНОЕ КЭШИРОВАНИЕ ДЛЯ УДАЛЁННЫХ СООБЩЕНИЙ
+        # 💾 2. КЭШИРОВАНИЕ ДЛЯ ЛОВЛИ УДАЛЕНИЙ
         if message.text and not message.from_user.is_bot:
-            # Используем составной ключ (chat_id, message_id), чтобы ловко находить удалёнки
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
                 "text": message.text, 
@@ -463,7 +490,7 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # 🔇 ВЫДАЧА И СНЯТИЕ МУТА С ОПОВЕЩЕНИЕМ
+        # 🔇 МУТ И РАЗМУТ
         if low.startswith(".ут ") or low.startswith(".ут") or low.startswith(".мут ") or low.startswith("!мут "):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
@@ -545,7 +572,7 @@ async def handle(message: Message):
             )
             return
 
-        # Подмена текста и ссылка
+        # ✏️ ПОДМЕНА ТЕКСТА И ССЫЛКА (РЕДАКТИРОВАНИЕ ТЕКУЩЕГО СООБЩЕНИЯ)
         final_text = text_raw
         need_modify = False
         
@@ -561,9 +588,9 @@ async def handle(message: Message):
                 need_modify = True
         
         if need_modify:
-            await delete_msg(chat_id, message.message_id, bc_id)
             parse_m = "HTML" if (chat_id in link_chats and '<a href=' in final_text) else None
-            await bot.send_message(chat_id, final_text, parse_mode=parse_m, disable_web_page_preview=True, business_connection_id=bc_id)
+            # Изменяем сообщение прямо на месте без удаления:
+            await edit_msg(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_m)
                 
     except Exception as e:
         logging.error(f"❌ Ошибка: {e}")
@@ -577,7 +604,6 @@ async def global_update_handler(update: Update, bot: Bot):
             bc_id = data.business_connection_id
             msg_ids = data.message_ids
 
-            # Находим закешированное сообщение
             for (cached_chat_id, cached_msg_id), cached in list(msg_cache.items()):
                 if cached_msg_id in msg_ids:
                     user_link = f"<a href='tg://user?id={cached['user_id']}'>{cached['user']}</a>"
