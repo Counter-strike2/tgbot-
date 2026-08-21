@@ -11,12 +11,14 @@ from aiohttp import web
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Токен очищаем от любых случайных переносов строк и пробелов
-MY_TOKEN = "8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw".replace(" ", "").strip()
+# Берем токен из Environment Variables Render, либо запасной дефолтный
+TOKEN_FROM_ENV = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw')
+BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
+
 DATABASE_URL = os.environ.get('DATABASE_URL')
 CHANNEL_LINK = "https://t.me/gotrollholl"
 
-bot = Bot(token=MY_TOKEN)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ===== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ =====
@@ -428,7 +430,7 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
-# ===== ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ РЕНДЕРА =====
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 async def handle_ping(request):
     return web.Response(text="Bot is alive!")
 
@@ -441,7 +443,7 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logging.info(f"✅ ПРОВЕРКА: Веб-сервер запущен на порту {port}")
+    logging.info(f"✅ Веб-сервер запущен на порту {port}")
 
 async def main():
     await start_web_server()
@@ -451,7 +453,7 @@ async def main():
     except Exception as e:
         logging.error(f"Ошибка сброса вебхука: {e}")
 
-    logging.info("🔥 ПРОВЕРКА")
+    logging.info("🔥 ПРОВЕРКА ОБНОВЛЕНИЯ КОДА")
     allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
     await dp.start_polling(bot, allowed_updates=allowed_updates)
 
