@@ -11,12 +11,12 @@ from aiohttp import web
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Берем токен из Environment Variables Render, либо запасной дефолтный
+# Переменные окружения Render
 TOKEN_FROM_ENV = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw')
 BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
-CHANNEL_LINK = "https://t.me/gotrollholl"
+DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -33,20 +33,25 @@ substitutions = {}
 msg_cache = {}          
 active_chats = set()    
 bot_id = None
+CHANNEL_LINK = DEFAULT_CHANNEL_LINK
 
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
+    global CHANNEL_LINK
     logging.info("🔌 Подключение к базе данных PostgreSQL...")
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                # Таблицы настроек
                 cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
                 cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
+                cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (chat_id BIGINT PRIMARY KEY, text TEXT)")
+                cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 conn.commit()
-                logging.info("✅ Таблицы базы данных успешно созданы!")
                 
+                # Загрузка чатов
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall():
                     link_chats.add(row[0])
@@ -59,10 +64,23 @@ def init_db():
                 for row in cur.fetchall():
                     typing_disabled_chats.add(row[0])
                 
+                # Загрузка подмен
                 cur.execute("SELECT chat_id, text, mode FROM substitutions")
                 for row in cur.fetchall():
                     substitutions[row[0]] = {"text": row[1], "mode": row[2]}
-                logging.info("💾 Данные настроек успешно загружены в память.")
+
+                # Загрузка текстов спама (set)
+                cur.execute("SELECT chat_id, text FROM spam_texts")
+                for row in cur.fetchall():
+                    user_spam_texts[row[0]] = row[1]
+
+                # Загрузка глобальной ссылки
+                cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
+                row = cur.fetchone()
+                if row:
+                    CHANNEL_LINK = row[0]
+
+                logging.info("💾 Все данные (настройки, тексты set, подмены, ссылки) загружены из PostgreSQL!")
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к БД: {e}", exc_info=True)
         raise e
@@ -104,6 +122,33 @@ def save_substitution(chat_id, text, mode):
                 conn.commit()
     except Exception as e:
         logging.error(f"Ошибка сохранения подмены: {e}")
+
+def save_spam_text(chat_id, text):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO spam_texts (chat_id, text) VALUES (%s, %s) ON CONFLICT (chat_id) DO UPDATE SET text = EXCLUDED.text",
+                    (chat_id, text)
+                )
+                conn.commit()
+                user_spam_texts[chat_id] = text
+    except Exception as e:
+        logging.error(f"Ошибка сохранения спам-текста: {e}")
+
+def save_channel_link(link_url):
+    global CHANNEL_LINK
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO global_config (key, value) VALUES ('channel_link', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    (link_url,)
+                )
+                conn.commit()
+                CHANNEL_LINK = link_url
+    except Exception as e:
+        logging.error(f"Ошибка сохранения ссылки: {e}")
 
 init_db()
 
@@ -161,10 +206,8 @@ async def handle(message: Message):
         chat_id = message.chat.id
         bc_id = message.business_connection_id
 
-        # Проверка: сообщение от владельца аккаунта
         is_from_me = message.from_user.id == message.chat.id if bc_id is None else (message.from_user.id != bot_id)
 
-        # Активность печати
         if chat_id not in active_chats:
             if len(active_chats) >= 50:
                 old_chat = active_chats.pop()
@@ -182,7 +225,6 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
 
-        # Кэш для логирования удалений
         msg_cache[message.message_id] = {
             "text": text_raw, 
             "user": message.from_user.first_name,
@@ -193,7 +235,6 @@ async def handle(message: Message):
         if len(msg_cache) > 3000:
             msg_cache.pop(next(iter(msg_cache)))
             
-        # Защита реплаев и мут (только для чужих сообщений)
         if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
@@ -219,7 +260,7 @@ async def handle(message: Message):
                 new_link = parts[1].strip()
                 if not new_link.startswith("http"):
                     new_link = "https://t.me/" + new_link.lstrip("@")
-                CHANNEL_LINK = new_link
+                save_channel_link(new_link)
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
@@ -254,7 +295,7 @@ async def handle(message: Message):
 
         if low.startswith("set "):
             new_spam_text = text_raw[4:].strip()
-            user_spam_texts[chat_id] = new_spam_text
+            save_spam_text(chat_id, new_spam_text)
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
@@ -318,7 +359,7 @@ async def handle(message: Message):
         if low == "!команды":
             await clear_cmd(chat_id, message.message_id, bc_id)
             await bot.send_message(chat_id,
-                "📋 **КОМАНДЫ БОТА (ПРОВЕРКА):**\n\n"
+                "📋 **КОМАНДЫ БОТА:**\n\n"
                 "`.мут X` — мут на X минут\n"
                 "`.размут` — снять мут\n"
                 "`.стоп` / `.старт` — включить/выключить ссылки\n"
@@ -328,7 +369,7 @@ async def handle(message: Message):
                 "`подмена выкл` — выключить подмену\n"
                 "`ss` — спам\n"
                 "`dd` — стоп спам\n"
-                "`set текст` — текст для спама\n"
+                "`set текст` — текст для спама (сохраняется в БД)\n"
                 "`+реплай` / `-реплай` — защита от реплаев\n"
                 "`+линк ссылка` — сменить ссылку\n"
                 "`мой ид` / `твой ид` — ID",
@@ -453,7 +494,7 @@ async def main():
     except Exception as e:
         logging.error(f"Ошибка сброса вебхука: {e}")
 
-    logging.info("🔥 ПРОВЕРКА ОБНОВЛЕНИЯ КОДА")
+    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V2")
     allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
     await dp.start_polling(bot, allowed_updates=allowed_updates)
 
