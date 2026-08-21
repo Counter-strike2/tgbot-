@@ -22,7 +22,7 @@ dp = Dispatcher()
 mutes = {}              
 spam_tasks = {}         
 typing_tasks = {}       
-user_spam_texts = {}    
+user_spam_texts = {}    # Ключ: (chat_id, bc_id)
 link_chats = set()      
 reply_guard_chats = set() 
 typing_disabled_chats = set()
@@ -31,6 +31,9 @@ msg_cache = {}
 active_chats = set()    
 bot_id = None
 CHANNEL_LINK = DEFAULT_CHANNEL_LINK
+
+# Кэш владельцев бизнес-подключений: bc_id -> user_id владельца
+bc_owners = {}
 
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -43,7 +46,7 @@ def init_db():
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
                 cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
-                cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (chat_id BIGINT PRIMARY KEY, text TEXT)")
+                cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 conn.commit()
                 
@@ -63,7 +66,7 @@ def init_db():
                 for row in cur.fetchall():
                     substitutions[row[0]] = {"text": row[1], "mode": row[2]}
 
-                cur.execute("SELECT chat_id, text FROM spam_texts")
+                cur.execute("SELECT key_id, text FROM spam_texts")
                 for row in cur.fetchall():
                     user_spam_texts[row[0]] = row[1]
 
@@ -115,16 +118,16 @@ def save_substitution(chat_id, text, mode):
     except Exception as e:
         logging.error(f"Ошибка сохранения подмены: {e}")
 
-def save_spam_text(chat_id, text):
+def save_spam_text(key_id, text):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO spam_texts (chat_id, text) VALUES (%s, %s) ON CONFLICT (chat_id) DO UPDATE SET text = EXCLUDED.text",
-                    (chat_id, text)
+                    "INSERT INTO spam_texts (key_id, text) VALUES (%s, %s) ON CONFLICT (key_id) DO UPDATE SET text = EXCLUDED.text",
+                    (str(key_id), text)
                 )
                 conn.commit()
-                user_spam_texts[chat_id] = text
+                user_spam_texts[str(key_id)] = text
     except Exception as e:
         logging.error(f"Ошибка сохранения спам-текста: {e}")
 
@@ -168,10 +171,8 @@ async def typing_worker(chat_id, bc_id):
     except asyncio.CancelledError:
         pass
 
-# 🔥 СПАМ ОТПРАВЛЯЕТ КАЖДОЕ СЛОВО/ФРАЗУ ОТДЕЛЬНЫМ СООБЩЕНИЕМ
 async def spam_worker(chat_id, bc_id, reply_to, text):
     try:
-        # Разбиваем сохраненную строку на слова для поочередной отправки
         words = text.split() if text else ["Ты", "фрик!"]
         while True:
             for word in words:
@@ -183,6 +184,11 @@ async def spam_worker(chat_id, bc_id, reply_to, text):
 async def unmute(user_id):
     await asyncio.sleep(mutes[user_id]["time"].total_seconds())
     mutes.pop(user_id, None)
+
+# Отслеживаем новые бизнес-подключения, чтобы четко знать, кто владелец соединения
+@dp.business_connection()
+async def handle_bc(bc):
+    bc_owners[bc.id] = bc.user.id
 
 @dp.message()
 @dp.business_message()
@@ -201,8 +207,21 @@ async def handle(message: Message):
         chat_id = message.chat.id
         bc_id = message.business_connection_id
 
-        # Проверка: сообщение должно быть отправлено владельцем конкретного подключенного аккаунта
-        is_from_me = message.from_user.id == message.chat.id if bc_id is None else (message.from_user.id != bot_id)
+        # 🎯 СТРОГОЕ ОПРЕДЕЛЕНИЕ: МОЁ ЛИ ЭТО СООБЩЕНИЕ
+        if bc_id:
+            # Если еще нет в кэше владельца подключения — пытаемся запросить
+            if bc_id not in bc_owners:
+                try:
+                    conn_info = await bot.get_business_connection(bc_id)
+                    bc_owners[bc_id] = conn_info.user.id
+                except:
+                    pass
+            
+            owner_id = bc_owners.get(bc_id)
+            # Сообщение считается МОИМ, только если sender_id совпадает с владельцем бизнеса!
+            is_from_me = (uid == owner_id) if owner_id else False
+        else:
+            is_from_me = (uid == chat_id)
 
         if message.text:
             msg_cache[message.message_id] = {
@@ -223,7 +242,7 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # Игнорируем чужие сообщения
+        # 🛑 ЕСЛИ НАПИСАЛ СОБЕСЕДНИК (НЕ ВЛАДЕЛЕЦ БИЗНЕСА) — ИГНОРИРУЕМ И НЕ ВЫПОЛНЯЕМ КОМАНДЫ
         if not is_from_me:
             return
 
@@ -282,8 +301,9 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
             
-            # Берем только то, что сохранено в БД (без подмешивания дефолтного "Ты фрик!")
-            text = user_spam_texts.get(chat_id, "Ты фрик!")
+            # Раздельное хранение спам-текста по ключу "chat_id:bc_id"
+            spam_db_key = f"{chat_id}:{bc_id}"
+            text = user_spam_texts.get(spam_db_key, user_spam_texts.get(str(chat_id), "Ты фрик!"))
             
             if task_key in spam_tasks:
                 spam_tasks[task_key].cancel()
@@ -300,7 +320,8 @@ async def handle(message: Message):
 
         if low.startswith("set "):
             new_spam_text = text_raw[4:].strip()
-            save_spam_text(chat_id, new_spam_text)
+            spam_db_key = f"{chat_id}:{bc_id}"
+            save_spam_text(spam_db_key, new_spam_text)
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
@@ -494,7 +515,7 @@ async def main():
     except Exception as e:
         logging.error(f"Ошибка сброса вебхука: {e}")
 
-    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V3")
+    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V4 (ИЗОЛЯЦИЯ АККАУНТОВ)")
     allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
     await dp.start_polling(bot, allowed_updates=allowed_updates)
 
