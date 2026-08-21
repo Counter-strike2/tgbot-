@@ -189,9 +189,7 @@ async def delete_msg(chat_id, msg_id, bc_id):
     except: pass
 
 async def edit_or_replace_msg(chat_id, msg_id, text, bc_id, parse_mode=None, reply_markup=None):
-    """Пытается отредактировать текущее сообщение, если нельзя — отправляет новое"""
-    edited = False
-    
+    """БЫСТРОЕ редактирование без задержек"""
     # Пробуем отредактировать бизнес-сообщение
     if bc_id:
         try:
@@ -204,48 +202,24 @@ async def edit_or_replace_msg(chat_id, msg_id, text, bc_id, parse_mode=None, rep
                 disable_web_page_preview=True,
                 reply_markup=reply_markup
             )
-            edited = True
-            logging.info(f"✅ Отредактировано бизнес-сообщение {msg_id} в чате {chat_id}")
+            return True
         except Exception as e:
             logging.warning(f"Не удалось отредактировать бизнес-сообщение: {e}")
     
-    # Если не вышло или это обычный чат
-    if not edited:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=text,
-                parse_mode=parse_mode,
-                disable_web_page_preview=True,
-                reply_markup=reply_markup
-            )
-            edited = True
-            logging.info(f"✅ Отредактировано сообщение {msg_id} в чате {chat_id}")
-        except Exception as e:
-            logging.warning(f"Не удалось отредактировать сообщение: {e}")
-    
-    # Если редактирование не удалось - удаляем и отправляем новое
-    if not edited:
-        try:
-            await delete_msg(chat_id, msg_id, bc_id)
-            logging.info(f"🗑 Удалено старое сообщение {msg_id}")
-        except:
-            pass
-        
-        try:
-            new_msg = await bot.send_message(
-                chat_id, 
-                text, 
-                parse_mode=parse_mode, 
-                disable_web_page_preview=True,
-                business_connection_id=bc_id,
-                reply_markup=reply_markup
-            )
-            logging.info(f"📨 Отправлено новое сообщение в чат {chat_id}")
-            return new_msg
-        except Exception as e:
-            logging.error(f"❌ Не удалось отправить новое сообщение: {e}")
+    # Пробуем отредактировать обычное сообщение
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=text,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True,
+            reply_markup=reply_markup
+        )
+        return True
+    except Exception as e:
+        logging.warning(f"Не удалось отредактировать сообщение: {e}")
+        return False
 
 async def clear_cmd(chat_id, msg_id, bc_id):
     await delete_msg(chat_id, msg_id, bc_id)
@@ -283,19 +257,51 @@ async def unmute(user_id, chat_id, bc_id, user_name):
 async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
+    
+    # Отправляем приветствие владельцу с кнопкой
+    owner_id = int(bc.user.id)
+    owner_name = bc.user.first_name or "Пользователь"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Написать владельцу", url="https://t.me/NorikAmiri")]
+    ])
+    
+    try:
+        await bot.send_message(
+            owner_id,
+            f"👋 Привет, {owner_name}!\n\n"
+            f"✅ Бот успешно подключен к твоему бизнес-аккаунту!\n\n"
+            f"📌 Теперь я буду обрабатывать все сообщения в твоих чатах.\n"
+            f"Команды для управления: `!команды`\n\n"
+            f"❗ Если у тебя возникнут вопросы или предложения - напиши владельцу бота.",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить приветствие: {e}")
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Связаться с владельцем", url="https://t.me/NorikAmiri")]
+    ])
+    
     await message.answer(
         "👋 **Привет!**\n\n"
-        "Для работы бота в бизнес-чатах:\n"
-        "1. Открой настройки бизнес-аккаунта\n"
-        "2. Перейди в раздел 'Автоматизация чатов'\n"
-        "3. Найди бота и подключи его\n\n"
-        "📌 После подключения бот будет автоматически обрабатывать сообщения в твоих бизнес-чатах.\n\n"
-        "Команды для управления: `!команды`",
-        parse_mode="Markdown"
+        "📌 **Как подключить бота к бизнес-аккаунту:**\n\n"
+        "1️⃣ Зайди в **Настройки** Telegram\n"
+        "2️⃣ Нажми **Мой профиль**\n"
+        "3️⃣ Выбери **Автоматизация чатов**\n"
+        "4️⃣ Нажми **Добавить** и введи юзернейм бота:\n"
+        "   `@norikKodBot`\n"
+        "5️⃣ Дай боту права **Сообщения 5/5**\n\n"
+        "✅ После подключения бот будет автоматически обрабатывать все сообщения в твоих чатах!\n\n"
+        "📋 Команды для управления: `!команды`\n\n"
+        "❗ Если возникнут вопросы - напиши владельцу бота.",
+        parse_mode="Markdown",
+        reply_markup=kb
     )
 
 def get_admin_keyboard():
@@ -404,7 +410,7 @@ async def handle(message: Message):
 
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
-        # 🛑 1. ПРОВЕРКА НА БАН
+        # 🛑 ПРОВЕРКА НА БАН
         if uid in banned_users or (owner_id and owner_id in banned_users):
             target_owner = owner_id or ADMIN_ID
             owner_name = user_names.get(target_owner, message.from_user.first_name or "Владельцем")
@@ -439,7 +445,7 @@ async def handle(message: Message):
             if bc_id not in active_chats: active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
-        # 💾 2. СОХРАНЕНИЕ ВСЕХ СООБЩЕНИЙ В КЭШ
+        # 💾 СОХРАНЕНИЕ В КЭШ
         if message.text and not message.from_user.is_bot:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
@@ -452,7 +458,7 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # 🔇 3. ПРОВЕРКА НА МУТ
+        # 🔇 ПРОВЕРКА НА МУТ
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
@@ -468,77 +474,67 @@ async def handle(message: Message):
         task_key = (chat_id, bc_id)
         current_owner = bc_owners.get(bc_id, uid)
 
-        # Команды управления (удаляем команду)
-        if low in [".стоп", ".старт", "+линк", "подмена", "печать +", "печать -", "+реплай", "-реплай"]:
-            # Проверяем, начинается ли команда с этих слов
-            is_command = False
-            
-            # .стоп
-            if low == ".стоп":
-                save_setting(chat_id, 'enabled_links', False)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                is_command = True
-            
-            # .старт
-            elif low == ".старт":
-                save_setting(chat_id, 'enabled_links', True)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                is_command = True
-            
-            # +линк
-            elif low.startswith("+линк"):
-                parts = text_raw.split(maxsplit=1)
-                if len(parts) > 1:
-                    new_link = parts[1].strip()
-                    if not new_link.startswith("http"):
-                        new_link = "https://t.me/" + new_link.lstrip("@")
-                    save_channel_link(new_link)
-                    await bot.send_message(chat_id, f"✅ Ссылка изменена на: {new_link}", business_connection_id=bc_id)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                is_command = True
-            
-            # подмена
-            elif low.startswith("подмена "):
-                parts = text_raw.split(maxsplit=2)
-                if len(parts) >= 2:
-                    if parts[1].lower() == "выкл":
-                        save_substitution(chat_id, None, None)
-                        await bot.send_message(chat_id, "✅ Подмена отключена", business_connection_id=bc_id)
-                    else:
-                        mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
-                        save_substitution(chat_id, parts[1], mode)
-                        mode_text = "перед" if mode == 1 else "после"
-                        await bot.send_message(chat_id, f"✅ Подмена установлена: '{parts[1]}' ({mode_text})", business_connection_id=bc_id)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                is_command = True
-            
-            # печать
-            elif low in ["печать +", "печать -"]:
-                if low == "печать -":
-                    save_setting(chat_id, 'typing_disabled', True)
-                    if bc_id in typing_tasks:
-                        typing_tasks[bc_id].cancel()
-                        del typing_tasks[bc_id]
-                else:
-                    save_setting(chat_id, 'typing_disabled', False)
-                    if bc_id and bc_id not in typing_tasks:
-                        typing_tasks[bc_id] = asyncio.create_task(typing_worker(bc_id))
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                is_command = True
-            
-            # реплай
-            elif low in ["+реплай", "-реплай"]:
-                if low == "+реплай":
-                    save_setting(chat_id, 'reply_guard', True)
-                else:
-                    save_setting(chat_id, 'reply_guard', False)
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                is_command = True
-            
-            if is_command:
-                return
+        # 🔥 БЫСТРОЕ УДАЛЕНИЕ КОМАНД
+        if low == ".стоп":
+            save_setting(chat_id, 'enabled_links', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
 
-        # Остальные команды
+        if low == ".старт":
+            save_setting(chat_id, 'enabled_links', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+
+        if low.startswith("+линк"):
+            parts = text_raw.split(maxsplit=1)
+            if len(parts) > 1:
+                new_link = parts[1].strip()
+                if not new_link.startswith("http"):
+                    new_link = "https://t.me/" + new_link.lstrip("@")
+                save_channel_link(new_link)
+                await bot.send_message(chat_id, f"✅ Ссылка изменена на: {new_link}", business_connection_id=bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+
+        if low.startswith("подмена "):
+            parts = text_raw.split(maxsplit=2)
+            if len(parts) >= 2:
+                if parts[1].lower() == "выкл":
+                    save_substitution(chat_id, None, None)
+                    await bot.send_message(chat_id, "✅ Подмена отключена", business_connection_id=bc_id)
+                else:
+                    mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
+                    save_substitution(chat_id, parts[1], mode)
+                    mode_text = "перед" if mode == 1 else "после"
+                    await bot.send_message(chat_id, f"✅ Подмена установлена: '{parts[1]}' ({mode_text})", business_connection_id=bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+
+        if low == "печать -":
+            save_setting(chat_id, 'typing_disabled', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            if bc_id in typing_tasks:
+                typing_tasks[bc_id].cancel()
+                del typing_tasks[bc_id]
+            return
+
+        if low == "печать +":
+            save_setting(chat_id, 'typing_disabled', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            if bc_id and bc_id not in typing_tasks:
+                typing_tasks[bc_id] = asyncio.create_task(typing_worker(bc_id))
+            return
+
+        if low == "+реплай":
+            save_setting(chat_id, 'reply_guard', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+
+        if low == "-реплай":
+            save_setting(chat_id, 'reply_guard', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+
         if low == "ss":
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
@@ -559,7 +555,7 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # 🔇 МУТ И РАЗМУТ
+        # МУТ И РАЗМУТ
         if low.startswith(".ут ") or low.startswith(".ут") or low.startswith(".мут ") or low.startswith("!мут "):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
@@ -616,21 +612,20 @@ async def handle(message: Message):
             )
             return
 
-        # ✏️ ПОДМЕНА И АВТО-ЛИНК
+        # ✏️ БЫСТРАЯ ПОДМЕНА И АВТО-ЛИНК (без удаления)
         final_text = text_raw
         need_modify = False
         parse_mode = None
         
-        # Проверяем подмену
+        # Подмена текста
         if chat_id in substitutions:
             sub = substitutions[chat_id]
             final_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
             need_modify = True
             parse_mode = "HTML"
         
-        # Проверяем авто-ссылки
+        # Авто-ссылка
         if chat_id in link_chats:
-            # Проверяем наличие ссылок в сообщении
             has_link = False
             if message.entities:
                 for entity in message.entities:
@@ -638,20 +633,26 @@ async def handle(message: Message):
                         has_link = True
                         break
             
-            # Проверяем, есть ли ссылка в тексте
             if not has_link and CHANNEL_LINK not in final_text:
                 final_text = f'<a href="{CHANNEL_LINK}"><u>{final_text}</u></a>'
                 need_modify = True
                 parse_mode = "HTML"
         
-        # Если нужно изменить - редактируем
+        # БЫСТРОЕ РЕДАКТИРОВАНИЕ (без удаления)
         if need_modify:
-            await edit_or_replace_msg(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
+            success = await edit_or_replace_msg(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
+            if not success:
+                # Если редактирование не удалось - просто отправляем новое (но это крайний случай)
+                try:
+                    await delete_msg(chat_id, message.message_id, bc_id)
+                    await bot.send_message(chat_id, final_text, parse_mode=parse_mode, business_connection_id=bc_id)
+                except:
+                    pass
                 
     except Exception as e:
         logging.error(f"❌ Ошибка: {e}")
 
-# ================= 🗑 УДАЛЁННЫЕ СООБЩЕНИЯ =================
+# ================= УДАЛЁННЫЕ СООБЩЕНИЯ =================
 @dp.update()
 async def global_update_handler(update: Update, bot: Bot):
     try:
