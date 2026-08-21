@@ -11,7 +11,7 @@ from aiohttp import web
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-BOT_TOKEN = "8959860095:AAG2K8ng2mpiukjTRbhxEWmsdFmVa3Sm9Q8"
+BOT_TOKEN = "8959860095:AAGLvDAC9BziGkqeTMck119HzpJ2Pselgt4"
 DATABASE_URL = os.environ.get('DATABASE_URL')
 CHANNEL_LINK = "https://t.me/gotrollholl"
 
