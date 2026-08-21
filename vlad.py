@@ -11,8 +11,8 @@ from aiohttp import web
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Получаем токен из переменных окружения Render, либо берем новый токен
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw').strip()
+# Жёстко заданный новый токен с автоматической очисткой пробелов
+BOT_TOKEN = "8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw".strip()
 DATABASE_URL = os.environ.get('DATABASE_URL')
 CHANNEL_LINK = "https://t.me/gotrollholl"
 
@@ -200,7 +200,7 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # ===== ОБРАБОТКА КОМАНД (ПОЛНАЯ ТИШИНА) =====
+        # ===== ОБРАБОТКА КОМАНД =====
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -334,14 +334,13 @@ async def handle(message: Message):
             )
             return
 
-        # ===== МОДИФИКАЦИЯ СООБЩЕНИЙ (ТОЛЬКО ДЛЯ ТВОИХ СООБЩЕНИЙ) =====
+        # ===== МОДИФИКАЦИЯ СООБЩЕНИЙ =====
         if not is_from_me:
             return
 
         final_text = text_raw
         need_modify = False
         
-        # 1. Применяем подмену
         if chat_id in substitutions:
             try:
                 sub = substitutions[chat_id]
@@ -353,7 +352,6 @@ async def handle(message: Message):
             except:
                 pass
         
-        # 2. Применяем ссылку
         if chat_id in link_chats:
             try:
                 has_link = False
@@ -369,7 +367,6 @@ async def handle(message: Message):
             except:
                 pass
         
-        # Заменяем оригинал на модифицированное сообщение
         if need_modify:
             await delete_msg(chat_id, message.message_id, bc_id)
             
@@ -389,7 +386,7 @@ async def handle(message: Message):
                         business_connection_id=bc_id
                     )
             except Exception as e:
-                logging.error(f"Ошибка отправки модифицированного сообщения: {e}")
+                logging.error(f"Ошибка отправки сообщения: {e}")
                 
     except Exception as e:
         logging.error(f"❌ Ошибка в обработчике: {e}")
@@ -448,7 +445,6 @@ async def main():
     await start_health_server()
     logging.info("🔥 БОТ УСПЕШНО ЗАПУЩЕН НА POLLING!")
     
-    # Сбрасываем вебхуки и накопившиеся апдейты
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except:
