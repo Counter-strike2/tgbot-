@@ -19,8 +19,8 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
 BOT_USERNAME = "norikKodBot"
 
-# Прямая ссылка в настройки Telegram для бизнеса внутри приложения:
-BIND_LINK = "tg://settings/business"
+# Ссылка для автоматического открытия окна "Автоматизация чатов" с подставленным юзернеймом бота:
+BIND_LINK = f"https://t.me/{BOT_USERNAME}?startattach=biz"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -191,8 +191,9 @@ async def delete_msg(chat_id, msg_id, bc_id):
         await bot.delete_message(chat_id, msg_id)
     except: pass
 
-async def edit_msg(chat_id, msg_id, text, bc_id, parse_mode=None):
-    """Редактирует сообщение прямо на месте без его удаления"""
+async def edit_or_replace_msg(chat_id, msg_id, text, bc_id, parse_mode=None):
+    """Пытается отредактировать текущее сообщение, если нельзя — отправляет новое"""
+    edited = False
     if bc_id:
         try:
             await bot.edit_business_message_text(
@@ -203,19 +204,25 @@ async def edit_msg(chat_id, msg_id, text, bc_id, parse_mode=None):
                 parse_mode=parse_mode,
                 disable_web_page_preview=True
             )
-            return
+            edited = True
         except Exception as e:
-            logging.error(f"Ошибка ред. бизнес-сообщения: {e}")
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg_id,
-            text=text,
-            parse_mode=parse_mode,
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        logging.error(f"Ошибка ред. обычного сообщения: {e}")
+            logging.warning(f"Не удалось отредактировать бизнес-сообщение: {e}")
+    
+    if not edited:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                parse_mode=parse_mode,
+                disable_web_page_preview=True
+            )
+            edited = True
+        except Exception: pass
+
+    if not edited:
+        await delete_msg(chat_id, msg_id, bc_id)
+        await bot.send_message(chat_id, text, parse_mode=parse_mode, disable_web_page_preview=True, business_connection_id=bc_id)
 
 async def clear_cmd(chat_id, msg_id, bc_id):
     await delete_msg(chat_id, msg_id, bc_id)
@@ -258,11 +265,11 @@ async def handle_bc(bc):
 async def cmd_start(message: Message):
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡️ Открыть настройки Telegram для бизнеса", url=BIND_LINK)]
+        [InlineKeyboardButton(text="⚡️ Подключить аккаунт", url=BIND_LINK)]
     ])
     await message.answer(
         "👋 **Привет!**\n\n"
-        "Нажми кнопку ниже, чтобы сразу перейти в настройки Telegram для бизнеса и привязать бота.",
+        "Нажми кнопку ниже, чтобы открыть настройки автоматизации и привязать бота к аккаунту.",
         reply_markup=kb,
         parse_mode="Markdown"
     )
@@ -271,7 +278,7 @@ def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Бизнес-клиенты", callback_data="admin_users")],
-        [InlineKeyboardButton(text="⚡️ Настройки бизнеса", url=BIND_LINK)],
+        [InlineKeyboardButton(text="⚡️ Подключить аккаунт", url=BIND_LINK)],
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
@@ -374,7 +381,7 @@ async def handle(message: Message):
 
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
-        # 🛑 1. ПРОВЕРКА НА БАН С ССЫЛКОЙ НА ИМЯ ВЛАДЕЛЬЦА
+        # 🛑 1. ПРОВЕРКА НА БАН
         if uid in banned_users or (owner_id and owner_id in banned_users):
             target_owner = owner_id or ADMIN_ID
             owner_name = user_names.get(target_owner, message.from_user.first_name or "Владельцем")
@@ -409,7 +416,7 @@ async def handle(message: Message):
             if bc_id not in active_chats: active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
-        # 💾 2. КЭШИРОВАНИЕ ДЛЯ ЛОВЛИ УДАЛЕНИЙ
+        # 💾 2. СОХРАНЕНИЕ ВСЕХ СООБЩЕНИЙ В КЭШ
         if message.text and not message.from_user.is_bot:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
@@ -419,7 +426,7 @@ async def handle(message: Message):
                 "chat_id": chat_id,
                 "bc_id": bc_id
             }
-            if len(msg_cache) > 4000:
+            if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
         # 🔇 3. ПРОВЕРКА НА МУТ
@@ -572,7 +579,7 @@ async def handle(message: Message):
             )
             return
 
-        # ✏️ ПОДМЕНА ТЕКСТА И ССЫЛКА (РЕДАКТИРОВАНИЕ ТЕКУЩЕГО СООБЩЕНИЯ)
+        # ✏️ ПОДМЕНА И АВТО-ЛИНК
         final_text = text_raw
         need_modify = False
         
@@ -589,8 +596,7 @@ async def handle(message: Message):
         
         if need_modify:
             parse_m = "HTML" if (chat_id in link_chats and '<a href=' in final_text) else None
-            # Изменяем сообщение прямо на месте без удаления:
-            await edit_msg(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_m)
+            await edit_or_replace_msg(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_m)
                 
     except Exception as e:
         logging.error(f"❌ Ошибка: {e}")
@@ -602,15 +608,17 @@ async def global_update_handler(update: Update, bot: Bot):
         if update.deleted_business_messages:
             data = update.deleted_business_messages
             bc_id = data.business_connection_id
-            msg_ids = data.message_ids
+            msg_ids = set(data.message_ids)
 
             for (cached_chat_id, cached_msg_id), cached in list(msg_cache.items()):
                 if cached_msg_id in msg_ids:
-                    user_link = f"<a href='tg://user?id={cached['user_id']}'>{cached['user']}</a>"
+                    fname = cached['user']
+                    uid = cached['user_id']
+                    user_link = f"<a href='tg://user?id={uid}'>{fname}</a>"
+                    
                     text_to_send = (
-                        f"👤 {user_link}\n"
-                        f"🗑 <b>Удалил сообщение ↓</b>\n"
-                        f"{cached['text']}"
+                        f"👤 {user_link} <b>удалил(а) сообщение ↓</b>\n\n"
+                        f"💬 {cached['text']}"
                     )
 
                     await bot.send_message(
