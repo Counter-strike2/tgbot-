@@ -21,6 +21,9 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
 BOT_USERNAME = "norikKodBot"
 
+# Встроенная ссылка Telegram, чтобы откликаться сразу внутри приложения без браузера
+BIND_LINK = f"tg://resolve?domain={BOT_USERNAME}&startattach=biz"
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -221,9 +224,8 @@ async def handle_bc(bc):
 async def cmd_start(message: Message):
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
         
-    bind_url = f"https://t.me/biz/bot/{BOT_USERNAME}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡️ Привязать бота к аккаунту", url=bind_url)]
+        [InlineKeyboardButton(text="⚡️ Привязать бота к аккаунту", url=BIND_LINK)]
     ])
     await message.answer(
         "👋 **Привет!**\n\n"
@@ -234,11 +236,10 @@ async def cmd_start(message: Message):
 
 # ================= АДМИН-ПАНЕЛЬ =================
 def get_admin_keyboard():
-    bind_url = f"https://t.me/biz/bot/{BOT_USERNAME}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Бизнес-клиенты", callback_data="admin_users")],
-        [InlineKeyboardButton(text="⚡️ Ссылка подключения", url=bind_url)],
+        [InlineKeyboardButton(text="⚡️ Ссылка подключения", url=BIND_LINK)],
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
