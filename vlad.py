@@ -19,8 +19,8 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
 BOT_USERNAME = "norikKodBot"
 
-# Ссылка для автоматического открытия окна "Автоматизация чатов" с подставленным юзернеймом бота:
-BIND_LINK = f"https://t.me/{BOT_USERNAME}?startattach=biz"
+# Системная ссылка для перехода в Telegram Business
+BIND_LINK = "tg://settings/business"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -191,9 +191,8 @@ async def delete_msg(chat_id, msg_id, bc_id):
         await bot.delete_message(chat_id, msg_id)
     except: pass
 
-async def edit_or_replace_msg(chat_id, msg_id, text, bc_id, parse_mode=None):
-    """Пытается отредактировать текущее сообщение, если нельзя — отправляет новое"""
-    edited = False
+async def edit_msg_in_place(chat_id, msg_id, text, bc_id, parse_mode=None):
+    """Только редактирует сообщение на месте. Не удаляет и не создаёт новое."""
     if bc_id:
         try:
             await bot.edit_business_message_text(
@@ -204,25 +203,22 @@ async def edit_or_replace_msg(chat_id, msg_id, text, bc_id, parse_mode=None):
                 parse_mode=parse_mode,
                 disable_web_page_preview=True
             )
-            edited = True
+            return True
         except Exception as e:
-            logging.warning(f"Не удалось отредактировать бизнес-сообщение: {e}")
-    
-    if not edited:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=text,
-                parse_mode=parse_mode,
-                disable_web_page_preview=True
-            )
-            edited = True
-        except Exception: pass
-
-    if not edited:
-        await delete_msg(chat_id, msg_id, bc_id)
-        await bot.send_message(chat_id, text, parse_mode=parse_mode, disable_web_page_preview=True, business_connection_id=bc_id)
+            logging.error(f"Ошибка редактирования бизнес-сообщения: {e}")
+            return False
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=text,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True
+        )
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка редактирования сообщения: {e}")
+        return False
 
 async def clear_cmd(chat_id, msg_id, bc_id):
     await delete_msg(chat_id, msg_id, bc_id)
@@ -264,12 +260,15 @@ async def handle_bc(bc):
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡️ Подключить аккаунт", url=BIND_LINK)]
+        [InlineKeyboardButton(text="⚙️ Открыть настройки Telegram Business", url=BIND_LINK)]
     ])
+    
     await message.answer(
         "👋 **Привет!**\n\n"
-        "Нажми кнопку ниже, чтобы открыть настройки автоматизации и привязать бота к аккаунту.",
+        "1️⃣ Нажми кнопку ниже или перейди по ссылке: `tg://settings/business`\n"
+        f"2️⃣ В разделе **«Автоматизация чатов»** выбери бота @{BOT_USERNAME} и включи **Доступ к сообщениям**.",
         reply_markup=kb,
         parse_mode="Markdown"
     )
@@ -278,7 +277,7 @@ def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Бизнес-клиенты", callback_data="admin_users")],
-        [InlineKeyboardButton(text="⚡️ Подключить аккаунт", url=BIND_LINK)],
+        [InlineKeyboardButton(text="⚙️ Настройки бизнеса", url=BIND_LINK)],
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
@@ -416,7 +415,7 @@ async def handle(message: Message):
             if bc_id not in active_chats: active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
-        # 💾 2. СОХРАНЕНИЕ ВСЕХ СООБЩЕНИЙ В КЭШ
+        # 💾 2. СОХРАНЕНИЕ ВСЕХ ВХОДЯЩИХ И ИСХОДЯЩИХ СООБЩЕНИЙ В КЭШ ДЛЯ УДАЛЕНИЙ
         if message.text and not message.from_user.is_bot:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
@@ -497,27 +496,38 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # 🔇 МУТ И РАЗМУТ
+        # 🔇 ИСПРАВЛЕННЫЙ МУТ (Точное получение жертвы через реплай)
         if low.startswith(".ут ") or low.startswith(".ут") or low.startswith(".мут ") or low.startswith("!мут "):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
-                target_user = message.reply_to_message.from_user if message.reply_to_message else None
-                target_id = target_user.id if target_user else chat_id
-                target_name = target_user.first_name if target_user else "Пользователь"
                 
+                if message.reply_to_message and message.reply_to_message.from_user:
+                    target_user = message.reply_to_message.from_user
+                    target_id = target_user.id
+                    target_name = target_user.first_name or "Пользователь"
+                else:
+                    await clear_cmd(chat_id, message.message_id, bc_id)
+                    await bot.send_message(chat_id, "⚠️ Ответь командой `.мут X` на сообщение того, кого нужно замутить!", business_connection_id=bc_id)
+                    return
+
                 mutes[target_id] = {"time": timedelta(minutes=minutes), "until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
-                await clear_cmd(chat_id, message.message_id, bc_id)
                 
+                await clear_cmd(chat_id, message.message_id, bc_id)
                 user_link = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
                 await bot.send_message(chat_id, f"🔇 Пользователю {user_link} выдан <b>МУТ</b> на {minutes} мин.", parse_mode="HTML", business_connection_id=bc_id)
-            except: pass
+            except Exception as e:
+                logging.error(f"Ошибка мута: {e}")
             return
 
         if low == ".размут" or low == "!размут":
-            target_user = message.reply_to_message.from_user if message.reply_to_message else None
-            target_id = target_user.id if target_user else chat_id
-            target_name = target_user.first_name if target_user else "Пользователь"
+            if message.reply_to_message and message.reply_to_message.from_user:
+                target_user = message.reply_to_message.from_user
+                target_id = target_user.id
+                target_name = target_user.first_name or "Пользователь"
+            else:
+                target_id = chat_id
+                target_name = user_names.get(chat_id, "Пользователь")
             
             mutes.pop(target_id, None)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -566,8 +576,8 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             await bot.send_message(chat_id,
                 "📋 **КОМАНДЫ:**\n\n"
-                "`.мут X` / `.размут` — управление мутом\n"
-                "`.стоп` / `.старт` — авто-ссылки\n"
+                "`.мут X` / `.размут` — управление мутом (ответом на соо)\n"
+                "`.стоп` / `.старт` — авто-ссылки в чате\n"
                 "`печать +` / `печать -` — вечный статус печати\n"
                 "`подмена текст 1/2/выкл` — подмена текста\n"
                 "`ss` / `dd` — авто-спам / стоп\n"
@@ -579,7 +589,7 @@ async def handle(message: Message):
             )
             return
 
-        # ✏️ ПОДМЕНА И АВТО-ЛИНК
+        # ✏️ ПОДМЕНА И АВТО-ЛИНК (ИЗМЕНЕНИЕ СООБЩЕНИЯ НА МЕСТЕ)
         final_text = text_raw
         need_modify = False
         
@@ -596,7 +606,8 @@ async def handle(message: Message):
         
         if need_modify:
             parse_m = "HTML" if (chat_id in link_chats and '<a href=' in final_text) else None
-            await edit_or_replace_msg(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_m)
+            # Изменяем исходное сообщение, без удаления и отправки нового
+            await edit_msg_in_place(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_m)
                 
     except Exception as e:
         logging.error(f"❌ Ошибка: {e}")
