@@ -5,13 +5,17 @@ import re
 import logging
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, Update
+from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.filters import Command
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TOKEN_FROM_ENV = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw')
 BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
+
+# ⚠️ УКАЖИ ЗДЕСЬ СВОЙ TELEGRAM ID ДЛЯ ДОСТУПА К АДМИНКЕ
+ADMIN_ID = 5825717381 
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
@@ -22,17 +26,18 @@ dp = Dispatcher()
 mutes = {}              
 spam_tasks = {}         
 typing_tasks = {}       
-user_spam_texts = {}    
+user_spam_texts = {}    # Ключ: owner_id (или bc_id)
 link_chats = set()      
 reply_guard_chats = set() 
 typing_disabled_chats = set()
 substitutions = {}      
 msg_cache = {}          
-active_chats = set()    
+active_chats = {}       # bc_id -> set(chat_id)
 bot_id = None
 CHANNEL_LINK = DEFAULT_CHANNEL_LINK
 
-bc_owners = {}
+bc_owners = {}          # bc_id -> owner_id
+banned_users = set()    # Список заблокированных owner_id
 
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -45,20 +50,9 @@ def init_db():
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
                 cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
-                
-                # Автоматическая миграция таблицы spam_texts
                 cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)")
-                cur.execute("""
-                    DO $$ 
-                    BEGIN 
-                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='spam_texts' AND column_name='chat_id') THEN
-                            ALTER TABLE spam_texts RENAME COLUMN chat_id TO key_id;
-                            ALTER TABLE spam_texts ALTER COLUMN key_id TYPE TEXT USING key_id::text;
-                        END IF;
-                    END $$;
-                """)
-
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
+                cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 conn.commit()
                 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
@@ -81,15 +75,33 @@ def init_db():
                 for row in cur.fetchall():
                     user_spam_texts[str(row[0])] = row[1]
 
+                cur.execute("SELECT user_id FROM banned_users")
+                for row in cur.fetchall():
+                    banned_users.add(row[0])
+
                 cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
                 row = cur.fetchone()
                 if row:
                     CHANNEL_LINK = row[0]
 
-                logging.info("💾 Все данные загружены из PostgreSQL!")
+                logging.info("💾 Все данные успешно загружены из PostgreSQL!")
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к БД: {e}", exc_info=True)
         raise e
+
+def set_user_ban(user_id: int, ban: bool):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if ban:
+                    cur.execute("INSERT INTO banned_users (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+                    banned_users.add(user_id)
+                else:
+                    cur.execute("DELETE FROM banned_users WHERE user_id = %s", (user_id,))
+                    banned_users.discard(user_id)
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка изменения бана юзера: {e}")
 
 def save_setting(chat_id, setting_type, enabled):
     try:
@@ -173,11 +185,17 @@ async def delete_msg(chat_id, msg_id, bc_id):
 async def clear_cmd(chat_id, msg_id, bc_id):
     await delete_msg(chat_id, msg_id, bc_id)
 
-async def typing_worker(chat_id, bc_id):
+async def typing_worker(bc_id):
+    """Печатает во всех известных чатах аккаунта одновременно (до 50 чатов)"""
     try:
         while True:
-            if chat_id not in typing_disabled_chats:
-                await bot.send_chat_action(chat_id=chat_id, action="typing", business_connection_id=bc_id)
+            chats = active_chats.get(bc_id, set())
+            for cid in list(chats)[-50:]:
+                if cid not in typing_disabled_chats:
+                    try:
+                        await bot.send_chat_action(chat_id=cid, action="typing", business_connection_id=bc_id)
+                    except:
+                        pass
             await asyncio.sleep(4)
     except asyncio.CancelledError:
         pass
@@ -200,6 +218,80 @@ async def unmute(user_id):
 async def handle_bc(bc):
     bc_owners[bc.id] = bc.user.id
 
+# ================= АДМИН-ПАНЕЛЬ =================
+def get_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="👥 Бизнес-клиенты", callback_data="admin_users")],
+        [InlineKeyboardButton(text="🚫 Забанить / Разбанить Юзера", callback_data="admin_ban_prompt")]
+    ])
+
+@dp.message(F.text.in_(["/admin", ".админ", "админ"]))
+async def admin_panel(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer("👑 **Панель Администратора Бота**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query()
+async def process_admin_callbacks(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("У вас нет доступа!", show_alert=True)
+        return
+
+    data = callback.data
+    if data == "admin_stats":
+        total_bc = len(bc_owners)
+        banned_cnt = len(banned_users)
+        await callback.message.edit_text(
+            f"📊 **СТАТИСТИКА БОТА:**\n\n"
+            f"• Подключено бизнес-аккаунтов: `{total_bc}`\n"
+            f"• Заблокировано пользователей: `{banned_cnt}`",
+            reply_markup=get_admin_keyboard(),
+            parse_mode="Markdown"
+        )
+    elif data == "admin_users":
+        text = "👥 **СПИСОК ПОДКЛЮЧЕННЫХ АККАУНТОВ:**\n\n"
+        if not bc_owners:
+            text += "Пока нет активных подключений."
+        else:
+            for bc_id, owner_id in bc_owners.items():
+                status = "🔴 (Забанен)" if owner_id in banned_users else "🟢 (Активен)"
+                text += f"• Owner ID: `{owner_id}` | BC ID: `{bc_id}` {status}\n"
+        await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+
+    elif data == "admin_ban_prompt":
+        await callback.message.edit_text(
+            "Чтобы забанить или разбанить юзера, отправь команду:\n\n"
+            "`/ban ID` — Заблокировать доступ\n"
+            "`/unban ID` — Разблокировать доступ",
+            reply_markup=get_admin_keyboard(),
+            parse_mode="Markdown"
+        )
+    await callback.answer()
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        target_id = int(message.text.split()[1])
+        set_user_ban(target_id, True)
+        await message.answer(f"🚫 Пользователь `{target_id}` успешно **заблокирован**!", parse_mode="Markdown")
+    except:
+        await message.answer("Ошибка! Используй: `/ban 123456789`", parse_mode="Markdown")
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        target_id = int(message.text.split()[1])
+        set_user_ban(target_id, False)
+        await message.answer(f"✅ Пользователь `{target_id}` **разблокирован**!", parse_mode="Markdown")
+    except:
+        await message.answer("Ошибка! Используй: `/unban 123456789`", parse_mode="Markdown")
+
+# ================= ОСНОВНОЙ ОБРАБОТЧИК =================
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
@@ -217,8 +309,7 @@ async def handle(message: Message):
         chat_id = message.chat.id
         bc_id = message.business_connection_id
 
-        # Проверка прав доступа бизнес-подключения
-        is_from_me = False
+        # Проверка владельца подключения
         if bc_id:
             if bc_id not in bc_owners:
                 try:
@@ -226,10 +317,22 @@ async def handle(message: Message):
                     bc_owners[bc_id] = conn_info.user.id
                 except:
                     pass
+            
             owner_id = bc_owners.get(bc_id)
+            
+            # 🛑 ПРОВЕРКА БАНА: Если владелец бизнеса забанен — бот игнорирует события
+            if owner_id in banned_users:
+                return
+
             is_from_me = (uid == owner_id) if owner_id else False
         else:
             is_from_me = (uid == chat_id)
+
+        # Запоминаем активные чаты бизнес-аккаунта
+        if bc_id:
+            if bc_id not in active_chats:
+                active_chats[bc_id] = set()
+            active_chats[bc_id].add(chat_id)
 
         if message.text:
             msg_cache[message.message_id] = {
@@ -250,29 +353,19 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # Игнорирование команд от собеседников
+        # Игнорируем команды собеседника
         if not is_from_me:
             return
-
-        task_key = (chat_id, bc_id)
-        if task_key not in active_chats:
-            if len(active_chats) >= 50:
-                old_key = active_chats.pop()
-                if old_key in typing_tasks:
-                    typing_tasks[old_key].cancel()
-                    del typing_tasks[old_key]
-            active_chats.add(task_key)
-            
-            if task_key not in typing_tasks:
-                typing_tasks[task_key] = asyncio.create_task(typing_worker(chat_id, bc_id))
 
         if not message.text:
             return
 
         text_raw = message.text
         low = text_raw.lower().strip()
+        task_key = (chat_id, bc_id)
+        owner_id = bc_owners.get(bc_id, uid)
 
-        # Команды управления
+        # ===== КОМАНДЫ =====
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -309,8 +402,8 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
             
-            spam_db_key = f"{chat_id}:{bc_id}"
-            text = user_spam_texts.get(spam_db_key, user_spam_texts.get(str(chat_id), "Ты фрик!"))
+            # Достаем глобальный спам-текст владельца бизнес-аккаунта
+            text = user_spam_texts.get(str(owner_id), "Ты фрик!")
             
             if task_key in spam_tasks:
                 spam_tasks[task_key].cancel()
@@ -325,10 +418,10 @@ async def handle(message: Message):
                 del spam_tasks[task_key]
             return
 
+        # 🌟 СОХРАНЕНИЕ ШАБЛОНА ДЛЯ ВСЕХ ЧАТОВ АККАУНТА
         if low.startswith("set "):
             new_spam_text = text_raw[4:].strip()
-            spam_db_key = f"{chat_id}:{bc_id}"
-            save_spam_text(spam_db_key, new_spam_text)
+            save_spam_text(str(owner_id), new_spam_text)
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
@@ -353,13 +446,17 @@ async def handle(message: Message):
         if low == "печать -":
             save_setting(chat_id, 'typing_disabled', True)
             await clear_cmd(chat_id, message.message_id, bc_id)
+            if bc_id in typing_tasks:
+                typing_tasks[bc_id].cancel()
+                del typing_tasks[bc_id]
             return
 
+        # 🌟 ВКЛЮЧЕНИЕ ПЕЧАТИ ДЛЯ ВСЕХ 50 ЧАТОВ СРАЗУ
         if low == "печать +":
             save_setting(chat_id, 'typing_disabled', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
-            if task_key not in typing_tasks:
-                typing_tasks[task_key] = asyncio.create_task(typing_worker(chat_id, bc_id))
+            if bc_id and bc_id not in typing_tasks:
+                typing_tasks[bc_id] = asyncio.create_task(typing_worker(bc_id))
             return
 
         if low == "+реплай":
@@ -396,13 +493,13 @@ async def handle(message: Message):
                 "`.мут X` — мут на X минут\n"
                 "`.размут` — снять мут\n"
                 "`.стоп` / `.старт` — включить/выключить ссылки\n"
-                "`печать +` / `печать -` — вечная печать\n"
+                "`печать +` / `печать -` — вечная печать во всех чатах\n"
                 "`подмена текст 1` — текст в начало\n"
                 "`подмена текст 2` — текст в конец\n"
                 "`подмена выкл` — выключить подмену\n"
                 "`ss` — спам по словам\n"
                 "`dd` — стоп спам\n"
-                "`set текст` — текст для спама (сохраняется в БД)\n"
+                "`set текст` — сохранить общий шаблон спама\n"
                 "`+реплай` / `-реплай` — защита от реплаев\n"
                 "`+линк ссылка` — сменить ссылку\n"
                 "`мой ид` / `твой ид` — ID",
@@ -410,7 +507,7 @@ async def handle(message: Message):
             )
             return
 
-        # Модификация текста
+        # ===== МОДИФИКАЦИЯ ТЕКСТА =====
         final_text = text_raw
         need_modify = False
         
@@ -522,8 +619,8 @@ async def main():
     except Exception as e:
         logging.error(f"Ошибка сброса вебхука: {e}")
 
-    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V5 (ИСПРАВЛЕНА БД И ДОСТУПЫ)")
-    allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
+    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН (С АДМИНКОЙ И ГЛОБАЛЬНЫМИ НАСТРОЙКАМИ)")
+    allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages", "callback_query"]
     await dp.start_polling(bot, allowed_updates=allowed_updates)
 
 if __name__ == "__main__":
