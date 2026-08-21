@@ -189,29 +189,19 @@ async def delete_msg(chat_id, msg_id, bc_id):
     except: pass
 
 async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
-    """Редактирует сообщение без переотправки"""
-    if bc_id:
-        try:
-            await bot.edit_business_message_text(
-                business_connection_id=bc_id,
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=text,
-                parse_mode=parse_mode,
-                disable_web_page_preview=True
-            )
-            return True
-        except Exception as e:
-            logging.warning(f"Ошибка редактирования бизнес-сообщения: {e}")
-    
+    """Исправленное редактирование сообщений (включая бизнес-аккаунты)"""
     try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg_id,
-            text=text,
-            parse_mode=parse_mode,
-            disable_web_page_preview=True
-        )
+        kwargs = {
+            "chat_id": chat_id,
+            "message_id": msg_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }
+        if bc_id:
+            kwargs["business_connection_id"] = bc_id
+
+        await bot.edit_message_text(**kwargs)
         return True
     except Exception as e:
         logging.warning(f"Ошибка редактирования сообщения: {e}")
@@ -454,7 +444,7 @@ async def handle(message: Message):
         task_key = (chat_id, bc_id)
         current_owner = bc_owners.get(bc_id, uid)
 
-        # КОМАНДЫ УПРАВЛЕНИЯ (Удаление команд согласно п.7)
+        # КОМАНДЫ УПРАВЛЕНИЯ
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -593,19 +583,17 @@ async def handle(message: Message):
             )
             return
 
-        # ✏️ ПОДМЕНА И АВТО-ЛИНК (ТОЛЬКО РЕДАКТИРОВАНИЕ)
+        # ✏️ ПОДМЕНА И АВТО-ЛИНК
         final_text = text_raw
         need_modify = False
         parse_mode = None
         
-        # 1. Подмена текста
         if chat_id in substitutions:
             sub = substitutions[chat_id]
             final_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
             need_modify = True
             parse_mode = "HTML"
         
-        # 2. Авто-ссылка
         if chat_id in link_chats:
             has_link = False
             if message.entities:
@@ -619,7 +607,6 @@ async def handle(message: Message):
                 need_modify = True
                 parse_mode = "HTML"
         
-        # Выполнение редактирования (сообщение не удаляется и не переотправляется)
         if need_modify:
             await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
                 
@@ -640,7 +627,6 @@ async def global_update_handler(update: Update, bot: Bot):
                     fname = cached['user']
                     uid = cached['user_id']
                     
-                    # Игнорируем бота при логировании удалений
                     if uid == bot_id:
                         msg_cache.pop((cached_chat_id, cached_msg_id), None)
                         continue
