@@ -12,7 +12,7 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Получаем токен из переменных окружения Render, либо берем новый токен
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8959860095:AAGLvDAC9BziGkqeTMck119HzpJ2Pselgt4').strip()
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw').strip()
 DATABASE_URL = os.environ.get('DATABASE_URL')
 CHANNEL_LINK = "https://t.me/gotrollholl"
 
