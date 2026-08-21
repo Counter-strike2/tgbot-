@@ -12,7 +12,7 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Изменили имя переменной, чтобы Render не перехватывал старый BOT_TOKEN
-MY_TOKEN = "8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw".strip()
+BOT_TOKEN = "8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw".strip()
 DATABASE_URL = os.environ.get('DATABASE_URL')
 CHANNEL_LINK = "https://t.me/gotrollholl"
 
