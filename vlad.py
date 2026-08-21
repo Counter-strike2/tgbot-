@@ -8,10 +8,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update
 from aiohttp import web
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Переменные окружения Render
 TOKEN_FROM_ENV = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw')
 BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
 
@@ -21,7 +19,6 @@ DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ =====
 mutes = {}              
 spam_tasks = {}         
 typing_tasks = {}       
@@ -44,14 +41,12 @@ def init_db():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                # Таблицы настроек
                 cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
                 cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
                 cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (chat_id BIGINT PRIMARY KEY, text TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 conn.commit()
                 
-                # Загрузка чатов
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall():
                     link_chats.add(row[0])
@@ -64,17 +59,14 @@ def init_db():
                 for row in cur.fetchall():
                     typing_disabled_chats.add(row[0])
                 
-                # Загрузка подмен
                 cur.execute("SELECT chat_id, text, mode FROM substitutions")
                 for row in cur.fetchall():
                     substitutions[row[0]] = {"text": row[1], "mode": row[2]}
 
-                # Загрузка текстов спама (set)
                 cur.execute("SELECT chat_id, text FROM spam_texts")
                 for row in cur.fetchall():
                     user_spam_texts[row[0]] = row[1]
 
-                # Загрузка глобальной ссылки
                 cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
                 row = cur.fetchone()
                 if row:
@@ -176,12 +168,15 @@ async def typing_worker(chat_id, bc_id):
     except asyncio.CancelledError:
         pass
 
+# 🔥 СПАМ ОТПРАВЛЯЕТ КАЖДОЕ СЛОВО/ФРАЗУ ОТДЕЛЬНЫМ СООБЩЕНИЕМ
 async def spam_worker(chat_id, bc_id, reply_to, text):
     try:
+        # Разбиваем сохраненную строку на слова для поочередной отправки
+        words = text.split() if text else ["Ты", "фрик!"]
         while True:
-            for word in text.split():
+            for word in words:
                 await bot.send_message(chat_id, word, business_connection_id=bc_id, reply_to_message_id=reply_to)
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.3)
     except asyncio.CancelledError:
         pass
 
@@ -206,10 +201,9 @@ async def handle(message: Message):
         chat_id = message.chat.id
         bc_id = message.business_connection_id
 
-        # Определяем, отправлено ли сообщение лично тобой
+        # Проверка: сообщение должно быть отправлено владельцем конкретного подключенного аккаунта
         is_from_me = message.from_user.id == message.chat.id if bc_id is None else (message.from_user.id != bot_id)
 
-        # КЭШИРОВАНИЕ ДЛЯ ОТСЛЕЖИВАНИЯ УДАЛЕНИЙ (работает для всех)
         if message.text:
             msg_cache[message.message_id] = {
                 "text": message.text, 
@@ -221,7 +215,6 @@ async def handle(message: Message):
             if len(msg_cache) > 3000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # ЗАЩИТА ОТ ЧУЖИХ РЕПЛАЕВ И МУТЫ (фильтрует сообщения СУБЪЕКТА)
         if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
@@ -230,21 +223,21 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # 🛑 СТРОГАЯ ПРОВЕРКА: Если сообщение написано НЕ тобой — полностью игнорируем любые команды и подмены!
+        # Игнорируем чужие сообщения
         if not is_from_me:
             return
 
-        # Инициализация статуса печати для чата
-        if chat_id not in active_chats:
+        task_key = (chat_id, bc_id)
+        if task_key not in active_chats:
             if len(active_chats) >= 50:
-                old_chat = active_chats.pop()
-                if old_chat in typing_tasks:
-                    typing_tasks[old_chat].cancel()
-                    del typing_tasks[old_chat]
-            active_chats.add(chat_id)
+                old_key = active_chats.pop()
+                if old_key in typing_tasks:
+                    typing_tasks[old_key].cancel()
+                    del typing_tasks[old_key]
+            active_chats.add(task_key)
             
-            if chat_id not in typing_tasks:
-                typing_tasks[chat_id] = asyncio.create_task(typing_worker(chat_id, bc_id))
+            if task_key not in typing_tasks:
+                typing_tasks[task_key] = asyncio.create_task(typing_worker(chat_id, bc_id))
 
         if not message.text:
             return
@@ -252,7 +245,7 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
 
-        # ===== ОБРАБОТКА КОМАНД (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА) =====
+        # ===== КОМАНДЫ =====
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -288,18 +281,21 @@ async def handle(message: Message):
         if low == "ss":
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
+            
+            # Берем только то, что сохранено в БД (без подмешивания дефолтного "Ты фрик!")
             text = user_spam_texts.get(chat_id, "Ты фрик!")
-            if chat_id in spam_tasks:
-                spam_tasks[chat_id].cancel()
+            
+            if task_key in spam_tasks:
+                spam_tasks[task_key].cancel()
             task = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
-            spam_tasks[chat_id] = task
+            spam_tasks[task_key] = task
             return
 
         if low == "dd":
             await clear_cmd(chat_id, message.message_id, bc_id)
-            if chat_id in spam_tasks:
-                spam_tasks[chat_id].cancel()
-                del spam_tasks[chat_id]
+            if task_key in spam_tasks:
+                spam_tasks[task_key].cancel()
+                del spam_tasks[task_key]
             return
 
         if low.startswith("set "):
@@ -334,8 +330,8 @@ async def handle(message: Message):
         if low == "печать +":
             save_setting(chat_id, 'typing_disabled', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
-            if chat_id not in typing_tasks:
-                typing_tasks[chat_id] = asyncio.create_task(typing_worker(chat_id, bc_id))
+            if task_key not in typing_tasks:
+                typing_tasks[task_key] = asyncio.create_task(typing_worker(chat_id, bc_id))
             return
 
         if low == "+реплай":
@@ -376,7 +372,7 @@ async def handle(message: Message):
                 "`подмена текст 1` — текст в начало\n"
                 "`подмена текст 2` — текст в конец\n"
                 "`подмена выкл` — выключить подмену\n"
-                "`ss` — спам\n"
+                "`ss` — спам по словам\n"
                 "`dd` — стоп спам\n"
                 "`set текст` — текст для спама (сохраняется в БД)\n"
                 "`+реплай` / `-реплай` — защита от реплаев\n"
@@ -386,7 +382,7 @@ async def handle(message: Message):
             )
             return
 
-        # ===== МОДИФИКАЦИЯ ТОЛЬКО ТВОИХ СООБЩЕНИЙ =====
+        # ===== МОДИФИКАЦИЯ ТЕКСТА =====
         final_text = text_raw
         need_modify = False
         
@@ -418,7 +414,6 @@ async def handle(message: Message):
         
         if need_modify:
             await delete_msg(chat_id, message.message_id, bc_id)
-            
             try:
                 if chat_id in link_chats and '<a href=' in final_text:
                     await bot.send_message(
@@ -477,7 +472,6 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 async def handle_ping(request):
     return web.Response(text="Bot is alive!")
 
@@ -500,7 +494,7 @@ async def main():
     except Exception as e:
         logging.error(f"Ошибка сброса вебхука: {e}")
 
-    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V2 да я ж пошутил")
+    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V3")
     allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
     await dp.start_polling(bot, allowed_updates=allowed_updates)
 
