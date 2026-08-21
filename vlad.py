@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,6 +35,8 @@ typing_disabled_chats = set()
 substitutions = {}      # chat_id -> {"text": str, "mode": int}
 msg_cache = {}          # (chat_id, msg_id) -> dict
 active_chats = {}       # bc_id -> set(chat_ids)
+promo_messages = {}     # chat_id -> message_id
+recent_chats_list = []  # Список недавних чатов (до 100)
 bot_id = None
 CHANNEL_LINK = DEFAULT_CHANNEL_LINK
 
@@ -180,13 +182,11 @@ def save_channel_link(link_url):
         logging.error(f"Ошибка ссылки: {e}")
 
 def get_user_mention(user_id: int, fallback_name: str = None) -> str:
-    """Возвращает исключительно кликабельную ссылку на First Name пользователя"""
     user_id = int(user_id)
     fname = user_names.get(user_id) or fallback_name or "Пользователь"
     return f"<a href='tg://user?id={user_id}'>{fname}</a>"
 
 async def check_subscription(user_id: int) -> bool:
-    """Проверка подписки на обязательный канал"""
     if user_id == ADMIN_ID:
         return True
     try:
@@ -237,7 +237,7 @@ async def typing_worker(bc_id):
                 if cid not in typing_disabled_chats:
                     try: await bot.send_chat_action(chat_id=cid, action="typing", business_connection_id=bc_id)
                     except: pass
-            await asyncio.sleep(0.1)  # Минимальная задержка статуса печати
+            await asyncio.sleep(0.1)
     except asyncio.CancelledError: pass
 
 async def spam_worker(chat_id, bc_id, reply_to, text):
@@ -248,7 +248,7 @@ async def spam_worker(chat_id, bc_id, reply_to, text):
                 kwargs = {"chat_id": chat_id, "text": word, "reply_to_message_id": reply_to}
                 if bc_id: kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
-                await asyncio.sleep(0.3)  # Вернули стандартную стабильную скорость троллинга
+                await asyncio.sleep(0.3)
     except asyncio.CancelledError: pass
 
 async def unmute(user_id, chat_id, bc_id, user_name):
@@ -265,6 +265,69 @@ async def unmute(user_id, chat_id, bc_id, user_name):
             if bc_id: kwargs["business_connection_id"] = bc_id
             try:
                 await bot.send_message(**kwargs)
+            except: pass
+
+# ================= ФОНОВАЯ РЕКЛАМА (КАЖДЫЕ 2 ЧАСА) =================
+async def promo_broadcaster():
+    promo_text = (
+        "📢 <b>Подпишись на наш официальный канал!</b>\n\n"
+        "⚠️ <b>ВНИМАНИЕ:</b> Не удаляйте это сообщение! "
+        "Если вы его удалите, вы автоматически потеряете доступ к боту."
+    )
+    promo_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)]
+    ])
+
+    while True:
+        await asyncio.sleep(7200)  # Каждые 2 часа
+        target_chats = recent_chats_list[-100:]
+
+        for cid in target_chats:
+            if cid in banned_users:
+                continue
+            try:
+                msg = await bot.send_message(
+                    chat_id=cid,
+                    text=promo_text,
+                    parse_mode="HTML",
+                    reply_markup=promo_kb
+                )
+                promo_messages[cid] = msg.message_id
+            except Exception as e:
+                logging.warning(f"Ошибка отправки рекламы в {cid}: {e}")
+            await asyncio.sleep(3)  # Пауза 3 сек между чатами для защиты от бана
+
+# ================= ПРОВЕРКА УДАЛЕНИЯ РЕКЛАМЫ (АВТОБАН) =================
+async def check_promo_deletions():
+    unban_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Разбан у владельца", url="https://t.me/NorikAmiri")]
+    ])
+    promo_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)]
+    ])
+
+    while True:
+        await asyncio.sleep(15)  # Проверка каждые 15 сек
+        for cid, msg_id in list(promo_messages.items()):
+            if cid in banned_users:
+                continue
+            try:
+                await bot.edit_message_reply_markup(chat_id=cid, message_id=msg_id, reply_markup=promo_kb)
+            except TelegramBadRequest as e:
+                err = str(e).lower()
+                if "message to edit not found" in err or "message can't be edited" in err:
+                    set_user_ban(cid, True)
+                    promo_messages.pop(cid, None)
+                    user_link = get_user_mention(cid)
+                    try:
+                        await bot.send_message(
+                            chat_id=cid,
+                            text=f"🚫 {user_link}, вы заблокированы за удаление рекламного сообщения!\n\n"
+                                 f"За разбаном напишите владельцу.",
+                            parse_mode="HTML",
+                            reply_markup=unban_kb
+                        )
+                    except: pass
             except: pass
 
 @dp.business_connection()
@@ -407,8 +470,21 @@ async def handle(message: Message):
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
+        # Фиксация недавних чатов (до 100)
+        if chat_id > 0:
+            if chat_id in recent_chats_list:
+                recent_chats_list.remove(chat_id)
+            recent_chats_list.append(chat_id)
+            if len(recent_chats_list) > 100:
+                recent_chats_list.pop(0)
+
         # 🛑 ПРОВЕРКА НА БАН
         if uid in banned_users or (owner_id and owner_id in banned_users):
+            if message.chat.type == "private" and not bc_id:
+                unban_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💬 Разбан у владельца", url="https://t.me/NorikAmiri")]
+                ])
+                await message.answer("❌ Вы заблокированы. За разбаном напишите владельцу.", reply_markup=unban_kb)
             return
 
         if bc_id:
@@ -741,6 +817,11 @@ async def main():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except: pass
+
+    # Запуск фоновых задач рассылки и контроля бана за удаление рекламы
+    asyncio.create_task(promo_broadcaster())
+    asyncio.create_task(check_promo_deletions())
+
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
         bot, 
