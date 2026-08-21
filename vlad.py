@@ -188,9 +188,8 @@ async def delete_msg(chat_id, msg_id, bc_id):
         await bot.delete_message(chat_id, msg_id)
     except: pass
 
-async def edit_or_replace_msg(chat_id, msg_id, text, bc_id, parse_mode=None, reply_markup=None):
-    """БЫСТРОЕ редактирование без задержек"""
-    # Пробуем отредактировать бизнес-сообщение
+async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
+    """Редактирует сообщение без удаления"""
     if bc_id:
         try:
             await bot.edit_business_message_text(
@@ -199,22 +198,19 @@ async def edit_or_replace_msg(chat_id, msg_id, text, bc_id, parse_mode=None, rep
                 message_id=msg_id,
                 text=text,
                 parse_mode=parse_mode,
-                disable_web_page_preview=True,
-                reply_markup=reply_markup
+                disable_web_page_preview=True
             )
             return True
         except Exception as e:
             logging.warning(f"Не удалось отредактировать бизнес-сообщение: {e}")
     
-    # Пробуем отредактировать обычное сообщение
     try:
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=msg_id,
             text=text,
             parse_mode=parse_mode,
-            disable_web_page_preview=True,
-            reply_markup=reply_markup
+            disable_web_page_preview=True
         )
         return True
     except Exception as e:
@@ -250,7 +246,7 @@ async def unmute(user_id, chat_id, bc_id, user_name):
         mutes.pop(user_id, None)
         user_link = f"<a href='tg://user?id={user_id}'>{user_name}</a>"
         try:
-            await bot.send_message(chat_id, f"🔊 С пользователя {user_link} снят <b>МУТ</b> (время истекло).", parse_mode="HTML", business_connection_id=bc_id)
+            await bot.send_message(chat_id, f"🔊 С {user_link} снят <b>МУТ</b> (время истекло).", parse_mode="HTML", business_connection_id=bc_id)
         except: pass
 
 @dp.business_connection()
@@ -258,7 +254,6 @@ async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
     
-    # Отправляем приветствие владельцу с кнопкой
     owner_id = int(bc.user.id)
     owner_name = bc.user.first_name or "Пользователь"
     
@@ -474,7 +469,7 @@ async def handle(message: Message):
         task_key = (chat_id, bc_id)
         current_owner = bc_owners.get(bc_id, uid)
 
-        # 🔥 БЫСТРОЕ УДАЛЕНИЕ КОМАНД
+        # КОМАНДЫ УПРАВЛЕНИЯ
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -568,7 +563,7 @@ async def handle(message: Message):
                 await clear_cmd(chat_id, message.message_id, bc_id)
                 
                 user_link = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
-                await bot.send_message(chat_id, f"🔇 Пользователю {user_link} выдан <b>МУТ</b> на {minutes} мин.", parse_mode="HTML", business_connection_id=bc_id)
+                await bot.send_message(chat_id, f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.", parse_mode="HTML", business_connection_id=bc_id)
             except: pass
             return
 
@@ -580,7 +575,7 @@ async def handle(message: Message):
             mutes.pop(target_id, None)
             await clear_cmd(chat_id, message.message_id, bc_id)
             user_link = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
-            await bot.send_message(chat_id, f"🔊 С пользователя {user_link} снят <b>МУТ</b>.", parse_mode="HTML", business_connection_id=bc_id)
+            await bot.send_message(chat_id, f"🔊 С {user_link} снят <b>МУТ</b>.", parse_mode="HTML", business_connection_id=bc_id)
             return
 
         if low in ["мой ид", "моид"]:
@@ -612,7 +607,7 @@ async def handle(message: Message):
             )
             return
 
-        # ✏️ БЫСТРАЯ ПОДМЕНА И АВТО-ЛИНК (без удаления)
+        # ✏️ ПОДМЕНА И АВТО-ЛИНК (ТОЛЬКО РЕДАКТИРОВАНИЕ, БЕЗ УДАЛЕНИЯ)
         final_text = text_raw
         need_modify = False
         parse_mode = None
@@ -638,16 +633,9 @@ async def handle(message: Message):
                 need_modify = True
                 parse_mode = "HTML"
         
-        # БЫСТРОЕ РЕДАКТИРОВАНИЕ (без удаления)
+        # РЕДАКТИРУЕМ СООБЩЕНИЕ (НЕ УДАЛЯЕМ!)
         if need_modify:
-            success = await edit_or_replace_msg(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
-            if not success:
-                # Если редактирование не удалось - просто отправляем новое (но это крайний случай)
-                try:
-                    await delete_msg(chat_id, message.message_id, bc_id)
-                    await bot.send_message(chat_id, final_text, parse_mode=parse_mode, business_connection_id=bc_id)
-                except:
-                    pass
+            await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
                 
     except Exception as e:
         logging.error(f"❌ Ошибка: {e}")
