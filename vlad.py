@@ -80,7 +80,7 @@ def init_db():
                 if row:
                     CHANNEL_LINK = row[0]
 
-                logging.info("💾 Все данные (настройки, тексты set, подмены, ссылки) загружены из PostgreSQL!")
+                logging.info("💾 Все данные загружены из PostgreSQL!")
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к БД: {e}", exc_info=True)
         raise e
@@ -206,8 +206,35 @@ async def handle(message: Message):
         chat_id = message.chat.id
         bc_id = message.business_connection_id
 
+        # Определяем, отправлено ли сообщение лично тобой
         is_from_me = message.from_user.id == message.chat.id if bc_id is None else (message.from_user.id != bot_id)
 
+        # КЭШИРОВАНИЕ ДЛЯ ОТСЛЕЖИВАНИЯ УДАЛЕНИЙ (работает для всех)
+        if message.text:
+            msg_cache[message.message_id] = {
+                "text": message.text, 
+                "user": message.from_user.first_name,
+                "user_id": uid,
+                "chat_id": chat_id,
+                "bc_id": bc_id
+            }
+            if len(msg_cache) > 3000:
+                msg_cache.pop(next(iter(msg_cache)))
+
+        # ЗАЩИТА ОТ ЧУЖИХ РЕПЛАЕВ И МУТЫ (фильтрует сообщения СУБЪЕКТА)
+        if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
+            await delete_msg(chat_id, message.message_id, bc_id)
+            return
+            
+        if uid in mutes and datetime.now() < mutes[uid]["until"]:
+            await delete_msg(chat_id, message.message_id, bc_id)
+            return
+
+        # 🛑 СТРОГАЯ ПРОВЕРКА: Если сообщение написано НЕ тобой — полностью игнорируем любые команды и подмены!
+        if not is_from_me:
+            return
+
+        # Инициализация статуса печати для чата
         if chat_id not in active_chats:
             if len(active_chats) >= 50:
                 old_chat = active_chats.pop()
@@ -225,25 +252,7 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
 
-        msg_cache[message.message_id] = {
-            "text": text_raw, 
-            "user": message.from_user.first_name,
-            "user_id": uid,
-            "chat_id": chat_id,
-            "bc_id": bc_id
-        }
-        if len(msg_cache) > 3000:
-            msg_cache.pop(next(iter(msg_cache)))
-            
-        if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
-            await delete_msg(chat_id, message.message_id, bc_id)
-            return
-            
-        if uid in mutes and datetime.now() < mutes[uid]["until"]:
-            await delete_msg(chat_id, message.message_id, bc_id)
-            return
-
-        # ===== ОБРАБОТКА КОМАНД =====
+        # ===== ОБРАБОТКА КОМАНД (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА) =====
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -377,10 +386,7 @@ async def handle(message: Message):
             )
             return
 
-        # ===== МОДИФИКАЦИЯ СООБЩЕНИЙ =====
-        if not is_from_me:
-            return
-
+        # ===== МОДИФИКАЦИЯ ТОЛЬКО ТВОИХ СООБЩЕНИЙ =====
         final_text = text_raw
         need_modify = False
         
@@ -494,7 +500,7 @@ async def main():
     except Exception as e:
         logging.error(f"Ошибка сброса вебхука: {e}")
 
-    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V2")
+    logging.info("🚀 БОТ УСПЕШНО ЗАПУЩЕН V2 да я ж пошутил")
     allowed_updates = ["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"]
     await dp.start_polling(bot, allowed_updates=allowed_updates)
 
