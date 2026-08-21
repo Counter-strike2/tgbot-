@@ -57,31 +57,30 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 
-                # 🛠 Миграция: добавляем колонку first_name, если её не было в старой таблице
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
                 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
-                for row in cur.fetchall(): link_chats.add(row[0])
+                for row in cur.fetchall(): link_chats.add(int(row[0]))
                     
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
-                for row in cur.fetchall(): reply_guard_chats.add(row[0])
+                for row in cur.fetchall(): reply_guard_chats.add(int(row[0]))
 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='typing_disabled'")
-                for row in cur.fetchall(): typing_disabled_chats.add(row[0])
+                for row in cur.fetchall(): typing_disabled_chats.add(int(row[0]))
                 
                 cur.execute("SELECT chat_id, text, mode FROM substitutions")
-                for row in cur.fetchall(): substitutions[row[0]] = {"text": row[1], "mode": row[2]}
+                for row in cur.fetchall(): substitutions[int(row[0])] = {"text": row[1], "mode": row[2]}
 
                 cur.execute("SELECT key_id, text FROM spam_texts")
                 for row in cur.fetchall(): user_spam_texts[str(row[0])] = row[1]
 
                 cur.execute("SELECT user_id FROM banned_users")
-                for row in cur.fetchall(): banned_users.add(row[0])
+                for row in cur.fetchall(): banned_users.add(int(row[0]))
 
                 cur.execute("SELECT user_id, username, first_name FROM user_map")
                 for row in cur.fetchall():
-                    uid, uname, fname = row[0], row[1], row[2]
+                    uid, uname, fname = int(row[0]), row[1], row[2]
                     if uname: user_usernames[uname.lower()] = uid
                     if fname: user_names[uid] = fname
 
@@ -92,6 +91,7 @@ def init_db():
         logging.error(f"❌ Ошибка подключения к БД: {e}")
 
 def save_user_info(user_id: int, username: str, first_name: str):
+    user_id = int(user_id)
     if first_name:
         user_names[user_id] = first_name
     username_clean = username.lstrip("@").lower() if username else None
@@ -111,6 +111,7 @@ def save_user_info(user_id: int, username: str, first_name: str):
         logging.error(f"Ошибка сохранения пользователя: {e}")
 
 def set_user_ban(user_id: int, ban: bool):
+    user_id = int(user_id)
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -125,6 +126,7 @@ def set_user_ban(user_id: int, ban: bool):
         logging.error(f"Ошибка бана: {e}")
 
 def save_setting(chat_id, setting_type, enabled):
+    chat_id = int(chat_id)
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -141,6 +143,7 @@ def save_setting(chat_id, setting_type, enabled):
         logging.error(f"Ошибка настройки: {e}")
 
 def save_substitution(chat_id, text, mode):
+    chat_id = int(chat_id)
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -221,7 +224,7 @@ async def unmute(user_id, chat_id, bc_id, user_name):
 
 @dp.business_connection()
 async def handle_bc(bc):
-    bc_owners[bc.id] = bc.user.id
+    bc_owners[bc.id] = int(bc.user.id)
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
 
 @dp.message(Command("start"))
@@ -289,7 +292,8 @@ async def resolve_user_id(target_raw: str):
     target = target_raw.strip()
     if target.startswith("@"):
         uname = target.lstrip("@").lower()
-        return user_usernames.get(uname)
+        res = user_usernames.get(uname)
+        return int(res) if res else None
     elif target.isdigit():
         return int(target)
     return None
@@ -335,8 +339,8 @@ async def handle(message: Message):
     try:
         if not message.from_user: return
         
-        uid = message.from_user.id
-        chat_id = message.chat.id
+        uid = int(message.from_user.id)
+        chat_id = int(message.chat.id)
         bc_id = message.business_connection_id
 
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
@@ -361,7 +365,7 @@ async def handle(message: Message):
             if bc_id not in bc_owners:
                 try:
                     conn_info = await bot.get_business_connection(bc_id)
-                    bc_owners[bc_id] = conn_info.user.id
+                    bc_owners[bc_id] = int(conn_info.user.id)
                     save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
                 except: pass
             
@@ -377,16 +381,18 @@ async def handle(message: Message):
             if bc_id not in active_chats: active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
-        # 💾 2. СОХРАНЕНИЕ В КЭШ ВСЕХ ВХОДЯЩИХ И ИСХОДЯЩИХ СООБЩЕНИЙ (для ловли удалений)
+        # 💾 2. ТОЧНОЕ КЭШИРОВАНИЕ ДЛЯ УДАЛЁННЫХ СООБЩЕНИЙ
         if message.text and not message.from_user.is_bot:
-            msg_cache[message.message_id] = {
+            # Используем составной ключ (chat_id, message_id), чтобы ловко находить удалёнки
+            cache_key = (chat_id, message.message_id)
+            msg_cache[cache_key] = {
                 "text": message.text, 
                 "user": message.from_user.first_name or "Пользователь",
                 "user_id": uid,
                 "chat_id": chat_id,
                 "bc_id": bc_id
             }
-            if len(msg_cache) > 3000:
+            if len(msg_cache) > 4000:
                 msg_cache.pop(next(iter(msg_cache)))
 
         # 🔇 3. ПРОВЕРКА НА МУТ
@@ -458,7 +464,7 @@ async def handle(message: Message):
             return
 
         # 🔇 ВЫДАЧА И СНЯТИЕ МУТА С ОПОВЕЩЕНИЕМ
-        if low.startswith(".ут ") or low.startswith(".мут ") or low.startswith("!мут "):
+        if low.startswith(".ут ") or low.startswith(".ут") or low.startswith(".мут ") or low.startswith("!мут "):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
                 target_user = message.reply_to_message.from_user if message.reply_to_message else None
@@ -571,11 +577,10 @@ async def global_update_handler(update: Update, bot: Bot):
             bc_id = data.business_connection_id
             msg_ids = data.message_ids
 
-            for msg_id in msg_ids:
-                if msg_id in msg_cache:
-                    cached = msg_cache[msg_id]
+            # Находим закешированное сообщение
+            for (cached_chat_id, cached_msg_id), cached in list(msg_cache.items()):
+                if cached_msg_id in msg_ids:
                     user_link = f"<a href='tg://user?id={cached['user_id']}'>{cached['user']}</a>"
-                    
                     text_to_send = (
                         f"👤 {user_link}\n"
                         f"🗑 <b>Удалил сообщение ↓</b>\n"
@@ -583,12 +588,12 @@ async def global_update_handler(update: Update, bot: Bot):
                     )
 
                     await bot.send_message(
-                        cached["chat_id"],
+                        cached_chat_id,
                         text_to_send,
                         parse_mode="html",
                         business_connection_id=bc_id or cached["bc_id"]
                     )
-                    msg_cache.pop(msg_id, None)
+                    msg_cache.pop((cached_chat_id, cached_msg_id), None)
     except Exception as e:
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
