@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -17,6 +18,8 @@ BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
 ADMIN_ID = 5825717381
 DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
+REQUIRED_CHANNEL = "@norikx"
+REQUIRED_CHANNEL_URL = "https://t.me/norikx"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -177,10 +180,21 @@ def save_channel_link(link_url):
         logging.error(f"Ошибка ссылки: {e}")
 
 def get_user_mention(user_id: int, fallback_name: str = None) -> str:
-    """Возвращает всегда кликабельную ссылку на имя пользователя"""
+    """Возвращает исключительно кликабельную ссылку на First Name пользователя"""
     user_id = int(user_id)
-    fname = user_names.get(user_id) or fallback_name or f"Пользователь {user_id}"
+    fname = user_names.get(user_id) or fallback_name or "Пользователь"
     return f"<a href='tg://user?id={user_id}'>{fname}</a>"
+
+async def check_subscription(user_id: int) -> bool:
+    """Проверка подписки на обязательный канал"""
+    if user_id == ADMIN_ID:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        return member.status in ["creator", "administrator", "member"]
+    except Exception as e:
+        logging.warning(f"Ошибка проверки подписки: {e}")
+        return True
 
 init_db()
 
@@ -223,7 +237,7 @@ async def typing_worker(bc_id):
                 if cid not in typing_disabled_chats:
                     try: await bot.send_chat_action(chat_id=cid, action="typing", business_connection_id=bc_id)
                     except: pass
-            await asyncio.sleep(0.1)  # Минимальная задержка
+            await asyncio.sleep(0.1)  # Минимальная задержка статуса печати
     except asyncio.CancelledError: pass
 
 async def spam_worker(chat_id, bc_id, reply_to, text):
@@ -234,7 +248,7 @@ async def spam_worker(chat_id, bc_id, reply_to, text):
                 kwargs = {"chat_id": chat_id, "text": word, "reply_to_message_id": reply_to}
                 if bc_id: kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
-                await asyncio.sleep(0.05)  # Минимальная задержка
+                await asyncio.sleep(0.3)  # Вернули стандартную стабильную скорость троллинга
     except asyncio.CancelledError: pass
 
 async def unmute(user_id, chat_id, bc_id, user_name):
@@ -245,7 +259,7 @@ async def unmute(user_id, chat_id, bc_id, user_name):
             user_link = get_user_mention(user_id, user_name)
             kwargs = {
                 "chat_id": chat_id,
-                "text": f"🔊 С {user_link} снят <b>МУТ</b> (время истекло).",
+                "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
                 "parse_mode": "HTML"
             }
             if bc_id: kwargs["business_connection_id"] = bc_id
@@ -268,9 +282,7 @@ async def handle_bc(bc):
             owner_id,
             f"👋 Привет, {owner_mention}!\n\n"
             f"✅ Бот успешно подключен к твоему бизнес-аккаунту!\n\n"
-            f"📌 Теперь я буду обрабатывать все сообщения в твоих чатах.\n"
-            f"Команды для управления: `!команды`\n\n"
-            f"❗ Если у тебя возникнут вопросы или предложения - напиши владельцу бота.",
+            f"📌 Управление командами: `!команды`",
             parse_mode="HTML",
             reply_markup=kb
         )
@@ -281,20 +293,14 @@ async def handle_bc(bc):
 async def cmd_start(message: Message):
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Связаться с владельцем", url="https://t.me/NorikAmiri")]
+        [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+        [InlineKeyboardButton(text="💬 Владелец", url="https://t.me/NorikAmiri")]
     ])
     await message.answer(
         "👋 **Привет!**\n\n"
-        "📌 **Как подключить бота к бизнес-аккаунту:**\n\n"
-        "1️⃣ Зайди в **Настройки** Telegram\n"
-        "2️⃣ Нажми **Мой профиль**\n"
-        "3️⃣ Выбери **Автоматизация чатов**\n"
-        "4️⃣ Нажми **Добавить** и введи юзернейм бота:\n"
-        "   `@norikKodBot`\n"
-        "5️⃣ Дай боту права **Сообщения 5/5**\n\n"
-        "✅ После подключения бот будет автоматически обрабатывать все сообщения в твоих чатах!\n\n"
-        "📋 Команды для управления: `!команды`\n\n"
-        "❗ Если возникнут вопросы - напиши владельцу бота.",
+        "Для работы бота требуется подписка на официальный канал!\n\n"
+        "📌 **Как подключить к бизнес-аккаунту:**\n"
+        "Настройки -> Мой профиль -> Автоматизация чатов -> Добавить `@norikKodBot`",
         parse_mode="Markdown",
         reply_markup=kb
     )
@@ -366,7 +372,7 @@ async def cmd_ban(message: Message):
             user_link = get_user_mention(target_id)
             await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
         else:
-            await message.answer(f"❌ Не найден ID для `{arg}`.", parse_mode="Markdown")
+            await message.answer(f"❌ Пользователь `{arg}` не найден.", parse_mode="Markdown")
     except:
         await message.answer("Формат: `/ban 123456789` или `/ban @username`", parse_mode="Markdown")
 
@@ -381,7 +387,7 @@ async def cmd_unban(message: Message):
             user_link = get_user_mention(target_id)
             await message.answer(f"✅ {user_link} <b>разблокирован</b>!", parse_mode="HTML")
         else:
-            await message.answer(f"❌ Не найден ID для `{arg}`.", parse_mode="Markdown")
+            await message.answer(f"❌ Пользователь `{arg}` не найден.", parse_mode="Markdown")
     except:
         await message.answer("Формат: `/unban 123456789` или `/unban @username`", parse_mode="Markdown")
 
@@ -415,7 +421,6 @@ async def handle(message: Message):
             
             is_from_me = (uid == owner_id) if owner_id else False
         else:
-            # Если бот работает в обычных чатах/группах напрямую
             is_from_me = (uid == chat_id) or (message.chat.type in ["group", "supergroup"] and not message.from_user.is_bot)
 
         if bot_id is None:
@@ -454,6 +459,33 @@ async def handle(message: Message):
         low = text_raw.lower().strip()
         task_key = (chat_id, bc_id)
         current_owner = bc_owners.get(bc_id, uid)
+
+        # 📢 ПРОВЕРКА ПОДПИСКИ ПРИ ИСПОЛЬЗОВАНИИ КОМАНД
+        command_triggers = [
+            ".стоп", ".старт", "+линк", "подмена", "печать", "+реплай", "-реплай",
+            "ss", "dd", "set", ".мут", "!мут", ".ут", ".размут", "!размут",
+            "мой ид", "моид", "твой ид", "твоид", "!команды"
+        ]
+        
+        is_command = any(low.startswith(cmd) for cmd in command_triggers)
+        
+        if is_command:
+            is_subbed = await check_subscription(uid)
+            if not is_subbed:
+                await clear_cmd(chat_id, message.message_id, bc_id)
+                user_link = get_user_mention(uid, message.from_user.first_name)
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)]
+                ])
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": f"⚠️ {user_link}, для использования команд необходимо подписаться на наш Telegram-канал!",
+                    "parse_mode": "HTML",
+                    "reply_markup": kb
+                }
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
+                return
 
         # КОМАНДЫ УПРАВЛЕНИЯ
         if low == ".стоп":
@@ -579,7 +611,7 @@ async def handle(message: Message):
             my_link = get_user_mention(uid, message.from_user.first_name)
             kwargs = {
                 "chat_id": chat_id,
-                "text": f"🆔 Ваш профиль: {my_link}\nID: <code>{uid}</code>",
+                "text": f"🆔 {my_link}",
                 "parse_mode": "HTML"
             }
             if bc_id: kwargs["business_connection_id"] = bc_id
@@ -595,7 +627,7 @@ async def handle(message: Message):
                 t_link = get_user_mention(target_id, t_fname)
                 kwargs = {
                     "chat_id": chat_id,
-                    "text": f"🆔 Профиль: {t_link}\nID: <code>{target_id}</code>",
+                    "text": f"🆔 {t_link}",
                     "parse_mode": "HTML"
                 }
                 if bc_id: kwargs["business_connection_id"] = bc_id
@@ -616,7 +648,7 @@ async def handle(message: Message):
                     "`set текст` — задать спам-текст\n"
                     "`+реплай` / `-реплай` — защита от ответов\n"
                     "`+линк ссылка` — сменить ссылку\n"
-                    "`мой ид` / `твой ид` — узнать ID"
+                    "`мой ид` / `твой ид` — кликабельный First Name"
                 ),
                 "parse_mode": "Markdown"
             }
