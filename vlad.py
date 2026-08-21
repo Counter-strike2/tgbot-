@@ -14,14 +14,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 TOKEN_FROM_ENV = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw')
 BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
 
-# 👑 Твой ID Администратора
 ADMIN_ID = 5825717381
-
 DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
 BOT_USERNAME = "norikKodBot"
 
-# Встроенная ссылка Telegram, чтобы откликаться сразу внутри приложения без браузера
 BIND_LINK = f"tg://resolve?domain={BOT_USERNAME}&startattach=biz"
 
 bot = Bot(token=BOT_TOKEN)
@@ -40,9 +37,9 @@ active_chats = {}
 bot_id = None
 CHANNEL_LINK = DEFAULT_CHANNEL_LINK
 
-bc_owners = {}          # bc_id -> owner_id
-user_usernames = {}     # username.lower() -> user_id
-user_names = {}         # user_id -> first_name
+bc_owners = {}          
+user_usernames = {}     
+user_names = {}         
 banned_users = set()    
 
 def get_db():
@@ -210,20 +207,23 @@ async def spam_worker(chat_id, bc_id, reply_to, text):
                 await asyncio.sleep(0.3)
     except asyncio.CancelledError: pass
 
-async def unmute(user_id):
+async def unmute(user_id, chat_id, bc_id, user_name):
     await asyncio.sleep(mutes[user_id]["time"].total_seconds())
-    mutes.pop(user_id, None)
+    if user_id in mutes:
+        mutes.pop(user_id, None)
+        user_link = f"<a href='tg://user?id={user_id}'>{user_name}</a>"
+        try:
+            await bot.send_message(chat_id, f"🔊 С пользователя {user_link} снят <b>МУТ</b> (время истекло).", parse_mode="HTML", business_connection_id=bc_id)
+        except: pass
 
 @dp.business_connection()
 async def handle_bc(bc):
     bc_owners[bc.id] = bc.user.id
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
 
-# ================= СТАРТ И ПОДКЛЮЧЕНИЕ =================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚡️ Привязать бота к аккаунту", url=BIND_LINK)]
     ])
@@ -234,7 +234,6 @@ async def cmd_start(message: Message):
         parse_mode="Markdown"
     )
 
-# ================= АДМИН-ПАНЕЛЬ =================
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
@@ -333,15 +332,13 @@ async def handle(message: Message):
     try:
         if not message.from_user: return
         
-        save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
-        if bot_id is None:
-            me = await bot.get_me()
-            bot_id = me.id
-            
         uid = message.from_user.id
         chat_id = message.chat.id
         bc_id = message.business_connection_id
+
+        # 🛑 1. ПРОВЕРКА НА БАН ВЛАДЕЛЬЦА / ПОЛЬЗОВАТЕЛЯ
+        if uid in banned_users:
+            return
 
         if bc_id:
             if bc_id not in bc_owners:
@@ -352,16 +349,24 @@ async def handle(message: Message):
                 except: pass
             
             owner_id = bc_owners.get(bc_id)
-            if owner_id in banned_users: return
+            if owner_id in banned_users: 
+                return
             is_from_me = (uid == owner_id) if owner_id else False
         else:
             is_from_me = (uid == chat_id)
+
+        save_user_info(uid, message.from_user.username, message.from_user.first_name)
+
+        if bot_id is None:
+            me = await bot.get_me()
+            bot_id = me.id
 
         if bc_id:
             if bc_id not in active_chats: active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
-        if message.text:
+        # 💾 2. СОХРАНЕНИЕ В КЭШ ДЛЯ УДАЛЁННЫХ СООБЩЕНИЙ (только люди)
+        if message.text and not message.from_user.is_bot:
             msg_cache[message.message_id] = {
                 "text": message.text, 
                 "user": message.from_user.first_name or "Пользователь",
@@ -372,11 +377,12 @@ async def handle(message: Message):
             if len(msg_cache) > 2000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
+        # 🔇 3. ПРОВЕРКА НА МУТ ПИСАВШЕГО
+        if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
-            
-        if uid in mutes and datetime.now() < mutes[uid]["until"]:
+
+        if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
@@ -439,20 +445,32 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        if low.startswith(".мут "):
+        # 🔇 ВЫДАЧА И СНЯТИЕ МУТА С ОПОВЕЩЕНИЕМ
+        if low.startswith(".мут ") or low.startswith("!мут "):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
-                target = message.reply_to_message.from_user.id if message.reply_to_message else chat_id
-                mutes[target] = {"time": timedelta(minutes=minutes), "until": datetime.now() + timedelta(minutes=minutes)}
-                asyncio.create_task(unmute(target))
+                target_user = message.reply_to_message.from_user if message.reply_to_message else None
+                target_id = target_user.id if target_user else chat_id
+                target_name = target_user.first_name if target_user else "Пользователь"
+                
+                mutes[target_id] = {"time": timedelta(minutes=minutes), "until": datetime.now() + timedelta(minutes=minutes)}
+                asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
                 await clear_cmd(chat_id, message.message_id, bc_id)
+                
+                user_link = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
+                await bot.send_message(chat_id, f"🔇 Пользователю {user_link} выдан <b>МУТ</b> на {minutes} мин.", parse_mode="HTML", business_connection_id=bc_id)
             except: pass
             return
 
-        if low == ".размут":
-            target = message.reply_to_message.from_user.id if message.reply_to_message else chat_id
-            mutes.pop(target, None)
+        if low == ".размут" or low == "!размут":
+            target_user = message.reply_to_message.from_user if message.reply_to_message else None
+            target_id = target_user.id if target_user else chat_id
+            target_name = target_user.first_name if target_user else "Пользователь"
+            
+            mutes.pop(target_id, None)
             await clear_cmd(chat_id, message.message_id, bc_id)
+            user_link = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
+            await bot.send_message(chat_id, f"🔊 С пользователя {user_link} снят <b>МУТ</b>.", parse_mode="HTML", business_connection_id=bc_id)
             return
 
         if low == "печать -":
@@ -532,24 +550,35 @@ async def handle(message: Message):
     except Exception as e:
         logging.error(f"❌ Ошибка: {e}")
 
+# ================= 🗑 УДАЛЁННЫЕ СООБЩЕНИЯ =================
 @dp.update()
 async def global_update_handler(update: Update, bot: Bot):
     try:
         if update.deleted_business_messages:
             data = update.deleted_business_messages
-            for msg_id in data.message_ids:
+            bc_id = data.business_connection_id
+            msg_ids = data.message_ids
+
+            for msg_id in msg_ids:
                 if msg_id in msg_cache:
                     cached = msg_cache[msg_id]
                     user_link = f"<a href='tg://user?id={cached['user_id']}'>{cached['user']}</a>"
+                    
+                    text_to_send = (
+                        f"👤 {user_link}\n"
+                        f"🗑 <b>Удалил сообщение ↓</b>\n"
+                        f"{cached['text']}"
+                    )
+
                     await bot.send_message(
                         cached["chat_id"],
-                        f"👤 {user_link}\n🗑 Удалил ↓\n{cached['text']}",
+                        text_to_send,
                         parse_mode="html",
-                        business_connection_id=data.business_connection_id or cached["bc_id"]
+                        business_connection_id=bc_id or cached["bc_id"]
                     )
                     msg_cache.pop(msg_id, None)
     except Exception as e:
-        logging.error(f"❌ Ошибка удалений: {e}")
+        logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
@@ -570,7 +599,10 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
     except: pass
     logging.info("🚀 БОТ ЗАПУЩЕН!")
-    await dp.start_polling(bot, allowed_updates=["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages", "callback_query"])
+    await dp.start_polling(
+        bot, 
+        allowed_updates=["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages", "callback_query"]
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
