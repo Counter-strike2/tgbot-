@@ -14,8 +14,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 TOKEN_FROM_ENV = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw')
 BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
 
-# ⚠️ Указывай свой Telegram ID
-ADMIN_ID = 5825717381 
+# 👑 Твой ID Администратора
+ADMIN_ID = 5825717381
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
@@ -37,8 +37,9 @@ active_chats = {}
 bot_id = None
 CHANNEL_LINK = DEFAULT_CHANNEL_LINK
 
-bc_owners = {}          
-user_usernames = {}     
+bc_owners = {}          # bc_id -> owner_id
+user_usernames = {}     # username.lower() -> user_id
+user_names = {}         # user_id -> first_name
 banned_users = set()    
 
 def get_db():
@@ -54,7 +55,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
-                cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT)")
+                cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 conn.commit()
                 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
@@ -75,9 +76,11 @@ def init_db():
                 cur.execute("SELECT user_id FROM banned_users")
                 for row in cur.fetchall(): banned_users.add(row[0])
 
-                cur.execute("SELECT user_id, username FROM user_map")
+                cur.execute("SELECT user_id, username, first_name FROM user_map")
                 for row in cur.fetchall():
-                    if row[1]: user_usernames[row[1].lower()] = row[0]
+                    uid, uname, fname = row[0], row[1], row[2]
+                    if uname: user_usernames[uname.lower()] = uid
+                    if fname: user_names[uid] = fname
 
                 cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
                 row = cur.fetchone()
@@ -85,20 +88,24 @@ def init_db():
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к БД: {e}")
 
-def save_user_map(user_id: int, username: str):
-    if not username: return
-    username_clean = username.lstrip("@").lower()
-    user_usernames[username_clean] = user_id
+def save_user_info(user_id: int, username: str, first_name: str):
+    if first_name:
+        user_names[user_id] = first_name
+    username_clean = username.lstrip("@").lower() if username else None
+    if username_clean:
+        user_usernames[username_clean] = user_id
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO user_map (user_id, username) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username",
-                    (user_id, username_clean)
+                    "INSERT INTO user_map (user_id, username, first_name) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (user_id) DO UPDATE SET username = COALESCE(EXCLUDED.username, user_map.username), "
+                    "first_name = COALESCE(EXCLUDED.first_name, user_map.first_name)",
+                    (user_id, username_clean, first_name)
                 )
                 conn.commit()
     except Exception as e:
-        logging.error(f"Ошибка сохранения маппинга юзера: {e}")
+        logging.error(f"Ошибка сохранения пользователя: {e}")
 
 def set_user_ban(user_id: int, ban: bool):
     try:
@@ -207,29 +214,27 @@ async def unmute(user_id):
 @dp.business_connection()
 async def handle_bc(bc):
     bc_owners[bc.id] = bc.user.id
-    if bc.user.username:
-        save_user_map(bc.user.id, bc.user.username)
+    save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
 
 # ================= СТАРТ И ПОДКЛЮЧЕНИЕ =================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    if message.from_user.username:
-        save_user_map(message.from_user.id, message.from_user.username)
+    save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
         
-    bind_url = f"https://t.me/{BOT_USERNAME}?startattach=biz"
+    bind_url = f"https://t.me/biz/bot/{BOT_USERNAME}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚡️ Привязать бота к аккаунту", url=bind_url)]
     ])
     await message.answer(
         "👋 **Привет!**\n\n"
-        "Нажми кнопку ниже, чтобы привязать бота к своему аккаунту. Тебя сразу перекинет в **Автоматизацию чатов** с подставленным ботом!",
+        "Нажми кнопку ниже, чтобы привязать бота к своему аккаунту в настройках Telegram для бизнеса.",
         reply_markup=kb,
         parse_mode="Markdown"
     )
 
 # ================= АДМИН-ПАНЕЛЬ =================
 def get_admin_keyboard():
-    bind_url = f"https://t.me/{BOT_USERNAME}?startattach=biz"
+    bind_url = f"https://t.me/biz/bot/{BOT_USERNAME}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Бизнес-клиенты", callback_data="admin_users")],
@@ -257,17 +262,20 @@ async def process_admin_callbacks(callback: CallbackQuery):
             reply_markup=get_admin_keyboard(), parse_mode="Markdown"
         )
     elif data == "admin_users":
-        text = "👥 **АККАУНТЫ:**\n\n"
-        if not bc_owners: text += "Нет подключений."
+        text = "👥 **БИЗНЕС-КЛИЕНТЫ:**\n\n"
+        if not bc_owners: 
+            text += "Нет активных подключений."
         else:
             for bc_id, owner_id in bc_owners.items():
+                fname = user_names.get(owner_id, "Пользователь")
+                user_link = f"<a href='tg://user?id={owner_id}'>{fname}</a>"
                 status = "🔴 (Забанен)" if owner_id in banned_users else "🟢 (Активен)"
-                text += f"• Owner ID: `{owner_id}` {status}\n"
-        await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+                text += f"• {user_link} {status}\n"
+        await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
     elif data == "admin_ban_prompt":
         await callback.message.edit_text(
-            "Для бана или разбана используй:\n\n"
+            "Для бана или разбана используй команды:\n\n"
             "• `/ban 123456789` или `/ban @username`\n"
             "• `/unban 123456789` или `/unban @username`",
             reply_markup=get_admin_keyboard(), parse_mode="Markdown"
@@ -291,7 +299,9 @@ async def cmd_ban(message: Message):
         target_id = await resolve_user_id(arg)
         if target_id:
             set_user_ban(target_id, True)
-            await message.answer(f"🚫 `{target_id}` (`{arg}`) **заблокирован**!", parse_mode="Markdown")
+            fname = user_names.get(target_id, str(target_id))
+            user_link = f"<a href='tg://user?id={target_id}'>{fname}</a>"
+            await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
         else:
             await message.answer(f"❌ Не найден ID для `{arg}`.", parse_mode="Markdown")
     except:
@@ -305,7 +315,9 @@ async def cmd_unban(message: Message):
         target_id = await resolve_user_id(arg)
         if target_id:
             set_user_ban(target_id, False)
-            await message.answer(f"✅ `{target_id}` (`{arg}`) **разблокирован**!", parse_mode="Markdown")
+            fname = user_names.get(target_id, str(target_id))
+            user_link = f"<a href='tg://user?id={target_id}'>{fname}</a>"
+            await message.answer(f"✅ {user_link} <b>разблокирован</b>!", parse_mode="HTML")
         else:
             await message.answer(f"❌ Не найден ID для `{arg}`.", parse_mode="Markdown")
     except:
@@ -320,8 +332,7 @@ async def handle(message: Message):
     try:
         if not message.from_user: return
         
-        if message.from_user.username:
-            save_user_map(message.from_user.id, message.from_user.username)
+        save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
         
         if bot_id is None:
             me = await bot.get_me()
@@ -336,6 +347,7 @@ async def handle(message: Message):
                 try:
                     conn_info = await bot.get_business_connection(bc_id)
                     bc_owners[bc_id] = conn_info.user.id
+                    save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
                 except: pass
             
             owner_id = bc_owners.get(bc_id)
@@ -351,7 +363,7 @@ async def handle(message: Message):
         if message.text:
             msg_cache[message.message_id] = {
                 "text": message.text, 
-                "user": message.from_user.first_name,
+                "user": message.from_user.first_name or "Пользователь",
                 "user_id": uid,
                 "chat_id": chat_id,
                 "bc_id": bc_id
