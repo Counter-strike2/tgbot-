@@ -56,6 +56,9 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
+                
+                # 🛠 Миграция: добавляем колонку first_name, если её не было в старой таблице
+                cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
                 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
@@ -336,8 +339,22 @@ async def handle(message: Message):
         chat_id = message.chat.id
         bc_id = message.business_connection_id
 
-        # 🛑 1. ПРОВЕРКА НА БАН ВЛАДЕЛЬЦА / ПОЛЬЗОВАТЕЛЯ
-        if uid in banned_users:
+        save_user_info(uid, message.from_user.username, message.from_user.first_name)
+
+        owner_id = bc_owners.get(bc_id) if bc_id else None
+
+        # 🛑 1. ПРОВЕРКА НА БАН
+        if uid in banned_users or (owner_id and owner_id in banned_users):
+            owner_name = user_names.get(ADMIN_ID, "Владельцем")
+            owner_link = f"<a href='tg://user?id={ADMIN_ID}'>{owner_name}</a>"
+            try:
+                await bot.send_message(
+                    chat_id, 
+                    f"⛔ Вы были забанены владельцем {owner_link}.", 
+                    parse_mode="HTML", 
+                    business_connection_id=bc_id
+                )
+            except: pass
             return
 
         if bc_id:
@@ -348,14 +365,9 @@ async def handle(message: Message):
                     save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
                 except: pass
             
-            owner_id = bc_owners.get(bc_id)
-            if owner_id in banned_users: 
-                return
             is_from_me = (uid == owner_id) if owner_id else False
         else:
             is_from_me = (uid == chat_id)
-
-        save_user_info(uid, message.from_user.username, message.from_user.first_name)
 
         if bot_id is None:
             me = await bot.get_me()
@@ -365,7 +377,7 @@ async def handle(message: Message):
             if bc_id not in active_chats: active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
-        # 💾 2. СОХРАНЕНИЕ В КЭШ ДЛЯ УДАЛЁННЫХ СООБЩЕНИЙ (только люди)
+        # 💾 2. СОХРАНЕНИЕ В КЭШ ВСЕХ ВХОДЯЩИХ И ИСХОДЯЩИХ СООБЩЕНИЙ (для ловли удалений)
         if message.text and not message.from_user.is_bot:
             msg_cache[message.message_id] = {
                 "text": message.text, 
@@ -374,10 +386,10 @@ async def handle(message: Message):
                 "chat_id": chat_id,
                 "bc_id": bc_id
             }
-            if len(msg_cache) > 2000:
+            if len(msg_cache) > 3000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # 🔇 3. ПРОВЕРКА НА МУТ ПИСАВШЕГО
+        # 🔇 3. ПРОВЕРКА НА МУТ
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
@@ -391,7 +403,7 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
         task_key = (chat_id, bc_id)
-        owner_id = bc_owners.get(bc_id, uid)
+        current_owner = bc_owners.get(bc_id, uid)
 
         # Команды управления
         if low == ".стоп":
@@ -428,7 +440,7 @@ async def handle(message: Message):
         if low == "ss":
             await clear_cmd(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
-            text = user_spam_texts.get(str(owner_id), "Ты фрик!")
+            text = user_spam_texts.get(str(current_owner), "Ты фрик!")
             if task_key in spam_tasks: spam_tasks[task_key].cancel()
             spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
             return
@@ -441,12 +453,12 @@ async def handle(message: Message):
             return
 
         if low.startswith("set "):
-            save_spam_text(str(owner_id), text_raw[4:].strip())
+            save_spam_text(str(current_owner), text_raw[4:].strip())
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         # 🔇 ВЫДАЧА И СНЯТИЕ МУТА С ОПОВЕЩЕНИЕМ
-        if low.startswith(".мут ") or low.startswith("!мут "):
+        if low.startswith(".ут ") or low.startswith(".мут ") or low.startswith("!мут "):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
                 target_user = message.reply_to_message.from_user if message.reply_to_message else None
