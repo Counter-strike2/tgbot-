@@ -194,17 +194,14 @@ async def check_subscription(user_id: int) -> bool:
 
 init_db()
 
-# ЖЕСТКОЕ УДАЛЕНИЕ ОРИГИНАЛЬНОЙ КОМАНДЫ ПОЛЬЗОВАТЕЛЯ
 async def delete_msg(chat_id, msg_id, bc_id):
     if bc_id:
         try:
             await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[msg_id])
-        except:
-            pass
+        except: pass
     try:
         await bot.delete_message(chat_id, msg_id)
-    except:
-        pass
+    except: pass
 
 async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
     try:
@@ -224,9 +221,6 @@ async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
         logging.warning(f"Ошибка редактирования сообщения: {e}")
         return False
 
-async def clear_cmd(chat_id, msg_id, bc_id):
-    await delete_msg(chat_id, msg_id, bc_id)
-
 async def typing_worker():
     global typing_globally_disabled
     try:
@@ -242,31 +236,33 @@ async def typing_worker():
     except asyncio.CancelledError: 
         pass
 
+# РАБОТАЕТ СТРОГО ОТ ТВОЕГО ЛИЦА (С ЗАДЕРЖКОЙ 0.3)
 async def spam_worker(chat_id, bc_id, reply_to, text):
     try:
         words = text.split() if text else ["Ты", "фрик!"]
         while True:
             for word in words:
                 kwargs = {"chat_id": chat_id, "text": word, "reply_to_message_id": reply_to}
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                if bc_id:
+                    kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
+                else:
+                    await bot.send_message(**kwargs)
                 await asyncio.sleep(0.3)
     except asyncio.CancelledError: pass
 
-async def unmute(user_id, chat_id, bc_id, user_name):
+async def unmute(user_id, chat_id, user_name):
     if user_id in mutes:
         await asyncio.sleep((mutes[user_id]["until"] - datetime.now()).total_seconds())
         if user_id in mutes and datetime.now() >= mutes[user_id]["until"]:
             mutes.pop(user_id, None)
             user_link = get_user_mention(user_id, user_name)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
             try:
-                await bot.send_message(**kwargs)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🔊 С {user_link} снят <b>МУТ</b>.",
+                    parse_mode="HTML"
+                )
             except: pass
 
 async def promo_broadcaster():
@@ -504,7 +500,6 @@ async def cmd_unban(message: Message):
         await message.answer("Формат: `/unban 123456789` или `/unban @username`", parse_mode="Markdown")
 
 
-# ================= ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ =================
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
@@ -591,19 +586,17 @@ async def handle(message: Message):
         if is_bot_command and uid != ADMIN_ID:
             is_subbed = await check_subscription(uid)
             if not is_subbed:
-                await clear_cmd(chat_id, message.message_id, bc_id)
+                await delete_msg(chat_id, message.message_id, bc_id)
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
                     [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
                 ])
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": "⚠️ <b>Для использования команд бота необходима подписка на канал!</b>\n\nПожалуйста, подпишитесь, затем нажмите кнопку ниже.",
-                    "parse_mode": "HTML",
-                    "reply_markup": kb
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ <b>Для использования команд бота необходима подписка на канал!</b>\n\nПожалуйста, подпишитесь, затем нажмите кнопку ниже.",
+                    parse_mode="HTML",
+                    reply_markup=kb
+                )
                 return
 
         if message.chat.type == "private" and not bc_id and low == "/start":
@@ -619,7 +612,6 @@ async def handle(message: Message):
             )
             return
 
-        # ===== ОБРАБОТЧИКИ КОМАНД С ГАРАНТИРОВАННЫМ УДАЛЕНИЕМ ТВОЕГО СООБЩЕНИЯ =====
         if low == ".стоп":
             await delete_msg(chat_id, message.message_id, bc_id)
             save_setting(chat_id, 'enabled_links', False)
@@ -704,7 +696,7 @@ async def handle(message: Message):
                     target_name = message.chat.first_name or "Пользователь"
                 
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
-                asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
+                asyncio.create_task(unmute(target_id, chat_id, target_name))
                 
                 user_link = get_user_mention(target_id, target_name)
                 kwargs = {
@@ -712,7 +704,8 @@ async def handle(message: Message):
                     "text": f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.",
                     "parse_mode": "HTML"
                 }
-                if bc_id: kwargs["business_connection_id"] = bc_id
+                if bc_id:
+                    kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
             except: pass
             return
@@ -735,7 +728,8 @@ async def handle(message: Message):
                 "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
                 "parse_mode": "HTML"
             }
-            if bc_id: kwargs["business_connection_id"] = bc_id
+            if bc_id:
+                kwargs["business_connection_id"] = bc_id
             await bot.send_message(**kwargs)
             return
 
@@ -747,7 +741,8 @@ async def handle(message: Message):
                 "text": f"🆔 {my_link}",
                 "parse_mode": "HTML"
             }
-            if bc_id: kwargs["business_connection_id"] = bc_id
+            if bc_id:
+                kwargs["business_connection_id"] = bc_id
             await bot.send_message(**kwargs)
             return
 
@@ -763,7 +758,8 @@ async def handle(message: Message):
                     "text": f"🆔 {t_link}",
                     "parse_mode": "HTML"
                 }
-                if bc_id: kwargs["business_connection_id"] = bc_id
+                if bc_id:
+                    kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
             return
 
@@ -785,7 +781,8 @@ async def handle(message: Message):
                 ),
                 "parse_mode": "Markdown"
             }
-            if bc_id: kwargs["business_connection_id"] = bc_id
+            if bc_id:
+                kwargs["business_connection_id"] = bc_id
             await bot.send_message(**kwargs)
             return
 
