@@ -267,7 +267,6 @@ async def unmute(user_id, chat_id, bc_id, user_name):
                 await bot.send_message(**kwargs)
             except: pass
 
-# ================= ФОНОВАЯ РЕКЛАМА (КАЖДЫЕ 2 ЧАСА) =================
 async def promo_broadcaster():
     promo_text = (
         "📢 <b>Подпишись на наш официальный канал!</b>\n\n"
@@ -279,7 +278,7 @@ async def promo_broadcaster():
     ])
 
     while True:
-        await asyncio.sleep(7200)  # Каждые 2 часа (7200 секунд)
+        await asyncio.sleep(7200)
         target_chats = recent_chats_list[-100:]
 
         for cid in target_chats:
@@ -297,7 +296,6 @@ async def promo_broadcaster():
                 logging.warning(f"Ошибка отправки рекламы в {cid}: {e}")
             await asyncio.sleep(3)
 
-# ================= ПРОВЕРКА УДАЛЕНИЯ РЕКЛАМЫ (АВТОБАН) =================
 async def check_promo_deletions():
     unban_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Разбан у владельца", url="https://t.me/NorikAmiri")]
@@ -352,16 +350,18 @@ async def handle_bc(bc):
     except Exception as e:
         logging.error(f"Не удалось отправить приветствие: {e}")
 
+# СТАРТ В САМОМ БОТЕ (БЕЗ ПРОВЕРОК ПОДПИСОК)
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    if message.chat.type != "private":
+        return
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
         [InlineKeyboardButton(text="💬 Владелец", url="https://t.me/NorikAmiri")]
     ])
     await message.answer(
         "👋 **Привет!**\n\n"
-        "Для работы бота требуется подписка на официальный канал!\n\n"
+        "Бот успешно запущен и готов к работе!\n\n"
         "📌 **Как подключить к бизнес-аккаунту:**\n"
         "Настройки -> Мой профиль -> Автоматизация чатов -> Добавить `@norikKodBot`",
         parse_mode="Markdown",
@@ -392,7 +392,7 @@ async def check_sub_callback(callback: CallbackQuery):
         try:
             await callback.message.delete()
         except: pass
-        await callback.answer("✅ Подписка подтверждена! Бот готов к работе.", show_alert=True)
+        await callback.answer("✅ Подписка подтверждена! Теперь команды бота работают.", show_alert=True)
     else:
         await callback.answer("❌ Вы всё ещё не подписались на канал!", show_alert=True)
 
@@ -545,25 +545,32 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # 📢 ПРОВЕРКА ПОДПИСКИ В БИЗНЕС-ЧАТАХ ДЛЯ СОБЕСЕДНИКА
-        if bc_id and not is_from_me and uid != owner_id:
-            is_subbed = await check_subscription(uid)
-            if not is_subbed:
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                user_link = get_user_mention(uid, message.from_user.first_name)
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
-                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
-                ])
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"⚠️ {user_link}, без подписки бот не работает! Подпишитесь на канал для использования.",
-                    "parse_mode": "HTML",
-                    "reply_markup": kb
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
-                return
+        # 📢 ПРОВЕРКА ПОДПИСКИ В БИЗНЕС-ЧАТАХ ДЛЯ СОБЕСЕДНИКА (ТОЛЬКО ЕСЛИ ОН ПИШЕТ КОМАНДУ)
+        if bc_id and not is_from_me and uid != owner_id and message.text:
+            text_raw_check = message.text.lower().strip()
+            # Список команд бота, которые требуют подписку у собеседника в бизнес-чате
+            bot_commands = [".стоп", ".старт", "+линк", "подмена", "печать", "+реплай", "-реплай", "ss", "dd", "set", ".мут", "!мут", ".ут", ".размут", "!размут", "мой ид", "моид", "твой ид", "твоид", "!команды"]
+            
+            is_command = any(text_raw_check.startswith(cmd) for cmd in bot_commands)
+            
+            if is_command:
+                is_subbed = await check_subscription(uid)
+                if not is_subbed:
+                    await clear_cmd(chat_id, message.message_id, bc_id)
+                    user_link = get_user_mention(uid, message.from_user.first_name)
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+                        [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
+                    ])
+                    kwargs = {
+                        "chat_id": chat_id,
+                        "text": f"⚠️ {user_link}, без подписки бот не работает! Подпишитесь на канал для использования команд.",
+                        "parse_mode": "HTML",
+                        "reply_markup": kb
+                    }
+                    if bc_id: kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
+                    return
 
         if not is_from_me or not message.text: return
 
@@ -649,12 +656,11 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # МУТ И РАЗМУТ (ОПРЕДЕЛЕНИЕ ИМЕННИКА СЛЕДУЕТ СОБЕСЕДНИКУ В ЛИЧКЕ)
+        # МУТ И РАЗМУТ
         if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
                 
-                # Если отвечают на сообщение — берем автора реплая, иначе в бизнес-чате мутим собеседника (chat_id)
                 if message.reply_to_message and message.reply_to_message.from_user:
                     target_user = message.reply_to_message.from_user
                     target_id = target_user.id
