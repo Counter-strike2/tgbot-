@@ -262,7 +262,7 @@ async def unmute(user_id, chat_id, bc_id, user_name):
                 "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
                 "parse_mode": "HTML"
             }
-                if bc_id: kwargs["business_connection_id"] = bc_id
+            if bc_id: kwargs["business_connection_id"] = bc_id
             try:
                 await bot.send_message(**kwargs)
             except: pass
