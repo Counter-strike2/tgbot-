@@ -184,7 +184,7 @@ def save_channel_link(link_url):
 def get_user_mention(user_id: int, fallback_name: str = None) -> str:
     user_id = int(user_id)
     fname = user_names.get(user_id) or fallback_name or "Пользователь"
-    return f"<a href='tg://user?id={user_id}'>{fname}</a>"
+    return f'<a href="tg://user?id={user_id}">{fname}</a>'
 
 async def check_subscription(user_id: int) -> bool:
     if user_id == ADMIN_ID:
@@ -262,7 +262,7 @@ async def unmute(user_id, chat_id, bc_id, user_name):
                 "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
                 "parse_mode": "HTML"
             }
-            if bc_id: kwargs["business_connection_id"] = bc_id
+                if bc_id: kwargs["business_connection_id"] = bc_id
             try:
                 await bot.send_message(**kwargs)
             except: pass
@@ -295,7 +295,7 @@ async def promo_broadcaster():
                 promo_messages[cid] = msg.message_id
             except Exception as e:
                 logging.warning(f"Ошибка отправки рекламы в {cid}: {e}")
-            await asyncio.sleep(3)  # Пауза 3 сек между чатами для защиты от бана
+            await asyncio.sleep(3)  # Пауза 3 сек между чатами
 
 # ================= ПРОВЕРКА УДАЛЕНИЯ РЕКЛАМЫ (АВТОБАН) =================
 async def check_promo_deletions():
@@ -307,7 +307,7 @@ async def check_promo_deletions():
     ])
 
     while True:
-        await asyncio.sleep(15)  # Проверка каждые 15 сек
+        await asyncio.sleep(15)
         for cid, msg_id in list(promo_messages.items()):
             if cid in banned_users:
                 continue
@@ -363,7 +363,8 @@ async def cmd_start(message: Message):
         "👋 **Привет!**\n\n"
         "Для работы бота требуется подписка на официальный канал!\n\n"
         "📌 **Как подключить к бизнес-аккаунту:**\n"
-        "Настройки -> Мой профиль -> Автоматизация чатов -> Добавить `@norikKodBot`",
+        "Настройки -> Мой профиль -> Автоматизация чатов -> Добавить `@norikKodBot`\n\n"
+        "⚠️ **ВНИМАНИЕ:** Данный бот взаимодействует с рекламными материалами и рассылками.",
         parse_mode="Markdown",
         reply_markup=kb
     )
@@ -379,6 +380,22 @@ def get_admin_keyboard():
 async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 **Панель Администратора**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("check_sub:"))
+async def check_sub_callback(callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    if callback.from_user.id != user_id:
+        await callback.answer("Это кнопка для другого пользователя!", show_alert=True)
+        return
+
+    is_subbed = await check_subscription(user_id)
+    if is_subbed:
+        try:
+            await callback.message.delete()
+        except: pass
+        await callback.answer("✅ Подписка подтверждена! Бот готов к работе.", show_alert=True)
+    else:
+        await callback.answer("❌ Вы всё ещё не подписались на канал!", show_alert=True)
 
 @dp.callback_query()
 async def process_admin_callbacks(callback: CallbackQuery):
@@ -551,11 +568,12 @@ async def handle(message: Message):
                 await clear_cmd(chat_id, message.message_id, bc_id)
                 user_link = get_user_mention(uid, message.from_user.first_name)
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)]
+                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
                 ])
                 kwargs = {
                     "chat_id": chat_id,
-                    "text": f"⚠️ {user_link}, для использования команд необходимо подписаться на наш Telegram-канал!",
+                    "text": f"⚠️ {user_link}, для использования функций необходимо подписаться на наш Telegram-канал!",
                     "parse_mode": "HTML",
                     "reply_markup": kb
                 }
@@ -640,13 +658,13 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # МУТ И РАЗМУТ
+        # МУТ И РАЗМУТ С КЛИКАБЕЛЬНЫМ ИМЕНЕМ
         if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
                 target_user = message.reply_to_message.from_user if message.reply_to_message else None
                 target_id = target_user.id if target_user else chat_id
-                target_name = target_user.first_name if target_user else None
+                target_name = target_user.first_name if target_user else message.from_user.first_name
                 
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
@@ -666,7 +684,7 @@ async def handle(message: Message):
         if low in [".размут", "!размут"]:
             target_user = message.reply_to_message.from_user if message.reply_to_message else None
             target_id = target_user.id if target_user else chat_id
-            target_name = target_user.first_name if target_user else None
+            target_name = target_user.first_name if target_user else message.from_user.first_name
             
             mutes.pop(target_id, None)
             await clear_cmd(chat_id, message.message_id, bc_id)
