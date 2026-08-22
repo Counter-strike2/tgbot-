@@ -70,7 +70,7 @@ TEXT_CONNECT_INSTRUCTION = (
     "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
     "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте боту полный доступ к сообщениям <b>5/5</b>!\n\n"
     "📢 <b>Обратите внимание:</b> Бот публикует рекламные материалы. "
-    "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения бот  блокируется автоматически."
+    "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы владельцем."
 )
 
 def get_db():
@@ -257,16 +257,19 @@ async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
 async def clear_cmd(chat_id, msg_id, bc_id):
     await delete_msg(chat_id, msg_id, bc_id)
 
-async def typing_worker(bc_id):
-    try:
-        while True:
-            chats = active_chats.get(bc_id, set())
-            for cid in list(chats)[-50:]:
-                if cid not in typing_disabled_chats:
-                    try: await bot.send_chat_action(chat_id=cid, action="typing", business_connection_id=bc_id)
-                    except: pass
+async def global_typing_loop():
+    while True:
+        try:
+            for bc_id, chats in list(active_chats.items()):
+                for cid in list(chats)[-50:]:
+                    if cid not in typing_disabled_chats:
+                        try:
+                            await bot.send_chat_action(chat_id=cid, action="typing", business_connection_id=bc_id)
+                        except: pass
             await asyncio.sleep(4)
-    except asyncio.CancelledError: pass
+        except Exception as e:
+            logging.error(f"Ошибка автоматической печати: {e}")
+            await asyncio.sleep(4)
 
 async def spam_worker(chat_id, bc_id, reply_to, text):
     try:
@@ -296,13 +299,9 @@ async def unmute(user_id, chat_id, bc_id, user_name):
             except: pass
 
 async def promo_broadcaster():
-    promo_text = (
-        "📢 <b>Подпишись на наш официальный канал!</b>\n\n"
-        "⚠️ <b>ВНИМАНИЕ:</b> Не удаляйте это сообщение! "
-        "В случае удаления вашего аккаунт забанят."
-    )
+    promo_text = "Можешь, пожалуйста, на наш канал подписаться? Если не трудно ❤️"
     promo_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)]
+        [InlineKeyboardButton(text="❤️ Подписаться", url=REQUIRED_CHANNEL_URL)]
     ])
 
     while True:
@@ -329,7 +328,7 @@ async def check_promo_deletions():
         [InlineKeyboardButton(text="💬 Написать владельцу", url=OWNER_TG_LINK)]
     ])
     promo_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)]
+        [InlineKeyboardButton(text="❤️ Подписаться", url=REQUIRED_CHANNEL_URL)]
     ])
 
     while True:
@@ -348,8 +347,7 @@ async def check_promo_deletions():
                     try:
                         await bot.send_message(
                             chat_id=cid,
-                            text=f"🚫 {user_link}, вы заблокированы за удаление рекламного сообщения!\n\n"
-                                 f"Для разбана обратитесь к владельцу.",
+                            text=f"Вы забанены владельцем.",
                             parse_mode="HTML",
                             reply_markup=unban_kb
                         )
@@ -588,7 +586,8 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        if uid in mutes and datetime.now() < mutes[uid]["until"]:
+        # МУТ: Мои сообщения НЕ удаляются, удаляются только сообщения собеседника в муте
+        if not is_from_me and uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
@@ -656,16 +655,11 @@ async def handle(message: Message):
         if low == "печать -":
             save_setting(chat_id, 'typing_disabled', True)
             await clear_cmd(chat_id, message.message_id, bc_id)
-            if bc_id in typing_tasks:
-                typing_tasks[bc_id].cancel()
-                del typing_tasks[bc_id]
             return
 
         if low == "печать +":
             save_setting(chat_id, 'typing_disabled', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
-            if bc_id and bc_id not in typing_tasks:
-                typing_tasks[bc_id] = asyncio.create_task(typing_worker(bc_id))
             return
 
         if low == "+реплай":
@@ -757,7 +751,6 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
-        # 🆔 ВЫВОД И КЛИКАБЕЛЬНОГО ИМЕНИ, И ЧИСЛОВОГО ID
         if low in ["мой ид", "моид"]:
             await clear_cmd(chat_id, message.message_id, bc_id)
             my_link = get_user_mention(uid, message.from_user.first_name)
@@ -881,6 +874,7 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
     except: pass
 
+    asyncio.create_task(global_typing_loop())
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
 
