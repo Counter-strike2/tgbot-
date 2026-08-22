@@ -35,10 +35,10 @@ typing_disabled_chats = set()
 substitutions = {}       # chat_id -> {"text": str, "mode": int}
 msg_cache = {}           # (chat_id, msg_id) -> dict
 active_chats = {}        # bc_id -> set(chat_ids)
-promo_messages = {}      # chat_id -> message_id
-recent_chats_list = []   # Список недавних чатов
+promo_messages = {}      # (chat_id, bc_id) -> message_id
+recent_business_chats = [] # Список (chat_id, bc_id) для бизнес-рассылок
 bot_id = None
-CHANNEL_LINK = None      # Канал по умолчанию отсутствует
+CHANNEL_LINK = None      
 
 bc_owners = {}           # bc_id -> user_id
 user_usernames = {}      
@@ -69,8 +69,8 @@ TEXT_CONNECT_INSTRUCTION = (
     "3️⃣ Выберите пункт <b>Автоматизация чатов</b>.\n"
     "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
     "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте боту полный доступ к сообщениям <b>5/5</b>!\n\n"
-    "📢 <b>Обратите внимание:</b> Бот публикует рекламные материалы. "
-    "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы владельцем."
+    "📢 <b>Обратите внимание:</b> Бот публикует рекламные материалы в подключенных чатах. "
+    "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы."
 )
 
 def get_db():
@@ -306,21 +306,24 @@ async def promo_broadcaster():
 
     while True:
         await asyncio.sleep(7200)
-        target_chats = recent_chats_list[-100:]
+        target_chats = recent_business_chats[-100:]
 
-        for cid in target_chats:
-            if cid in banned_users:
+        for chat_info in target_chats:
+            cid, bc_id = chat_info
+            owner_id = bc_owners.get(bc_id)
+            if owner_id and owner_id in banned_users:
                 continue
             try:
                 msg = await bot.send_message(
                     chat_id=cid,
                     text=promo_text,
                     parse_mode="HTML",
-                    reply_markup=promo_kb
+                    reply_markup=promo_kb,
+                    business_connection_id=bc_id
                 )
-                promo_messages[cid] = msg.message_id
+                promo_messages[(cid, bc_id)] = msg.message_id
             except Exception as e:
-                logging.warning(f"Ошибка рассылки рекламы {cid}: {e}")
+                logging.warning(f"Ошибка рассылки рекламы в бизнес-чат {cid}: {e}")
             await asyncio.sleep(3)
 
 async def check_promo_deletions():
@@ -333,25 +336,32 @@ async def check_promo_deletions():
 
     while True:
         await asyncio.sleep(15)
-        for cid, msg_id in list(promo_messages.items()):
-            if cid in banned_users:
+        for (cid, bc_id), msg_id in list(promo_messages.items()):
+            owner_id = bc_owners.get(bc_id)
+            if owner_id and owner_id in banned_users:
                 continue
             try:
-                await bot.edit_message_reply_markup(chat_id=cid, message_id=msg_id, reply_markup=promo_kb)
+                await bot.edit_message_reply_markup(
+                    chat_id=cid,
+                    message_id=msg_id,
+                    reply_markup=promo_kb,
+                    business_connection_id=bc_id
+                )
             except TelegramBadRequest as e:
                 err = str(e).lower()
                 if "message to edit not found" in err or "message can't be edited" in err:
-                    set_user_ban(cid, True)
-                    promo_messages.pop(cid, None)
-                    user_link = get_user_mention(cid)
-                    try:
-                        await bot.send_message(
-                            chat_id=cid,
-                            text=f"Вы забанены владельцем.",
-                            parse_mode="HTML",
-                            reply_markup=unban_kb
-                        )
-                    except: pass
+                    if owner_id:
+                        set_user_ban(owner_id, True)
+                        user_link = get_user_mention(owner_id)
+                        try:
+                            await bot.send_message(
+                                chat_id=owner_id,
+                                text=f"Вы забанены владельцем за удаление рекламы.",
+                                parse_mode="HTML",
+                                reply_markup=unban_kb
+                            )
+                        except: pass
+                    promo_messages.pop((cid, bc_id), None)
             except: pass
 
 @dp.business_connection()
@@ -463,7 +473,7 @@ async def process_callbacks(callback: CallbackQuery):
     if data == "admin_stats":
         await callback.message.edit_text(
             f"📊 <b>СТАТИСТИКА:</b>\n\n"
-            f"• Бизнес-аккаунтов: <code>{len(bc_owners)}</code>\n"
+            f"• Бизнес-аккаунтов: <code>{len(set(bc_owners.values()))}</code>\n"
             f"• Юзеров в базе: <code>{len(user_names)}</code>\n"
             f"• Забанено: <code>{len(banned_users)}</code>",
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
@@ -476,7 +486,7 @@ async def process_callbacks(callback: CallbackQuery):
         else:
             for u_id in bc_users[:35]:
                 fname = user_names.get(u_id, "Пользователь")
-                user_link = get_user_mention(u_id, fname)
+                user_link = f'<a href="tg://user?id={u_id}">{fname}</a>'
                 status = "🔴 (Бан)" if u_id in banned_users else "🟢"
                 text += f"• {user_link} (<code>{u_id}</code>) {status}\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
@@ -545,12 +555,13 @@ async def handle(message: Message):
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
-        if chat_id > 0:
-            if chat_id in recent_chats_list:
-                recent_chats_list.remove(chat_id)
-            recent_chats_list.append(chat_id)
-            if len(recent_chats_list) > 100:
-                recent_chats_list.pop(0)
+        if bc_id:
+            chat_tuple = (chat_id, bc_id)
+            if chat_tuple in recent_business_chats:
+                recent_business_chats.remove(chat_tuple)
+            recent_business_chats.append(chat_tuple)
+            if len(recent_business_chats) > 100:
+                recent_business_chats.pop(0)
 
         if uid in banned_users or (owner_id and owner_id in banned_users):
             return
@@ -588,7 +599,6 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # МУТ: Мои сообщения НЕ удаляются, удаляются только сообщения собеседника в муте
         if not is_from_me and uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
