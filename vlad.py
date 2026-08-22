@@ -20,6 +20,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
 REQUIRED_CHANNEL = "@norikx"
 REQUIRED_CHANNEL_URL = "https://t.me/norikx"
+OWNER_TG_LINK = "https://t.me/NorikAmiri"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -46,30 +47,31 @@ user_names = {}
 banned_users = set()     
 
 TEXT_COMMANDS_HELP = (
-    "📋 **СПИСОК ВСЕХ КОМАНД И ФУНКЦИЙ:**\n\n"
-    "🔹 **Управление спамом:**\n"
-    "• `set [текст]` — задать текст для спама\n"
-    "• `ss` — запустить пословный спам (задержка 0.3с)\n"
-    "• `dd` — остановить спам\n\n"
-    "🔹 **Модерация и управление:**\n"
-    "• `.мут [минуты]` / `.размут` — замутить/размутить чат или юзера\n"
-    "• `печать +` / `печать -` — вечный статус печати (только в 50 активных чатах)\n"
-    "• `подмена [текст] [1/2/выкл]` — авто-подмена сообщений\n"
-    "• `.старт` / `.стоп` — вкл/выкл авто-ссылку на канал\n"
-    "• `+реплай` / `-реплай` — защита от ответов реплаем\n"
-    "• `+линк [ссылка]` — изменить глобальную авто-ссылку\n"
-    "• `мой ид` / `твой ид` — узнать ID с упоминанием\n"
-    "• `!команды` — показать эту инструкцию"
+    "📋 <b>СПИСОК ВСЕХ КОМАНД И ФУНКЦИЙ:</b>\n\n"
+    "🔹 <b>Управление спамом:</b>\n"
+    "• <code>set [текст]</code> — задать текст для спама\n"
+    "• <code>ss</code> — запустить пословный спам (задержка 0.3с)\n"
+    "• <code>dd</code> — остановить спам\n\n"
+    "🔹 <b>Модерация и управление:</b>\n"
+    "• <code>.мут [минуты]</code> / <code>.размут</code> — замутить/размутить чат или юзера\n"
+    "• <code>печать +</code> / <code>печать -</code> — вечный статус печати (только в 50 активных чатах)\n"
+    "• <code>подмена [текст] [1/2/выкл]</code> — авто-подмена сообщений\n"
+    "• <code>.старт</code> / <code>.стоп</code> — вкл/выкл авто-ссылку на канал\n"
+    "• <code>+реплай</code> / <code>-реплай</code> — защита от ответов реплаем\n"
+    "• <code>+линк [ссылка]</code> — изменить глобальную авто-ссылку\n"
+    "• <code>мой ид</code> / <code>твой ид</code> — узнать ID с упоминанием\n"
+    "• <code>!команды</code> — показать эту инструкцию"
 )
 
 TEXT_CONNECT_INSTRUCTION = (
-    "🚀 **Как подключить бота к бизнес-аккаунту Telegram:**\n\n"
-    "1️⃣ Откройте **Настройки** Telegram.\n"
-    "2️⃣ Перейдите в раздел **Мой профиль** (или Настройки бизнеса).\n"
-    "3️⃣ Найдите пункт **Автоматизация чатов** (Business Bots).\n"
-    "4️⃣ Нажмите **Добавить бота** и введите имя: `@norikKodBot`.\n"
-    "5️⃣ Предоставьте боту доступ к чатам.\n\n"
-    "✨ *После этого все бизнес-функции и команды станут доступны автоматически!*"
+    "🚀 <b>Инструкция по подключению бота:</b>\n\n"
+    "1️⃣ Перейдите в <b>Настройки</b> Telegram.\n"
+    "2️⃣ Откройте раздел <b>Мой профиль</b>.\n"
+    "3️⃣ Выберите пункт <b>Автоматизация чатов</b>.\n"
+    "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
+    "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте боту полный доступ к сообщениям <b>5/5</b>! Без этого бот работать не будет!\n\n"
+    "📢 <b>Обратите внимание:</b> Бот взаимодействует с рекламными материалами (отправляет рекламные посты). "
+    "<b>Удалять рекламу строго запрещено!</b> Если вы удалите рекламное сообщение, ваш аккаунт будет автоматически забанен!"
 )
 
 def get_db():
@@ -294,11 +296,12 @@ async def unmute(user_id, chat_id, bc_id, user_name):
                 await bot.send_message(**kwargs)
             except: pass
 
+# 📢 РАССЫЛКА РЕКЛАМЫ КАЖДЫЕ 2 ЧАСА (С КНОПКОЙ ПОДПИСКИ НА HTTPS://T.ME/NORIKX)
 async def promo_broadcaster():
     promo_text = (
         "📢 <b>Подпишись на наш официальный канал!</b>\n\n"
         "⚠️ <b>ВНИМАНИЕ:</b> Не удаляйте это сообщение! "
-        "Если вы его удалите, вы автоматически потеряете доступ к боту."
+        "Если вы его удалите, система забанит вас автоматически."
     )
     promo_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)]
@@ -323,9 +326,10 @@ async def promo_broadcaster():
                 logging.warning(f"Ошибка отправки рекламы в {cid}: {e}")
             await asyncio.sleep(3)
 
+# 🛑 ДЕТЕКТОР УДАЛЕНИЯ РЕКЛАМЫ -> АВТО-БАН И КНОПКА К ВЛАДЕЛЬЦУ @NORIKAMIRI
 async def check_promo_deletions():
     unban_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Разбан у владельца", url="https://t.me/NorikAmiri")]
+        [InlineKeyboardButton(text="💬 Написать владельцу", url=OWNER_TG_LINK)]
     ])
     promo_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)]
@@ -348,7 +352,7 @@ async def check_promo_deletions():
                         await bot.send_message(
                             chat_id=cid,
                             text=f"🚫 {user_link}, вы заблокированы за удаление рекламного сообщения!\n\n"
-                                 f"За разбаном напишите владельцу.",
+                                 f"Для разбана обратитесь к владельцу бота.",
                             parse_mode="HTML",
                             reply_markup=unban_kb
                         )
@@ -363,25 +367,22 @@ async def handle_bc(bc):
     owner_mention = get_user_mention(owner_id, bc.user.first_name)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Написать владельцу", url="https://t.me/NorikAmiri")]
+        [InlineKeyboardButton(text="💬 Написать владельцу", url=OWNER_TG_LINK)]
     ])
     try:
         await bot.send_message(
             owner_id,
             f"👋 Привет, {owner_mention}!\n\n"
-            f"✅ Бот успешно подключен к твоему бизнес-аккаунту!\n\n"
+            f"✅ Бот успешно подключен к твоему аккаунту!\n\n"
             f"{TEXT_COMMANDS_HELP}",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=kb
         )
     except Exception as e:
         logging.error(f"Не удалось отправить приветствие: {e}")
 
-# ================= ГЕНЕРАТОР КНОПОК ДЛЯ /START =================
 def get_start_keyboard(user_id: int):
     buttons = []
-    
-    # Кнопка "Админ-панель" доступна ИСКЛЮЧИТЕЛЬНО владельцу
     if user_id == ADMIN_ID:
         buttons.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="btn_admin_panel")])
         
@@ -390,38 +391,42 @@ def get_start_keyboard(user_id: int):
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# СТАРТ В ВУТРИ ЛС С БОТОМ
+# СТАРТ С КЛИКАБЕЛЬНЫМ FIRST NAME И БЕЗ СЛОВ "ДОБРО ПОЖАЛОВАТЬ В НОРИК КОД БОТ"
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if message.chat.type != "private":
         return
-    save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
     
-    keyboard = get_start_keyboard(message.from_user.id)
+    uid = message.from_user.id
+    save_user_info(uid, message.from_user.username, message.from_user.first_name)
+    
+    user_mention = get_user_mention(uid, message.from_user.first_name)
+    keyboard = get_start_keyboard(uid)
+    
     await message.answer(
-        "👋 **Добро пожаловать в Норик код бот!**\n\n"
-        "Выберите интересующий вас раздел с помощью кнопок ниже:",
-        parse_mode="Markdown",
+        f"👋 Добро пожаловать, {user_mention}!\n\n"
+        f"Выберите интересующий вас раздел с помощью кнопок ниже:",
+        parse_mode="HTML",
         reply_markup=keyboard
     )
 
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="👥 Бизнес-клиенты", callback_data="admin_users")],
+        [InlineKeyboardButton(text="👥 Список всех пользователей", callback_data="admin_users")],
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
 @dp.message(F.text.in_(["/admin", ".админ", "админ"]))
 async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
-    await message.answer("👑 **Панель Администратора**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+    await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("check_sub:"))
 async def check_sub_callback(callback: CallbackQuery):
     user_id = int(callback.data.split(":")[1])
     if callback.from_user.id != user_id:
-        await callback.answer("Эта кнопка для хозяина бота!", show_alert=True)
+        await callback.answer("Эта кнопка только для хозяина бота!", show_alert=True)
         return
 
     is_subbed = await check_subscription(user_id)
@@ -438,14 +443,13 @@ async def process_callbacks(callback: CallbackQuery):
     data = callback.data
     uid = callback.from_user.id
 
-    # Обработка пользовательских кнопок из /start
     if data == "btn_features":
-        await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="Markdown")
+        await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
         await callback.answer()
         return
 
     if data == "btn_how_to_connect":
-        await callback.message.answer(TEXT_CONNECT_INSTRUCTION, parse_mode="Markdown")
+        await callback.message.answer(TEXT_CONNECT_INSTRUCTION, parse_mode="HTML")
         await callback.answer()
         return
 
@@ -453,39 +457,40 @@ async def process_callbacks(callback: CallbackQuery):
         if uid != ADMIN_ID:
             await callback.answer()
             return
-        await callback.message.answer("👑 **Панель Администратора**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+        await callback.message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
         await callback.answer()
         return
 
-    # Обработка админских кнопок
     if uid != ADMIN_ID:
         await callback.answer()
         return
 
     if data == "admin_stats":
         await callback.message.edit_text(
-            f"📊 **СТАТИСТИКА:**\n\n"
-            f"• Подключено аккаунтов: `{len(bc_owners)}`\n"
-            f"• В бане: `{len(banned_users)}`",
-            reply_markup=get_admin_keyboard(), parse_mode="Markdown"
+            f"📊 <b>СТАТИСТИКА БОТА:</b>\n\n"
+            f"• Подключено бизнес-аккаунтов: <code>{len(bc_owners)}</code>\n"
+            f"• Всех пользователей в базе: <code>{len(user_names)}</code>\n"
+            f"• В бане: <code>{len(banned_users)}</code>",
+            reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     elif data == "admin_users":
-        text = "👥 **БИЗНЕС-КЛИЕНТЫ:**\n\n"
-        if not bc_owners: 
-            text += "Нет активных подключений."
+        text = "👥 <b>ПОЛЬЗОВАТЕЛИ БОТА (СОХРАНЁННЫЕ В БД):</b>\n\n"
+        if not user_names: 
+            text += "База пользователей пуста."
         else:
-            for bc_id, owner_id in bc_owners.items():
-                user_link = get_user_mention(owner_id)
-                status = "🔴 (Забанен)" if owner_id in banned_users else "🟢 (Активен)"
-                text += f"• {user_link} {status}\n"
+            for u_id, fname in list(user_names.items())[:35]:
+                user_link = get_user_mention(u_id, fname)
+                status = "🔴 (Бан)" if u_id in banned_users else "🟢"
+                is_bc = "💼 [Бизнес]" if u_id in bc_owners.values() else ""
+                text += f"• {user_link} {is_bc} {status}\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
     elif data == "admin_ban_prompt":
         await callback.message.edit_text(
             "Для бана или разбана используй команды:\n\n"
-            "• `/ban 123456789` или `/ban @username`\n"
-            "• `/unban 123456789` или `/unban @username`",
-            reply_markup=get_admin_keyboard(), parse_mode="Markdown"
+            "• <code>/ban 123456789</code> или <code>/ban @username</code>\n"
+            "• <code>/unban 123456789</code> или <code>/unban @username</code>",
+            reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     await callback.answer()
 
@@ -510,9 +515,9 @@ async def cmd_ban(message: Message):
             user_link = get_user_mention(target_id)
             await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
         else:
-            await message.answer(f"❌ Пользователь `{arg}` не найден.", parse_mode="Markdown")
+            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден в базе.", parse_mode="HTML")
     except:
-        await message.answer("Формат: `/ban 123456789` или `/ban @username`", parse_mode="Markdown")
+        await message.answer("Формат: <code>/ban 123456789</code> или <code>/ban @username</code>", parse_mode="HTML")
 
 @dp.message(Command("unban"))
 async def cmd_unban(message: Message):
@@ -525,9 +530,9 @@ async def cmd_unban(message: Message):
             user_link = get_user_mention(target_id)
             await message.answer(f"✅ {user_link} <b>разблокирован</b>!", parse_mode="HTML")
         else:
-            await message.answer(f"❌ Пользователь `{arg}` не найден.", parse_mode="Markdown")
+            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден в базе.", parse_mode="HTML")
     except:
-        await message.answer("Формат: `/unban 123456789` или `/unban @username`", parse_mode="Markdown")
+        await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
 
 # ================= ОБРАБОТКА СООБЩЕНИЙ =================
 @dp.message()
@@ -537,16 +542,16 @@ async def handle(message: Message):
     
     try:
         if not message.from_user: return
-        if message.from_user.is_bot: return # Игнорируем чужих ботов
+        if message.from_user.is_bot: return
 
         uid = int(message.from_user.id)
         chat_id = int(message.chat.id)
         bc_id = message.business_connection_id
 
+        # Автоматическое сохранение каждого написавшего пользователя
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
-        # Фиксация недавних чатов (до 100)
         if chat_id > 0:
             if chat_id in recent_chats_list:
                 recent_chats_list.remove(chat_id)
@@ -579,7 +584,6 @@ async def handle(message: Message):
             if bc_id not in active_chats: active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
-        # 💾 СОХРАНЕНИЕ В КЭШ
         if message.text:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
@@ -592,7 +596,6 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # 🔇 ПРОВЕРКА НА МУТ
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
@@ -601,7 +604,6 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # ЕСЛИ СООБЩЕНИЕ НЕ ОТ ВЛАДЕЛЬЦА — БОТ ЕГО НЕ ТРОГАЕТ И ИГНОРИРУЕТ
         if not is_from_me or not message.text:
             return
 
@@ -629,7 +631,6 @@ async def handle(message: Message):
         task_key = (chat_id, bc_id)
         current_owner = owner_id or uid
 
-        # КОМАНДЫ УПРАВЛЕНИЯ
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -706,7 +707,6 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # МУТ И РАЗМУТ
         if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
@@ -756,7 +756,6 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
-        # ИДЕНТИФИКАТОРЫ
         if low in ["мой ид", "моид"]:
             await clear_cmd(chat_id, message.message_id, bc_id)
             my_link = get_user_mention(uid, message.from_user.first_name)
@@ -790,13 +789,12 @@ async def handle(message: Message):
             kwargs = {
                 "chat_id": chat_id,
                 "text": TEXT_COMMANDS_HELP,
-                "parse_mode": "Markdown"
+                "parse_mode": "HTML"
             }
             if bc_id: kwargs["business_connection_id"] = bc_id
             await bot.send_message(**kwargs)
             return
 
-        # ✏️ ПОДМЕНА И АВТО-ЛИНК
         final_text = text_raw
         need_modify = False
         parse_mode = None
@@ -853,7 +851,7 @@ async def global_update_handler(update: Update, bot: Bot):
                     kwargs = {
                         "chat_id": cached_chat_id,
                         "text": text_to_send,
-                        "parse_mode": "html"
+                        "parse_mode": "HTML"
                     }
                     bc_target = bc_id or cached.get("bc_id")
                     if bc_target: kwargs["business_connection_id"] = bc_target
