@@ -31,10 +31,10 @@ typing_tasks = {}
 user_spam_texts = {}    
 link_chats = set()      
 reply_guard_chats = set()
-typing_globally_disabled = False  # По умолчанию печать включена сразу везде
+typing_globally_disabled = False  
 substitutions = {}      
 msg_cache = {}          
-active_chats_set = set() # Все чаты, куда писали
+active_chats_set = set() 
 promo_messages = {}     
 recent_chats_list = []  
 bot_id = None
@@ -227,7 +227,6 @@ async def clear_cmd(chat_id, msg_id, bc_id):
     await delete_msg(chat_id, msg_id, bc_id)
 
 async def typing_worker():
-    """Воркер печати: работает сразу везде по последним 50 активным чатам без багов ТГ"""
     global typing_globally_disabled
     try:
         while True:
@@ -520,10 +519,8 @@ async def handle(message: Message):
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
-        # Запоминаем чат для автоматической печати
         active_chats_set.add(chat_id)
 
-        # Фиксация недавних чатов (до 100) для рекламы
         if chat_id > 0 and not bc_id:
             if chat_id in recent_chats_list:
                 recent_chats_list.remove(chat_id)
@@ -531,7 +528,6 @@ async def handle(message: Message):
             if len(recent_chats_list) > 100:
                 recent_chats_list.pop(0)
 
-        # 🛑 ПРОВЕРКА НА БАН
         if uid in banned_users or (owner_id and owner_id in banned_users):
             if message.chat.type == "private" and not bc_id:
                 unban_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -556,7 +552,6 @@ async def handle(message: Message):
             me = await bot.get_me()
             bot_id = me.id
 
-        # 💾 СОХРАНЕНИЕ В КЭШ ДЛЯ УДАЛЕНИЙ
         if message.text and not message.from_user.is_bot and bc_id:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
@@ -569,7 +564,6 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # 🔇 ПРОВЕРКА НА МУТ
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
@@ -593,7 +587,6 @@ async def handle(message: Message):
         
         is_bot_command = any(low.startswith(cmd) for cmd in bot_commands_list)
 
-        # 📢 ПРОВЕРКА ПОДПИСКИ ДЛЯ КОМАНД
         if is_bot_command and uid != ADMIN_ID:
             is_subbed = await check_subscription(uid)
             if not is_subbed:
@@ -612,7 +605,6 @@ async def handle(message: Message):
                 await bot.send_message(**kwargs)
                 return
 
-        # СТАРТ В ЛИЧКЕ БОТА С ТРЕМЯ КНОПКАМИ
         if message.chat.type == "private" and not bc_id and low == "/start":
             start_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👑 Админ-панель", callback_data="menu_admin")],
@@ -626,7 +618,7 @@ async def handle(message: Message):
             )
             return
 
-        # КОМАНДЫ УПРАВЛЕНИЯ (БЕЗ ЗАДЕРЖЕК)
+        # ИСПРАВЛЕННЫЙ БЛОК КОМАНД (ЧИСТИМ САМУ КОМАНДУ И ОТПРАВЛЯЕМ ОТВЕТ ПРАВИЛЬНО)
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -686,7 +678,6 @@ async def handle(message: Message):
             spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
             return
 
-        # Мгновенная остановка спама dd
         if low == "dd":
             await clear_cmd(chat_id, message.message_id, bc_id)
             if task_key in spam_tasks:
@@ -699,11 +690,9 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # МУТ И РАЗМУТ
         if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
-                
                 if message.reply_to_message and message.reply_to_message.from_user:
                     target_user = message.reply_to_message.from_user
                     target_id = target_user.id
@@ -749,7 +738,6 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
-        # ИДЕНТИФИКАТОРЫ
         if low in ["мой ид", "моид"]:
             await clear_cmd(chat_id, message.message_id, bc_id)
             my_link = get_user_mention(uid, message.from_user.first_name)
@@ -800,7 +788,6 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
-        # ✏️ ПОДМЕНА И АВТО-ЛИНК (Для бизнес-чатов)
         if bc_id:
             final_text = text_raw
             need_modify = False
@@ -831,7 +818,6 @@ async def handle(message: Message):
     except Exception as e:
         logging.error(f"❌ Ошибка обработки сообщения: {e}")
 
-# ================= УДАЛЁННЫЕ СООБЩЕНИЯ =================
 @dp.update()
 async def global_update_handler(update: Update, bot: Bot):
     try:
