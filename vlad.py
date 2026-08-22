@@ -24,7 +24,6 @@ REQUIRED_CHANNEL_URL = "https://t.me/norikx"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилища состояния
 mutes = {}              
 spam_tasks = {}         
 typing_tasks = {}       
@@ -195,15 +194,17 @@ async def check_subscription(user_id: int) -> bool:
 
 init_db()
 
+# ЖЕСТКОЕ УДАЛЕНИЕ ОРИГИНАЛЬНОЙ КОМАНДЫ ПОЛЬЗОВАТЕЛЯ
 async def delete_msg(chat_id, msg_id, bc_id):
     if bc_id:
         try:
             await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[msg_id])
-            return
-        except: pass
+        except:
+            pass
     try:
         await bot.delete_message(chat_id, msg_id)
-    except: pass
+    except:
+        pass
 
 async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
     try:
@@ -618,28 +619,29 @@ async def handle(message: Message):
             )
             return
 
-        # ИСПРАВЛЕННЫЙ БЛОК КОМАНД (ЧИСТИМ САМУ КОМАНДУ И ОТПРАВЛЯЕМ ОТВЕТ ПРАВИЛЬНО)
+        # ===== ОБРАБОТЧИКИ КОМАНД С ГАРАНТИРОВАННЫМ УДАЛЕНИЕМ ТВОЕГО СООБЩЕНИЯ =====
         if low == ".стоп":
+            await delete_msg(chat_id, message.message_id, bc_id)
             save_setting(chat_id, 'enabled_links', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low == ".старт":
+            await delete_msg(chat_id, message.message_id, bc_id)
             save_setting(chat_id, 'enabled_links', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low.startswith("+линк"):
+            await delete_msg(chat_id, message.message_id, bc_id)
             parts = text_raw.split(maxsplit=1)
             if len(parts) > 1:
                 new_link = parts[1].strip()
                 if not new_link.startswith("http"):
                     new_link = "https://t.me/" + new_link.lstrip("@")
                 save_channel_link(new_link)
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low.startswith("подмена "):
+            await delete_msg(chat_id, message.message_id, bc_id)
             parts = text_raw.split(maxsplit=2)
             if len(parts) >= 2:
                 if parts[1].lower() == "выкл":
@@ -647,31 +649,30 @@ async def handle(message: Message):
                 else:
                     mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
                     save_substitution(chat_id, parts[1], mode)
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low == "печать -":
+            await delete_msg(chat_id, message.message_id, bc_id)
             typing_globally_disabled = True
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low == "печать +":
+            await delete_msg(chat_id, message.message_id, bc_id)
             typing_globally_disabled = False
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low == "+реплай":
+            await delete_msg(chat_id, message.message_id, bc_id)
             save_setting(chat_id, 'reply_guard', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low == "-реплай":
+            await delete_msg(chat_id, message.message_id, bc_id)
             save_setting(chat_id, 'reply_guard', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low == "ss":
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await delete_msg(chat_id, message.message_id, bc_id)
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
             text = user_spam_texts.get(str(current_owner), "Ты фрик!")
             if task_key in spam_tasks: spam_tasks[task_key].cancel()
@@ -679,18 +680,19 @@ async def handle(message: Message):
             return
 
         if low == "dd":
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await delete_msg(chat_id, message.message_id, bc_id)
             if task_key in spam_tasks:
                 spam_tasks[task_key].cancel()
                 del spam_tasks[task_key]
             return
 
         if low.startswith("set "):
+            await delete_msg(chat_id, message.message_id, bc_id)
             save_spam_text(str(current_owner), text_raw[4:].strip())
-            await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
         if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
+            await delete_msg(chat_id, message.message_id, bc_id)
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
                 if message.reply_to_message and message.reply_to_message.from_user:
@@ -703,7 +705,6 @@ async def handle(message: Message):
                 
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
-                await clear_cmd(chat_id, message.message_id, bc_id)
                 
                 user_link = get_user_mention(target_id, target_name)
                 kwargs = {
@@ -717,6 +718,7 @@ async def handle(message: Message):
             return
 
         if low in [".размут", "!размут"]:
+            await delete_msg(chat_id, message.message_id, bc_id)
             if message.reply_to_message and message.reply_to_message.from_user:
                 target_user = message.reply_to_message.from_user
                 target_id = target_user.id
@@ -726,7 +728,6 @@ async def handle(message: Message):
                 target_name = message.chat.first_name or "Пользователь"
             
             mutes.pop(target_id, None)
-            await clear_cmd(chat_id, message.message_id, bc_id)
             user_link = get_user_mention(target_id, target_name)
             
             kwargs = {
@@ -739,7 +740,7 @@ async def handle(message: Message):
             return
 
         if low in ["мой ид", "моид"]:
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await delete_msg(chat_id, message.message_id, bc_id)
             my_link = get_user_mention(uid, message.from_user.first_name)
             kwargs = {
                 "chat_id": chat_id,
@@ -751,7 +752,7 @@ async def handle(message: Message):
             return
 
         if low in ["твой ид", "твоид"]:
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await delete_msg(chat_id, message.message_id, bc_id)
             target_user = message.reply_to_message.from_user if message.reply_to_message else None
             target_id = target_user.id if target_user else (chat_id if chat_id > 0 else None)
             if target_id:
@@ -767,7 +768,7 @@ async def handle(message: Message):
             return
 
         if low == "!команды":
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await delete_msg(chat_id, message.message_id, bc_id)
             kwargs = {
                 "chat_id": chat_id,
                 "text": (
