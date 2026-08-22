@@ -71,7 +71,6 @@ TEXT_CONNECT_INSTRUCTION = (
     "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте боту полный доступ к сообщениям <b>5/5</b>!\n\n"
     "📢 <b>Обратите внимание:</b> Бот публикует рекламные материалы. "
     "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы владельцем."
-    "<b Бот работает только:</b> в личных сообщениях."
 )
 
 def get_db():
@@ -400,6 +399,7 @@ async def cmd_start(message: Message):
     
     await message.answer(
         f"👋 Добро пожаловать, {user_mention}!\n\n"
+        f"💬 <b>Обратите внимание:</b> Бот работает только в личных сообщениях!\n\n"
         f"Выберите раздел:",
         parse_mode="HTML",
         reply_markup=keyboard
@@ -408,7 +408,7 @@ async def cmd_start(message: Message):
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="👥 Список всех пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💼 Бизнес-аккаунты", callback_data="admin_users")],
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
@@ -469,15 +469,16 @@ async def process_callbacks(callback: CallbackQuery):
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     elif data == "admin_users":
-        text = "👥 <b>ПОЛЬЗОВАТЕЛИ БАЗЫ:</b>\n\n"
-        if not user_names: 
-            text += "База пуста."
+        text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
+        bc_users = list(set(bc_owners.values()))
+        if not bc_users: 
+            text += "Нет подключенных бизнес-аккаунтов."
         else:
-            for u_id, fname in list(user_names.items())[:35]:
+            for u_id in bc_users[:35]:
+                fname = user_names.get(u_id, "Пользователь")
                 user_link = get_user_mention(u_id, fname)
                 status = "🔴 (Бан)" if u_id in banned_users else "🟢"
-                is_bc = "💼 [Бизнес]" if u_id in bc_owners.values() else ""
-                text += f"• {user_link} {is_bc} {status}\n"
+                text += f"• {user_link} (<code>{u_id}</code>) {status}\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
     elif data == "admin_ban_prompt":
