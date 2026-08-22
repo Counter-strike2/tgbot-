@@ -231,11 +231,15 @@ async def typing_worker():
     except asyncio.CancelledError: 
         pass
 
-async def spam_worker(chat_id, bc_id, reply_to, text):
+async def spam_worker(chat_id, bc_id, reply_to, text, current_owner, active_bc_owners):
     try:
         words = text.split() if text else ["Ты", "фрик!"]
         while True:
             for word in words:
+                # Если спам запущен через бизнес-аккаунт, но соединение пропало или сменилось — прерываемся
+                if bc_id and (bc_id not in active_bc_owners or active_bc_owners[bc_id] != current_owner):
+                    break
+                
                 kwargs = {"chat_id": chat_id, "text": word, "reply_to_message_id": reply_to}
                 if bc_id:
                     kwargs["business_connection_id"] = bc_id
@@ -354,7 +358,7 @@ async def check_sub_callback(callback: CallbackQuery):
         try:
             await callback.message.delete()
         except: pass
-        await callback.answer("✅ Подписка подтверждена! Команда выполнена.", show_alert=True)
+        await callback.answer("✅ Подписка подтверждена! Теперь команды работают.", show_alert=True)
     else:
         await callback.answer("❌ Вы всё ещё не подписались на канал!", show_alert=True)
 
@@ -479,7 +483,7 @@ async def cmd_ban(message: Message):
         else:
             await message.answer(f"❌ Пользователь `{arg}` не найден.", parse_mode="Markdown")
     except:
-        await message.answer("Формат: `/ban 123456789` или `/ban @username`", parse_mode="Markdown")
+        await message.answer("Формат: `/ban 123456789` или `/ban @username`", parse_Mode="Markdown")
 
 @dp.message(Command("unban"))
 async def cmd_unban(message: Message):
@@ -510,6 +514,10 @@ async def handle(message: Message):
         bc_id = message.business_connection_id
 
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
+        
+        # Исправление привязки к владельцу бизнес-аккаунта:
+        # Для входящих/исходящих бизнес-сообщений владельцем является bc_owners[bc_id] (если подключение зарегистрировано).
+        # Если боту пищут в личку напрямую (chat_id > 0 and not bc_id), то владельцем действия является сам пользователь (uid).
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
         active_chats_set.add(chat_id)
@@ -521,7 +529,9 @@ async def handle(message: Message):
             if len(recent_chats_list) > 100:
                 recent_chats_list.pop(0)
 
-        if uid in banned_users or (owner_id and owner_id in banned_users):
+        # Проверка бана владельца или самого юзера
+        banned_check_id = owner_id if (bc_id and owner_id) else uid
+        if banned_check_id in banned_users:
             if message.chat.type == "private" and not bc_id:
                 unban_kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="💬 Разбан у владельца", url="https://t.me/NorikAmiri")]
@@ -534,9 +544,11 @@ async def handle(message: Message):
                 try:
                     conn_info = await bot.get_business_connection(bc_id)
                     bc_owners[bc_id] = int(conn_info.user.id)
+                    owner_id = int(conn_info.user.id)
                     save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
                 except: pass
             
+            # Четко определяем, отправлено ли сообщение СЕРИЕЙ аккаунта владельца (is_from_me)
             is_from_me = (uid == owner_id) if owner_id else False
         else:
             is_from_me = (message.chat.type == "private") or (message.chat.type in ["group", "supergroup"] and not message.from_user.is_bot)
@@ -566,10 +578,8 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
         
-        # СТРОГАЯ ПРИВЯЗКА ПО ID: определяем реального владельца действия.
-        # Если это пришло через автоматизацию чатов (bc_id), то владельцем является owner_id этого бизнес-подключения.
-        # Если это личные сообщения с ботом напрямую (chat_id > 0 and not bc_id), то это пишет сам клиент/пользователь боту.
-        current_owner = owner_id if owner_id else (uid if chat_id > 0 and not bc_id else uid)
+        # Точный ID того, от чьего лица выполняются команды (для команд set/ss и т.д.)
+        current_owner = owner_id if (bc_id and owner_id) else uid
         task_key = (chat_id, bc_id, current_owner)
 
         bot_commands_list = [
@@ -580,39 +590,52 @@ async def handle(message: Message):
         
         is_bot_command = any(low.startswith(cmd) for cmd in bot_commands_list)
 
-        # ЖЕСТКАЯ ПРОВЕРКА ДЛЯ ЛС С СОБЕСЕДНИКАМИ: 
-        # Если бот подключен к аккаунту (через автоматизацию чатов), то в ЛС с другими людьми 
-        # команды должны реагировать СТРОГО ЕСЛИ ИХ ПИШЕТ ВЛАДЕЛЕЦ (owner_id), а не собеседник!
+        # КРИТИЧЕСКИ ВАЖНО: Если бот работает через бизнес-подключение, команды управления 
+        # ДОЛЖНЫ обрабатываться СТРОГО ЕСЛИ ИХ ПИШЕТ ВЛАДЕЛЕЦ (owner_id). 
+        # Если посторонний человек пишет в чате с владельцем команды, бот НЕ должен реагировать за владельца!
         if bc_id and owner_id and uid != owner_id:
             is_bot_command = False
 
-        if is_bot_command and uid != ADMIN_ID:
-            is_subbed = await check_subscription(uid)
+        # ПРОВЕРКА ПОДПИСКИ (Обязательное окно с инлайн-кнопками для всех, кто использует команды / бота без подписки)
+        check_sub_target = owner_id if (bc_id and owner_id) else uid
+        if is_bot_command and check_sub_target != ADMIN_ID:
+            is_subbed = await check_subscription(check_sub_target)
             if not is_subbed:
                 await delete_msg(chat_id, message.message_id, bc_id)
-                kb = InlineKeyboardMarkup(inline_keyboard=[
+                sub_kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
-                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
+                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{check_sub_target}")]
                 ])
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text="⚠️ <b>Для использования команд бота необходима подписка на канал!</b>\n\nПожалуйста, подпишитесь, затем нажмите кнопку ниже.",
-                    parse_mode="HTML",
-                    reply_markup=kb
-                )
+                
+                if bc_id:
+                    # В бизнес-чате отправляем сообщение от имени бота или в чат
+                    try:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⚠️ <b>Для использования команд бота необходима подписка на канал!</b>\n\nПожалуйста, подпишитесь, затем нажмите кнопку ниже.",
+                            parse_mode="HTML",
+                            reply_markup=sub_kb
+                        )
+                    except: pass
+                else:
+                    await message.answer(
+                        "⚠️ <b>Для использования бота необходима подписка на канал!</b>\n\nПожалуйста, подпишитесь на канал, затем нажмите кнопку проверки.",
+                        parse_mode="HTML",
+                        reply_markup=sub_kb
+                    )
                 return
 
         if message.chat.type == "private" and not bc_id and low == "/start":
             is_subbed = await check_subscription(uid)
             if not is_subbed:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
+                sub_kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
                     [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
                 ])
                 await message.answer(
                     "⚠️ <b>Для использования бота необходима подписка на канал!</b>\n\nПожалуйста, подпишитесь на канал, затем нажмите кнопку проверки.",
                     parse_mode="HTML",
-                    reply_markup=kb
+                    reply_markup=sub_kb
                 )
                 return
 
@@ -628,7 +651,6 @@ async def handle(message: Message):
             )
             return
 
-        # Если команда отправлена не владельцем в режиме бизнес-подключения — пропускаем выполнение команд
         if bc_id and owner_id and uid != owner_id and is_bot_command:
             return
 
@@ -678,7 +700,7 @@ async def handle(message: Message):
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
             text = user_spam_texts.get(str(current_owner), "Ты фрик!")
             if task_key in spam_tasks: spam_tasks[task_key].cancel()
-            spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
+            spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text, current_owner, bc_owners))
             return
 
         if low == "dd":
@@ -847,6 +869,7 @@ async def start_web_server():
 async def main():
     await start_web_server()
     try:
+        await bot.get_session()
         await bot.delete_webhook(drop_pending_updates=True)
     except: pass
 
