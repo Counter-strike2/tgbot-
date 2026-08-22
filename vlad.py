@@ -29,7 +29,6 @@ spam_tasks = {}
 typing_tasks = {}       
 user_spam_texts = {}    
 link_chats = set()      
-reply_guard_chats = set()
 typing_globally_disabled = False  
 substitutions = {}      
 msg_cache = {}          
@@ -64,9 +63,6 @@ def init_db():
                 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
-                    
-                cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
-                for row in cur.fetchall(): reply_guard_chats.add(int(row[0]))
                 
                 cur.execute("SELECT chat_id, text, mode FROM substitutions")
                 for row in cur.fetchall(): substitutions[int(row[0])] = {"text": row[1], "mode": row[2]}
@@ -135,9 +131,8 @@ def save_setting(chat_id, setting_type, enabled):
                     cur.execute("DELETE FROM chat_settings WHERE chat_id = %s AND setting_type = %s", (chat_id, setting_type))
                 conn.commit()
                 
-                target_set = link_chats if setting_type == 'enabled_links' else reply_guard_chats
-                if enabled: target_set.add(chat_id)
-                else: target_set.discard(chat_id)
+                if enabled: link_chats.add(chat_id)
+                else: link_chats.discard(chat_id)
     except Exception as e:
         logging.error(f"Ошибка настройки: {e}")
 
@@ -236,7 +231,6 @@ async def typing_worker():
     except asyncio.CancelledError: 
         pass
 
-# РАБОТАЕТ СТРОГО ОТ ТВОЕГО ЛИЦА (С ЗАДЕРЖКОЙ 0.3)
 async def spam_worker(chat_id, bc_id, reply_to, text):
     try:
         words = text.split() if text else ["Ты", "фрик!"]
@@ -340,7 +334,7 @@ async def handle_bc(bc):
         await bot.send_message(
             owner_id,
             f"👋 Привет, {owner_mention}!\n\n"
-            f"✅ Бот успешно подключен к твоему бизнес-аккаунту!\n\n"
+            f"✅ Бот успешно подключен через автоматизацию чатов!\n\n"
             f"📌 Управление командами: `!команды`",
             parse_mode="HTML",
             reply_markup=kb
@@ -371,7 +365,7 @@ async def process_start_menu_callbacks(callback: CallbackQuery):
 
     if data == "menu_admin":
         if uid != ADMIN_ID:
-            await callback.answer("❌ Эта кнопка доступна только администратору!", show_alert=True)
+            await callback.answer("❌ Эта панель доступна только администратору!", show_alert=True)
             return
         await callback.message.edit_text(
             "👑 **Панель Администратора**\n\nИспользуй кнопки ниже:",
@@ -380,25 +374,28 @@ async def process_start_menu_callbacks(callback: CallbackQuery):
         )
     elif data == "menu_functions":
         text = (
-            "📋 **ФУНКЦИИ И КОМАНДЫ БОТА:**\n\n"
-            "`.мут X` / `.размут` — управление мутом\n"
-            "`.стоп` / `.старт` — авто-ссылки\n"
-            "`печать +` / `печать -` — вечный статус печати\n"
-            "`подмена текст 1/2/выкл` — подмена текста\n"
-            "`ss` / `dd` — авто-спам / стоп\n"
-            "`set текст` — задать спам-текст\n"
-            "`+реплай` / `-реплай` — защита от ответов\n"
-            "`+линк ссылка` — сменить ссылку\n"
-            "`мой ид` / `твой ид` — кликабельный First Name"
+            "📋 **ФУНКЦИИ И КОМАНДЫ БОТА (ПОНЯТНОЕ ОБЪЯСНЕНИЕ):**\n\n"
+            "🔹 `.старт` / `.стоп` — включает или выключает автоматическое добавление ссылки на ваш канал к отправляемым сообщениям.\n"
+            "🔹 `подмена [текст] 1/2` — автоматически добавляет указанный текст в начало (1) или в конец (2) каждого твоего сообщения. Чтобы отключить, напиши `подмена выкл`.\n"
+            "🔹 `печать +` / `печать -` — включает или отключает постоянный статус «печатает...» во всех чатах.\n"
+            "🔹 `ss` — запускает автоматическую отправку заготовленного спам-текста по словам с задержкой.\n"
+            "🔹 `dd` — мгновенно останавливает работающий авто-спам (`ss`).\n"
+            "🔹 `set [текст]` — устанавливает новый текст, который будет отправляться командой `ss`.\n"
+            "🔹 `+линк [ссылка]` — изменяет глобальную ссылку канала, которая подставляется в сообщения.\n"
+            "🔹 `.мут [минуты]` — выдает временный мут (удаляет сообщения пользователя на указанное время).\n"
+            "🔹 `.размут` — досрочно снимает мут с пользователя."
         )
-        await callback.message.edit_text(text, parse_mode="Markdown")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
+        ])
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     elif data == "menu_connect":
         text = (
-            "📌 **Как подключить бота к бизнес-аккаунту:**\n\n"
-            "1. Перейдите в Telegram -> <b>Настройки</b>.\n"
-            "2. Выберите пункт <b>Telegram Business</b> (или Мой профиль / Автоматизация чатов).\n"
-            "3. Найдите раздел <b>Чат-боты</b> и добавьте этого бота.\n"
-            "4. Готово! После подключения бот начнет автоматически обрабатывать ваши чаты."
+            "📌 **Как подключить бота через автоматизацию чатов:**\n\n"
+            "1. Перейдите в настройки Telegram.\n"
+            "2. Найдите раздел автоматизации и чат-ботов.\n"
+            "3. Подключите этого бота к своему аккаунту.\n"
+            "4. Готово! Бот начнет работать."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
@@ -412,7 +409,7 @@ async def process_start_menu_callbacks(callback: CallbackQuery):
         ])
         await callback.message.edit_text(
             "👋 **Привет!**\n\nВыбери нужный раздел с помощью кнопок ниже:",
-            parse_mode="Markdown",
+            parse_Mode="Markdown",
             reply_markup=start_kb
         )
     await callback.answer()
@@ -428,7 +425,7 @@ def get_admin_keyboard():
 @dp.callback_query(F.data.in_(["admin_stats", "admin_users", "admin_ban_prompt"]))
 async def process_admin_callbacks(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
-        await callback.answer("У вас нет доступа!", show_alert=True)
+        await callback.answer("❌ У вас нет доступа к админ-панели!", show_alert=True)
         return
 
     data = callback.data
@@ -440,7 +437,7 @@ async def process_admin_callbacks(callback: CallbackQuery):
             reply_markup=get_admin_keyboard(), parse_mode="Markdown"
         )
     elif data == "admin_users":
-        text = "👥 **БИЗНЕС-КЛИЕНТЫ:**\n\n"
+        text = "👥 **КЛИЕНТЫ:**\n\n"
         if not bc_owners: 
             text += "Нет активных подключений."
         else:
@@ -564,10 +561,6 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
-            await delete_msg(chat_id, message.message_id, bc_id)
-            return
-
         if not message.text: return
 
         text_raw = message.text
@@ -577,11 +570,17 @@ async def handle(message: Message):
 
         bot_commands_list = [
             ".стоп", ".старт", "+линк", "подмена", "печать -", "печать +",
-            "+реплай", "-реплай", "ss", "dd", "set", ".мут", "!мут", ".ут",
-            ".размут", "!размут", "мой ид", "моид", "твой ид", "твоид", "!команды", "/start"
+            "ss", "dd", "set", ".мут", "!мут", ".ут",
+            ".размут", "!размут", "!команды", "/start"
         ]
         
         is_bot_command = any(low.startswith(cmd) for cmd in bot_commands_list)
+
+        # ЖЕСТКАЯ ПРОВЕРКА ЛС: если это личные сообщения с клиентом (не через бизнес-аккаунт),
+        # то команды обрабатываем СТРОГО ЕСЛИ ИХ НАПИСАЛ ВЛАДЕЛЕЦ (ADMIN_ID или текущий юзер),
+        # а не собеседник, с которым идет диалог!
+        if chat_id > 0 and not bc_id and uid != ADMIN_ID:
+            is_bot_command = False
 
         if is_bot_command and uid != ADMIN_ID:
             is_subbed = await check_subscription(uid)
@@ -599,7 +598,7 @@ async def handle(message: Message):
                 )
                 return
 
-        if message.chat.type == "private" and not bc_id and low == "/start":
+        if message.chat.type == "private" and not bc_id and low == "/start" and uid == ADMIN_ID:
             start_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👑 Админ-панель", callback_data="menu_admin")],
                 [InlineKeyboardButton(text="📋 Функции бота", callback_data="menu_functions")],
@@ -651,16 +650,6 @@ async def handle(message: Message):
         if low == "печать +":
             await delete_msg(chat_id, message.message_id, bc_id)
             typing_globally_disabled = False
-            return
-
-        if low == "+реплай":
-            await delete_msg(chat_id, message.message_id, bc_id)
-            save_setting(chat_id, 'reply_guard', True)
-            return
-
-        if low == "-реплай":
-            await delete_msg(chat_id, message.message_id, bc_id)
-            save_setting(chat_id, 'reply_guard', False)
             return
 
         if low == "ss":
@@ -733,51 +722,20 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
-        if low in ["мой ид", "моид"]:
-            await delete_msg(chat_id, message.message_id, bc_id)
-            my_link = get_user_mention(uid, message.from_user.first_name)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🆔 {my_link}",
-                "parse_mode": "HTML"
-            }
-            if bc_id:
-                kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
-            return
-
-        if low in ["твой ид", "твоид"]:
-            await delete_msg(chat_id, message.message_id, bc_id)
-            target_user = message.reply_to_message.from_user if message.reply_to_message else None
-            target_id = target_user.id if target_user else (chat_id if chat_id > 0 else None)
-            if target_id:
-                t_fname = target_user.first_name if target_user else None
-                t_link = get_user_mention(target_id, t_fname)
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"🆔 {t_link}",
-                    "parse_mode": "HTML"
-                }
-                if bc_id:
-                    kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
-            return
-
         if low == "!команды":
             await delete_msg(chat_id, message.message_id, bc_id)
             kwargs = {
                 "chat_id": chat_id,
                 "text": (
-                    "📋 **КОМАНДЫ:**\n\n"
-                    "`.мут X` / `.размут` — управление мутом\n"
-                    "`.стоп` / `.старт` — авто-ссылки\n"
-                    "`печать +` / `печать -` — вечный статус печати\n"
-                    "`подмена текст 1/2/выкл` — подмена текста\n"
-                    "`ss` / `dd` — авто-спам / стоп\n"
-                    "`set текст` — задать спам-текст\n"
-                    "`+реплай` / `-реплай` — защита от ответов\n"
-                    "`+линк ссылка` — сменить ссылку\n"
-                    "`мой ид` / `твой ид` — кликабельный First Name"
+                    "📋 **ФУНКЦИИ И КОМАНДЫ БОТА:**\n\n"
+                    "🔹 `.старт` / `.стоп` — включает/выключает авто-добавление ссылки на канал к сообщениям.\n"
+                    "🔹 `подмена [текст] 1/2` — авто-добавление текста в начало (1) или конец (2) ваших сообщений. `подмена выкл` для отключения.\n"
+                    "🔹 `печать +` / `печать -` — включает или выключает вечный статус печати в чатах.\n"
+                    "🔹 `ss` — запускает авто-спам заготовленным текстом по словам.\n"
+                    "🔹 `dd` — останавливает авто-спам (`ss`).\n"
+                    "🔹 `set [текст]` — задает текст для авто-спама.\n"
+                    "🔹 `+линк [ссылка]` — меняет ссылку канала.\n"
+                    "🔹 `.мут [мин]` / `.размут` — управление мутом пользователя."
                 ),
                 "parse_mode": "Markdown"
             }
