@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,8 +17,6 @@ BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
 ADMIN_ID = 5825717381
 DATABASE_URL = os.environ.get('DATABASE_URL')
 DEFAULT_CHANNEL_LINK = "https://t.me/gotrollholl"
-REQUIRED_CHANNEL = "@norikx"
-REQUIRED_CHANNEL_URL = "https://t.me/norikx"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -35,8 +32,6 @@ typing_disabled_chats = set()
 substitutions = {}      # chat_id -> {"text": str, "mode": int}
 msg_cache = {}          # (chat_id, msg_id) -> dict
 active_chats = {}       # bc_id -> set(chat_ids)
-promo_messages = {}     # chat_id -> message_id
-recent_chats_list = []  # Список недавних чатов (до 100)
 bot_id = None
 CHANNEL_LINK = DEFAULT_CHANNEL_LINK
 
@@ -181,21 +176,6 @@ def save_channel_link(link_url):
     except Exception as e:
         logging.error(f"Ошибка ссылки: {e}")
 
-def get_user_mention(user_id: int, fallback_name: str = None) -> str:
-    user_id = int(user_id)
-    fname = user_names.get(user_id) or fallback_name or "Пользователь"
-    return f'<a href="tg://user?id={user_id}">{fname}</a>'
-
-async def check_subscription(user_id: int) -> bool:
-    if user_id == ADMIN_ID:
-        return True
-    try:
-        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
-        return member.status in ["creator", "administrator", "member"]
-    except Exception as e:
-        logging.warning(f"Ошибка проверки подписки: {e}")
-        return False
-
 init_db()
 
 async def delete_msg(chat_id, msg_id, bc_id):
@@ -209,6 +189,7 @@ async def delete_msg(chat_id, msg_id, bc_id):
     except: pass
 
 async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
+    """Исправленное редактирование сообщений (включая бизнес-аккаунты)"""
     try:
         kwargs = {
             "chat_id": chat_id,
@@ -237,7 +218,7 @@ async def typing_worker(bc_id):
                 if cid not in typing_disabled_chats:
                     try: await bot.send_chat_action(chat_id=cid, action="typing", business_connection_id=bc_id)
                     except: pass
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(4)
     except asyncio.CancelledError: pass
 
 async def spam_worker(chat_id, bc_id, reply_to, text):
@@ -245,9 +226,7 @@ async def spam_worker(chat_id, bc_id, reply_to, text):
         words = text.split() if text else ["Ты", "фрик!"]
         while True:
             for word in words:
-                kwargs = {"chat_id": chat_id, "text": word, "reply_to_message_id": reply_to}
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                await bot.send_message(chat_id, word, business_connection_id=bc_id, reply_to_message_id=reply_to)
                 await asyncio.sleep(0.3)
     except asyncio.CancelledError: pass
 
@@ -256,76 +235,9 @@ async def unmute(user_id, chat_id, bc_id, user_name):
         await asyncio.sleep((mutes[user_id]["until"] - datetime.now()).total_seconds())
         if user_id in mutes and datetime.now() >= mutes[user_id]["until"]:
             mutes.pop(user_id, None)
-            user_link = get_user_mention(user_id, user_name)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
+            user_link = f"<a href='tg://user?id={user_id}'>{user_name}</a>"
             try:
-                await bot.send_message(**kwargs)
-            except: pass
-
-async def promo_broadcaster():
-    promo_text = (
-        "📢 <b>Подпишись на наш официальный канал!</b>\n\n"
-        "⚠️ <b>ВНИМАНИЕ:</b> Не удаляйте это сообщение! "
-        "Если вы его удалите, вы автоматически потеряете доступ к боту."
-    )
-    promo_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)]
-    ])
-
-    while True:
-        await asyncio.sleep(7200)
-        target_chats = recent_chats_list[-100:]
-
-        for cid in target_chats:
-            if cid in banned_users:
-                continue
-            try:
-                msg = await bot.send_message(
-                    chat_id=cid,
-                    text=promo_text,
-                    parse_mode="HTML",
-                    reply_markup=promo_kb
-                )
-                promo_messages[cid] = msg.message_id
-            except Exception as e:
-                logging.warning(f"Ошибка отправки рекламы в {cid}: {e}")
-            await asyncio.sleep(3)
-
-async def check_promo_deletions():
-    unban_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Разбан у владельца", url="https://t.me/NorikAmiri")]
-    ])
-    promo_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)]
-    ])
-
-    while True:
-        await asyncio.sleep(15)
-        for cid, msg_id in list(promo_messages.items()):
-            if cid in banned_users:
-                continue
-            try:
-                await bot.edit_message_reply_markup(chat_id=cid, message_id=msg_id, reply_markup=promo_kb)
-            except TelegramBadRequest as e:
-                err = str(e).lower()
-                if "message to edit not found" in err or "message can't be edited" in err:
-                    set_user_ban(cid, True)
-                    promo_messages.pop(cid, None)
-                    user_link = get_user_mention(cid)
-                    try:
-                        await bot.send_message(
-                            chat_id=cid,
-                            text=f"🚫 {user_link}, вы заблокированы за удаление рекламного сообщения!\n\n"
-                                 f"За разбаном напишите владельцу.",
-                            parse_mode="HTML",
-                            reply_markup=unban_kb
-                        )
-                    except: pass
+                await bot.send_message(chat_id, f"🔊 С {user_link} снят <b>МУТ</b> (время истекло).", parse_mode="HTML", business_connection_id=bc_id)
             except: pass
 
 @dp.business_connection()
@@ -333,7 +245,7 @@ async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
     owner_id = int(bc.user.id)
-    owner_mention = get_user_mention(owner_id, bc.user.first_name)
+    owner_name = bc.user.first_name or "Пользователь"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Написать владельцу", url="https://t.me/NorikAmiri")]
@@ -341,30 +253,38 @@ async def handle_bc(bc):
     try:
         await bot.send_message(
             owner_id,
-            f"👋 Привет, {owner_mention}!\n\n"
+            f"👋 Привет, {owner_name}!\n\n"
             f"✅ Бот успешно подключен к твоему бизнес-аккаунту!\n\n"
-            f"📌 Управление командами: `!команды`",
-            parse_mode="HTML",
+            f"📌 Теперь я буду обрабатывать все сообщения в твоих чатах.\n"
+            f"Команды для управления: `!команды`\n\n"
+            f"❗ Если у тебя возникнут вопросы или предложения - напиши владельцу бота.",
+            parse_mode="Markdown",
             reply_markup=kb
         )
     except Exception as e:
         logging.error(f"Не удалось отправить приветствие: {e}")
 
-@dp.callback_query(F.data.startswith("check_sub:"))
-async def check_sub_callback(callback: CallbackQuery):
-    user_id = int(callback.data.split(":")[1])
-    if callback.from_user.id != user_id:
-        await callback.answer("Эта кнопка для другого пользователя!", show_alert=True)
-        return
-
-    is_subbed = await check_subscription(user_id)
-    if is_subbed:
-        try:
-            await callback.message.delete()
-        except: pass
-        await callback.answer("✅ Подписка подтверждена! Бот готов к работе.", show_alert=True)
-    else:
-        await callback.answer("❌ Вы всё ещё не подписались на канал!", show_alert=True)
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Связаться с владельцем", url="https://t.me/NorikAmiri")]
+    ])
+    await message.answer(
+        "👋 **Привет!**\n\n"
+        "📌 **Как подключить бота к бизнес-аккаунту:**\n\n"
+        "1️⃣ Зайди в **Настройки** Telegram\n"
+        "2️⃣ Нажми **Мой профиль**\n"
+        "3️⃣ Выбери **Автоматизация чатов**\n"
+        "4️⃣ Нажми **Добавить** и введи юзернейм бота:\n"
+        "   `@norikKodBot`\n"
+        "5️⃣ Дай боту права **Сообщения 5/5**\n\n"
+        "✅ После подключения бот будет автоматически обрабатывать все сообщения в твоих чатах!\n\n"
+        "📋 Команды для управления: `!команды`\n\n"
+        "❗ Если возникнут вопросы - напиши владельцу бота.",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
 
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -398,7 +318,8 @@ async def process_admin_callbacks(callback: CallbackQuery):
             text += "Нет активных подключений."
         else:
             for bc_id, owner_id in bc_owners.items():
-                user_link = get_user_mention(owner_id)
+                fname = user_names.get(owner_id, "Пользователь")
+                user_link = f"<a href='tg://user?id={owner_id}'>{fname}</a>"
                 status = "🔴 (Забанен)" if owner_id in banned_users else "🟢 (Активен)"
                 text += f"• {user_link} {status}\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
@@ -430,10 +351,11 @@ async def cmd_ban(message: Message):
         target_id = await resolve_user_id(arg)
         if target_id:
             set_user_ban(target_id, True)
-            user_link = get_user_mention(target_id)
+            fname = user_names.get(target_id, str(target_id))
+            user_link = f"<a href='tg://user?id={target_id}'>{fname}</a>"
             await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
         else:
-            await message.answer(f"❌ Пользователь `{arg}` не найден.", parse_mode="Markdown")
+            await message.answer(f"❌ Не найден ID для `{arg}`.", parse_mode="Markdown")
     except:
         await message.answer("Формат: `/ban 123456789` или `/ban @username`", parse_mode="Markdown")
 
@@ -445,15 +367,15 @@ async def cmd_unban(message: Message):
         target_id = await resolve_user_id(arg)
         if target_id:
             set_user_ban(target_id, False)
-            user_link = get_user_mention(target_id)
+            fname = user_names.get(target_id, str(target_id))
+            user_link = f"<a href='tg://user?id={target_id}'>{fname}</a>"
             await message.answer(f"✅ {user_link} <b>разблокирован</b>!", parse_mode="HTML")
         else:
-            await message.answer(f"❌ Пользователь `{arg}` не найден.", parse_mode="Markdown")
+            await message.answer(f"❌ Не найден ID для `{arg}`.", parse_mode="Markdown")
     except:
         await message.answer("Формат: `/unban 123456789` или `/unban @username`", parse_mode="Markdown")
 
-
-# ================= ОБРАБОТКА ЛИЧНЫХ СООБЩЕНИЙ И БИЗНЕСА =================
+# ================= ОБРАБОТКА СООБЩЕНИЙ =================
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
@@ -469,61 +391,9 @@ async def handle(message: Message):
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
-        # Фиксация недавних чатов (до 100)
-        if chat_id > 0 and not bc_id:
-            if chat_id in recent_chats_list:
-                recent_chats_list.remove(chat_id)
-            recent_chats_list.append(chat_id)
-            if len(recent_chats_list) > 100:
-                recent_chats_list.pop(0)
-
         # 🛑 ПРОВЕРКА НА БАН
         if uid in banned_users or (owner_id and owner_id in banned_users):
-            if message.chat.type == "private" and not bc_id:
-                unban_kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="💬 Разбан у владельца", url="https://t.me/NorikAmiri")]
-                ])
-                await message.answer("❌ Вы заблокированы. За разбаном напишите владельцу.", reply_markup=unban_kb)
             return
-
-        # 📢 ЖЕСТКАЯ ПРОВЕРКА ПОДПИСКИ ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ С БОТОМ (И В БИЗНЕСЕ)
-        # Если это личка с ботом (chat_type == private и нет bc_id) и юзер не админ:
-        is_private_bot_chat = (message.chat.type == "private" and not bc_id)
-        if (is_private_bot_chat or bc_id) and uid != ADMIN_ID:
-            # В бизнесе проверяем собеседника, в личке бота — самого юзера
-            check_uid = uid if is_private_bot_chat else (uid if not (bc_id and uid == owner_id) else None)
-            
-            if check_uid:
-                is_subbed = await check_subscription(check_uid)
-                if not is_subbed:
-                    if is_private_bot_chat:
-                        kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
-                            [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{check_uid}")]
-                        ])
-                        await message.answer(
-                            "⚠️ <b>Для работы бота необходима подписка на канал!</b>\n\n"
-                            "Пожалуйста, подпишитесь, затем нажмите кнопку ниже.",
-                            parse_mode="HTML",
-                            reply_markup=kb
-                        )
-                        return
-                    elif bc_id and uid != owner_id:
-                        await clear_cmd(chat_id, message.message_id, bc_id)
-                        user_link = get_user_mention(uid, message.from_user.first_name)
-                        kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)],
-                            [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
-                        ])
-                        kwargs = {
-                            "chat_id": chat_id,
-                            "text": f"⚠️ {user_link}, для работы бота необходима подписка на канал!",
-                            "parse_mode": "HTML",
-                            "reply_markup": kb
-                        }
-                        if bc_id: kwargs["business_connection_id"] = bc_id
-                        await bot.send_message(**kwargs)
-                        return
 
         if bc_id:
             if bc_id not in bc_owners:
@@ -535,7 +405,7 @@ async def handle(message: Message):
             
             is_from_me = (uid == owner_id) if owner_id else False
         else:
-            is_from_me = (message.chat.type == "private") or (message.chat.type in ["group", "supergroup"] and not message.from_user.is_bot)
+            is_from_me = (uid == chat_id)
 
         if bot_id is None:
             me = await bot.get_me()
@@ -546,7 +416,7 @@ async def handle(message: Message):
             active_chats[bc_id].add(chat_id)
 
         # 💾 СОХРАНЕНИЕ В КЭШ
-        if message.text and not message.from_user.is_bot and bc_id:
+        if message.text and not message.from_user.is_bot:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
                 "text": message.text, 
@@ -567,27 +437,12 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if not message.text: return
+        if not is_from_me or not message.text: return
 
         text_raw = message.text
         low = text_raw.lower().strip()
         task_key = (chat_id, bc_id)
         current_owner = bc_owners.get(bc_id, uid)
-
-        # СТАРТ В ЛИЧКЕ БОТА (ЕСЛИ ЕСТЬ ПОДПИСКА)
-        if is_private_bot_chat and low == "/start":
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💬 Владелец", url="https://t.me/NorikAmiri")]
-            ])
-            await message.answer(
-                "👋 **Привет!**\n\n"
-                "Бот успешно запущен и готов к работе!\n\n"
-                "📌 **Как подключить к бизнес-аккаунту:**\n"
-                "Настройки -> Мой профиль -> Автоматизация чатов -> Добавить бота",
-                parse_mode="Markdown",
-                reply_markup=kb
-            )
-            return
 
         # КОМАНДЫ УПРАВЛЕНИЯ
         if low == ".стоп":
@@ -670,63 +525,35 @@ async def handle(message: Message):
         if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
-                
-                if message.reply_to_message and message.reply_to_message.from_user:
-                    target_user = message.reply_to_message.from_user
-                    target_id = target_user.id
-                    target_name = target_user.first_name
-                else:
-                    target_id = chat_id
-                    target_name = message.chat.first_name or "Пользователь"
+                target_user = message.reply_to_message.from_user if message.reply_to_message else None
+                target_id = target_user.id if target_user else chat_id
+                target_name = target_user.first_name if target_user else "Пользователь"
                 
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
                 await clear_cmd(chat_id, message.message_id, bc_id)
                 
-                user_link = get_user_mention(target_id, target_name)
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.",
-                    "parse_mode": "HTML"
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                user_link = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
+                await bot.send_message(chat_id, f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.", parse_mode="HTML", business_connection_id=bc_id)
             except: pass
             return
 
         if low in [".размут", "!размут"]:
-            if message.reply_to_message and message.reply_to_message.from_user:
-                target_user = message.reply_to_message.from_user
-                target_id = target_user.id
-                target_name = target_user.first_name
-            else:
-                target_id = chat_id
-                target_name = message.chat.first_name or "Пользователь"
+            target_id = message.reply_to_message.from_user.id if message.reply_to_message else chat_id
+            target_name = user_names.get(target_id, "Пользователь")
             
             mutes.pop(target_id, None)
             await clear_cmd(chat_id, message.message_id, bc_id)
-            user_link = get_user_mention(target_id, target_name)
-            
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
+            user_link = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
+            await bot.send_message(chat_id, f"🔊 С {user_link} снят <b>МУТ</b>.", parse_mode="HTML", business_connection_id=bc_id)
             return
 
         # ИДЕНТИФИКАТОРЫ
         if low in ["мой ид", "моид"]:
             await clear_cmd(chat_id, message.message_id, bc_id)
-            my_link = get_user_mention(uid, message.from_user.first_name)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🆔 {my_link}",
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
+            my_fname = user_names.get(uid, message.from_user.first_name or "Пользователь")
+            my_link = f"<a href='tg://user?id={uid}'>{my_fname}</a>"
+            await bot.send_message(chat_id, f"🆔 Ваш профиль: {my_link}\nID: <code>{uid}</code>", parse_mode="HTML", business_connection_id=bc_id)
             return
 
         if low in ["твой ид", "твоид"]:
@@ -734,66 +561,54 @@ async def handle(message: Message):
             target_user = message.reply_to_message.from_user if message.reply_to_message else None
             target_id = target_user.id if target_user else (chat_id if chat_id > 0 else None)
             if target_id:
-                t_fname = target_user.first_name if target_user else None
-                t_link = get_user_mention(target_id, t_fname)
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"🆔 {t_link}",
-                    "parse_mode": "HTML"
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                t_fname = target_user.first_name if target_user else user_names.get(target_id, "Пользователь")
+                t_link = f"<a href='tg://user?id={target_id}'>{t_fname}</a>"
+                await bot.send_message(chat_id, f"🆔 Профиль: {t_link}\nID: <code>{target_id}</code>", parse_mode="HTML", business_connection_id=bc_id)
             return
 
         if low == "!команды":
             await clear_cmd(chat_id, message.message_id, bc_id)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": (
-                    "📋 **КОМАНДЫ:**\n\n"
-                    "`.мут X` / `.размут` — управление мутом\n"
-                    "`.стоп` / `.старт` — авто-ссылки\n"
-                    "`печать +` / `печать -` — вечный статус печати\n"
-                    "`подмена текст 1/2/выкл` — подмена текста\n"
-                    "`ss` / `dd` — авто-спам / стоп\n"
-                    "`set текст` — задать спам-текст\n"
-                    "`+реплай` / `-реплай` — защита от ответов\n"
-                    "`+линк ссылка` — сменить ссылку\n"
-                    "`мой ид` / `твой ид` — кликабельный First Name"
-                ),
-                "parse_mode": "Markdown"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
+            await bot.send_message(chat_id,
+                "📋 **КОМАНДЫ:**\n\n"
+                "`.мут X` / `.размут` — управление мутом\n"
+                "`.стоп` / `.старт` — авто-ссылки\n"
+                "`печать +` / `печать -` — вечный статус печати\n"
+                "`подмена текст 1/2/выкл` — подмена текста\n"
+                "`ss` / `dd` — авто-спам / стоп\n"
+                "`set текст` — задать спам-текст\n"
+                "`+реплай` / `-реплай` — защита от ответов\n"
+                "`+линк ссылка` — сменить ссылку\n"
+                "`мой ид` / `твой ид` — узнать ID",
+                parse_mode="Markdown", business_connection_id=bc_id
+            )
             return
 
-        # ✏️ ПОДМЕНА И АВТО-ЛИНК (Только для бизнес-чатов)
-        if bc_id:
-            final_text = text_raw
-            need_modify = False
-            parse_mode = None
+        # ✏️ ПОДМЕНА И АВТО-ЛИНК
+        final_text = text_raw
+        need_modify = False
+        parse_mode = None
+        
+        if chat_id in substitutions:
+            sub = substitutions[chat_id]
+            final_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
+            need_modify = True
+            parse_mode = "HTML"
+        
+        if chat_id in link_chats:
+            has_link = False
+            if message.entities:
+                for entity in message.entities:
+                    if entity.type in ["url", "text_link"]:
+                        has_link = True
+                        break
             
-            if chat_id in substitutions:
-                sub = substitutions[chat_id]
-                final_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
+            if not has_link and CHANNEL_LINK not in final_text:
+                final_text = f'<a href="{CHANNEL_LINK}">{final_text}</a>'
                 need_modify = True
                 parse_mode = "HTML"
-            
-            if chat_id in link_chats:
-                has_link = False
-                if message.entities:
-                    for entity in message.entities:
-                        if entity.type in ["url", "text_link"]:
-                            has_link = True
-                            break
-                
-                if not has_link and CHANNEL_LINK not in final_text:
-                    final_text = f'<a href="{CHANNEL_LINK}">{final_text}</a>'
-                    need_modify = True
-                    parse_mode = "HTML"
-            
-            if need_modify:
-                await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
+        
+        if need_modify:
+            await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
                 
     except Exception as e:
         logging.error(f"❌ Ошибка обработки сообщения: {e}")
@@ -809,28 +624,26 @@ async def global_update_handler(update: Update, bot: Bot):
 
             for (cached_chat_id, cached_msg_id), cached in list(msg_cache.items()):
                 if cached_msg_id in msg_ids:
+                    fname = cached['user']
                     uid = cached['user_id']
                     
                     if uid == bot_id:
                         msg_cache.pop((cached_chat_id, cached_msg_id), None)
                         continue
                         
-                    user_link = get_user_mention(uid, cached['user'])
+                    user_link = f"<a href='tg://user?id={uid}'>{fname}</a>"
                     
                     text_to_send = (
                         f"👤 {user_link} <b>удалил(а) сообщение ↓</b>\n\n"
                         f"💬 {cached['text']}"
                     )
 
-                    kwargs = {
-                        "chat_id": cached_chat_id,
-                        "text": text_to_send,
-                        "parse_mode": "html"
-                    }
-                    bc_target = bc_id or cached.get("bc_id")
-                    if bc_target: kwargs["business_connection_id"] = bc_target
-
-                    await bot.send_message(**kwargs)
+                    await bot.send_message(
+                        cached_chat_id,
+                        text_to_send,
+                        parse_mode="html",
+                        business_connection_id=bc_id or cached["bc_id"]
+                    )
                     msg_cache.pop((cached_chat_id, cached_msg_id), None)
     except Exception as e:
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
@@ -853,10 +666,6 @@ async def main():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except: pass
-
-    asyncio.create_task(promo_broadcaster())
-    asyncio.create_task(check_promo_deletions())
-
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
         bot, 
