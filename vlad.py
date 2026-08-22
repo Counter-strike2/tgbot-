@@ -25,22 +25,22 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Хранилища состояния
-mutes = {}              
-spam_tasks = {}         
-typing_tasks = {}       
-user_spam_texts = {}    
-link_chats = set()      
+mutes = {}              # user_id -> {"until": datetime}
+spam_tasks = {}         # (chat_id, bc_id) -> Task
+typing_tasks = {}       # bc_id -> Task
+user_spam_texts = {}    # user_id -> str
+link_chats = set()      # chat_ids
 reply_guard_chats = set()
 typing_disabled_chats = set()
-substitutions = {}      
-msg_cache = {}          
-active_chats = set()    # Глобальный сет всех уникальных чатов для печати
-promo_messages = {}     
-recent_chats_list = []  
+substitutions = {}      # chat_id -> {"text": str, "mode": int}
+msg_cache = {}          # (chat_id, msg_id) -> dict
+active_chats = {}       # bc_id -> set(chat_ids)
+promo_messages = {}     # chat_id -> message_id
+recent_chats_list = []  # Список недавних чатов (до 100)
 bot_id = None
 CHANNEL_LINK = DEFAULT_CHANNEL_LINK
 
-bc_owners = {}          
+bc_owners = {}          # bc_id -> user_id
 user_usernames = {}     
 user_names = {}         
 banned_users = set()    
@@ -229,19 +229,16 @@ async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
 async def clear_cmd(chat_id, msg_id, bc_id):
     await delete_msg(chat_id, msg_id, bc_id)
 
-async def typing_worker():
-    """Глобальный воркер печати: работает по всем активным чатам сразу"""
+async def typing_worker(bc_id):
     try:
         while True:
-            for cid in list(active_chats):
+            chats = active_chats.get(bc_id, set())
+            for cid in list(chats)[-50:]:
                 if cid not in typing_disabled_chats:
-                    try: 
-                        await bot.send_chat_action(chat_id=cid, action="typing")
-                    except: 
-                        pass
-            await asyncio.sleep(0.3)
-    except asyncio.CancelledError: 
-        pass
+                    try: await bot.send_chat_action(chat_id=cid, action="typing", business_connection_id=bc_id)
+                    except: pass
+            await asyncio.sleep(0.1)
+    except asyncio.CancelledError: pass
 
 async def spam_worker(chat_id, bc_id, reply_to, text):
     try:
@@ -365,73 +362,23 @@ async def check_sub_callback(callback: CallbackQuery):
         try:
             await callback.message.delete()
         except: pass
-        await callback.answer("✅ Подписка подтверждена! Команда выполнена.", show_alert=True)
+        await callback.answer("✅ Подписка подтверждена! Бот готов к работе.", show_alert=True)
     else:
         await callback.answer("❌ Вы всё ещё не подписались на канал!", show_alert=True)
-
-# Обработка инлайн-кнопок из /start
-@dp.callback_query(F.data.in_(["menu_admin", "menu_functions", "menu_connect"]))
-async def process_start_menu_callbacks(callback: CallbackQuery):
-    data = callback.data
-    uid = callback.from_user.id
-
-    if data == "menu_admin":
-        if uid != ADMIN_ID:
-            await callback.answer("❌ Эта кнопка доступна только администратору!", show_alert=True)
-            return
-        await callback.message.edit_text(
-            "👑 **Панель Администратора**\n\nИспользуй кнопки ниже:",
-            reply_markup=get_admin_keyboard(),
-            parse_mode="Markdown"
-        )
-    elif data == "menu_functions":
-        text = (
-            "📋 **ФУНКЦИИ И КОМАНДЫ БОТА:**\n\n"
-            "`.мут X` / `.размут` — управление мутом\n"
-            "`.стоп` / `.старт` — авто-ссылки\n"
-            "`печать +` / `печать -` — вечный статус печати\n"
-            "`подмена текст 1/2/выкл` — подмена текста\n"
-            "`ss` / `dd` — авто-спам / стоп\n"
-            "`set текст` — задать спам-текст\n"
-            "`+реплай` / `-реплай` — защита от ответов\n"
-            "`+линк ссылка` — сменить ссылку\n"
-            "`мой ид` / `твой ид` — кликабельный First Name"
-        )
-        await callback.message.edit_text(text, parse_mode="Markdown")
-    elif data == "menu_connect":
-        text = (
-            "📌 **Как подключить бота к бизнес-аккаунту:**\n\n"
-            "1. Перейдите в Telegram -> <b>Настройки</b>.\n"
-            "2. Выберите пункт <b>Telegram Business</b> (или Мой профиль / Автоматизация чатов).\n"
-            "3. Найдите раздел <b>Чат-боты</b> и добавьте этого бота.\n"
-            "4. Готово! После подключения бот начнет автоматически обрабатывать ваши чаты."
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
-        ])
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    elif data == "menu_back":
-        start_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👑 Админ-панель", callback_data="menu_admin")],
-            [InlineKeyboardButton(text="📋 Функции бота", callback_data="menu_functions")],
-            [InlineKeyboardButton(text="🔗 Подключить бота", callback_data="menu_connect")]
-        ])
-        await callback.message.edit_text(
-            "👋 **Привет!**\n\nВыбери нужный раздел с помощью кнопок ниже:",
-            parse_mode="Markdown",
-            reply_markup=start_kb
-        )
-    await callback.answer()
 
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Бизнес-клиенты", callback_data="admin_users")],
-        [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")],
-        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu_back")]
+        [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
-@dp.callback_query(F.data.in_(["admin_stats", "admin_users", "admin_ban_prompt"]))
+@dp.message(F.text.in_(["/admin", ".админ", "админ"]))
+async def admin_panel(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    await message.answer("👑 **Панель Администратора**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query()
 async def process_admin_callbacks(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("У вас нет доступа!", show_alert=True)
@@ -506,7 +453,7 @@ async def cmd_unban(message: Message):
         await message.answer("Формат: `/unban 123456789` или `/unban @username`", parse_mode="Markdown")
 
 
-# ================= ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ =================
+# ================= ОБРАБОТКА ЛИЧНЫХ СООБЩЕНИЙ И БИЗНЕСА =================
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
@@ -522,10 +469,7 @@ async def handle(message: Message):
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
-        # Добавляем чат в глобальный пул для печати
-        active_chats.add(chat_id)
-
-        # Фиксация недавних чатов (до 100) для рекламы
+        # Фиксация недавних чатов (до 100)
         if chat_id > 0 and not bc_id:
             if chat_id in recent_chats_list:
                 recent_chats_list.remove(chat_id)
@@ -541,6 +485,45 @@ async def handle(message: Message):
                 ])
                 await message.answer("❌ Вы заблокированы. За разбаном напишите владельцу.", reply_markup=unban_kb)
             return
+
+        # 📢 ЖЕСТКАЯ ПРОВЕРКА ПОДПИСКИ ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ С БОТОМ (И В БИЗНЕСЕ)
+        # Если это личка с ботом (chat_type == private и нет bc_id) и юзер не админ:
+        is_private_bot_chat = (message.chat.type == "private" and not bc_id)
+        if (is_private_bot_chat or bc_id) and uid != ADMIN_ID:
+            # В бизнесе проверяем собеседника, в личке бота — самого юзера
+            check_uid = uid if is_private_bot_chat else (uid if not (bc_id and uid == owner_id) else None)
+            
+            if check_uid:
+                is_subbed = await check_subscription(check_uid)
+                if not is_subbed:
+                    if is_private_bot_chat:
+                        kb = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+                            [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{check_uid}")]
+                        ])
+                        await message.answer(
+                            "⚠️ <b>Для работы бота необходима подписка на канал!</b>\n\n"
+                            "Пожалуйста, подпишитесь, затем нажмите кнопку ниже.",
+                            parse_mode="HTML",
+                            reply_markup=kb
+                        )
+                        return
+                    elif bc_id and uid != owner_id:
+                        await clear_cmd(chat_id, message.message_id, bc_id)
+                        user_link = get_user_mention(uid, message.from_user.first_name)
+                        kb = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="📢 Подписаться", url=REQUIRED_CHANNEL_URL)],
+                            [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
+                        ])
+                        kwargs = {
+                            "chat_id": chat_id,
+                            "text": f"⚠️ {user_link}, для работы бота необходима подписка на канал!",
+                            "parse_mode": "HTML",
+                            "reply_markup": kb
+                        }
+                        if bc_id: kwargs["business_connection_id"] = bc_id
+                        await bot.send_message(**kwargs)
+                        return
 
         if bc_id:
             if bc_id not in bc_owners:
@@ -558,7 +541,11 @@ async def handle(message: Message):
             me = await bot.get_me()
             bot_id = me.id
 
-        # 💾 СОХРАНЕНИЕ В КЭШ ДЛЯ УДАЛЕНИЙ
+        if bc_id:
+            if bc_id not in active_chats: active_chats[bc_id] = set()
+            active_chats[bc_id].add(chat_id)
+
+        # 💾 СОХРАНЕНИЕ В КЭШ
         if message.text and not message.from_user.is_bot and bc_id:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
@@ -585,50 +572,24 @@ async def handle(message: Message):
         text_raw = message.text
         low = text_raw.lower().strip()
         task_key = (chat_id, bc_id)
-        current_owner = owner_id if owner_id else uid
+        current_owner = bc_owners.get(bc_id, uid)
 
-        bot_commands_list = [
-            ".стоп", ".старт", "+линк", "подмена", "печать -", "печать +",
-            "+реплай", "-реплай", "ss", "dd", "set", ".мут", "!мут", ".ут",
-            ".размут", "!размут", "мой ид", "моид", "твой ид", "твоид", "!команды", "/start"
-        ]
-        
-        is_bot_command = any(low.startswith(cmd) for cmd in bot_commands_list)
-
-        # 📢 ПРОВЕРКА ПОДПИСКИ ДЛЯ КОМАНД
-        if is_bot_command and uid != ADMIN_ID:
-            is_subbed = await check_subscription(uid)
-            if not is_subbed:
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
-                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
-                ])
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": "⚠️ <b>Для использования команд бота необходима подписка на канал!</b>\n\nПожалуйста, подпишитесь, затем нажмите кнопку ниже.",
-                    "parse_mode": "HTML",
-                    "reply_markup": kb
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
-                return
-
-        # СТАРТ В ЛИЧКЕ БОТА С ТРЕМЯ КНОПКАМИ
-        if message.chat.type == "private" and not bc_id and low == "/start":
-            start_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👑 Админ-панель", callback_data="menu_admin")],
-                [InlineKeyboardButton(text="📋 Функции бота", callback_data="menu_functions")],
-                [InlineKeyboardButton(text="🔗 Подключить бота", callback_data="menu_connect")]
+        # СТАРТ В ЛИЧКЕ БОТА (ЕСЛИ ЕСТЬ ПОДПИСКА)
+        if is_private_bot_chat and low == "/start":
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💬 Владелец", url="https://t.me/NorikAmiri")]
             ])
             await message.answer(
-                "👋 **Привет!**\n\nВыбери нужный раздел с помощью кнопок ниже:",
+                "👋 **Привет!**\n\n"
+                "Бот успешно запущен и готов к работе!\n\n"
+                "📌 **Как подключить к бизнес-аккаунту:**\n"
+                "Настройки -> Мой профиль -> Автоматизация чатов -> Добавить бота",
                 parse_mode="Markdown",
-                reply_markup=start_kb
+                reply_markup=kb
             )
             return
 
-        # КОМАНДЫ УПРАВЛЕНИЯ (БЕЗ ЗАДЕРЖЕК)
+        # КОМАНДЫ УПРАВЛЕНИЯ
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -663,11 +624,16 @@ async def handle(message: Message):
         if low == "печать -":
             save_setting(chat_id, 'typing_disabled', True)
             await clear_cmd(chat_id, message.message_id, bc_id)
+            if bc_id in typing_tasks:
+                typing_tasks[bc_id].cancel()
+                del typing_tasks[bc_id]
             return
 
         if low == "печать +":
             save_setting(chat_id, 'typing_disabled', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
+            if bc_id and bc_id not in typing_tasks:
+                typing_tasks[bc_id] = asyncio.create_task(typing_worker(bc_id))
             return
 
         if low == "+реплай":
@@ -688,7 +654,6 @@ async def handle(message: Message):
             spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
             return
 
-        # Мгновенная остановка спама dd
         if low == "dd":
             await clear_cmd(chat_id, message.message_id, bc_id)
             if task_key in spam_tasks:
@@ -802,7 +767,7 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
-        # ✏️ ПОДМЕНА И АВТО-ЛИНК (Для бизнес-чатов)
+        # ✏️ ПОДМЕНА И АВТО-ЛИНК (Только для бизнес-чатов)
         if bc_id:
             final_text = text_raw
             need_modify = False
@@ -891,7 +856,6 @@ async def main():
 
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
-    asyncio.create_task(typing_worker())
 
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
