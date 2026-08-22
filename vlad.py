@@ -62,6 +62,16 @@ TEXT_COMMANDS_HELP = (
     "• `!команды` — показать эту инструкцию"
 )
 
+TEXT_CONNECT_INSTRUCTION = (
+    "🚀 **Как подключить бота к бизнес-аккаунту Telegram:**\n\n"
+    "1️⃣ Откройте **Настройки** Telegram.\n"
+    "2️⃣ Перейдите в раздел **Мой профиль** (или Настройки бизнеса).\n"
+    "3️⃣ Найдите пункт **Автоматизация чатов** (Business Bots).\n"
+    "4️⃣ Нажмите **Добавить бота** и введите имя: `@norikKodBot`.\n"
+    "5️⃣ Предоставьте боту доступ к чатам.\n\n"
+    "✨ *После этого все бизнес-функции и команды станут доступны автоматически!*"
+)
+
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -295,7 +305,7 @@ async def promo_broadcaster():
     ])
 
     while True:
-        await asyncio.sleep(7200)
+        await asyncio.sleep(7200)  # Каждые 2 часа
         target_chats = recent_chats_list[-100:]
 
         for cid in target_chats:
@@ -367,22 +377,32 @@ async def handle_bc(bc):
     except Exception as e:
         logging.error(f"Не удалось отправить приветствие: {e}")
 
-# СТАРТ В САМОМ БОТЕ - ВЫДАЕТ ПОЛНЫЙ СПИСОК КОМАНД СРАЗУ
+# ================= ГЕНЕРАТОР КНОПОК ДЛЯ /START =================
+def get_start_keyboard(user_id: int):
+    buttons = []
+    
+    # Кнопка "Админ-панель" доступна ИСКЛЮЧИТЕЛЬНО владельцу
+    if user_id == ADMIN_ID:
+        buttons.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="btn_admin_panel")])
+        
+    buttons.append([InlineKeyboardButton(text="📖 Функционал", callback_data="btn_features")])
+    buttons.append([InlineKeyboardButton(text="⚡ Как подключить бота", callback_data="btn_how_to_connect")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# СТАРТ В ВУТРИ ЛС С БОТОМ
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if message.chat.type != "private":
         return
     save_user_info(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Владелец", url="https://t.me/NorikAmiri")]
-    ])
+    
+    keyboard = get_start_keyboard(message.from_user.id)
     await message.answer(
-        f"👋 **Привет! Бот успешно запущен!**\n\n"
-        f"📌 **Как подключить к бизнес-аккаунту:**\n"
-        f"Настройки -> Мой профиль -> Автоматизация чатов -> Добавить `@norikKodBot`\n\n"
-        f"{TEXT_COMMANDS_HELP}",
+        "👋 **Добро пожаловать в Норик код бот!**\n\n"
+        "Выберите интересующий вас раздел с помощью кнопок ниже:",
         parse_mode="Markdown",
-        reply_markup=kb
+        reply_markup=keyboard
     )
 
 def get_admin_keyboard():
@@ -414,12 +434,34 @@ async def check_sub_callback(callback: CallbackQuery):
         await callback.answer("❌ Вы всё ещё не подписались на канал!", show_alert=True)
 
 @dp.callback_query()
-async def process_admin_callbacks(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("У вас нет доступа!", show_alert=True)
+async def process_callbacks(callback: CallbackQuery):
+    data = callback.data
+    uid = callback.from_user.id
+
+    # Обработка пользовательских кнопок из /start
+    if data == "btn_features":
+        await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="Markdown")
+        await callback.answer()
         return
 
-    data = callback.data
+    if data == "btn_how_to_connect":
+        await callback.message.answer(TEXT_CONNECT_INSTRUCTION, parse_mode="Markdown")
+        await callback.answer()
+        return
+
+    if data == "btn_admin_panel":
+        if uid != ADMIN_ID:
+            await callback.answer()
+            return
+        await callback.message.answer("👑 **Панель Администратора**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+        await callback.answer()
+        return
+
+    # Обработка админских кнопок
+    if uid != ADMIN_ID:
+        await callback.answer()
+        return
+
     if data == "admin_stats":
         await callback.message.edit_text(
             f"📊 **СТАТИСТИКА:**\n\n"
@@ -495,7 +537,7 @@ async def handle(message: Message):
     
     try:
         if not message.from_user: return
-        if message.from_user.is_bot: return # Игнорируем всех чужих ботов
+        if message.from_user.is_bot: return # Игнорируем чужих ботов
 
         uid = int(message.from_user.id)
         chat_id = int(message.chat.id)
