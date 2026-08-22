@@ -295,7 +295,7 @@ async def promo_broadcaster():
                 promo_messages[cid] = msg.message_id
             except Exception as e:
                 logging.warning(f"Ошибка отправки рекламы в {cid}: {e}")
-            await asyncio.sleep(3)  # Пауза 3 сек между чатами
+            await asyncio.sleep(3)
 
 # ================= ПРОВЕРКА УДАЛЕНИЯ РЕКЛАМЫ (АВТОБАН) =================
 async def check_promo_deletions():
@@ -363,8 +363,7 @@ async def cmd_start(message: Message):
         "👋 **Привет!**\n\n"
         "Для работы бота требуется подписка на официальный канал!\n\n"
         "📌 **Как подключить к бизнес-аккаунту:**\n"
-        "Настройки -> Мой профиль -> Автоматизация чатов -> Добавить `@norikKodBot`\n\n"
-        "⚠️ **ВНИМАНИЕ:** Данный бот взаимодействует с рекламными материалами и рассылками.",
+        "Настройки -> Мой профиль -> Автоматизация чатов -> Добавить `@norikKodBot`",
         parse_mode="Markdown",
         reply_markup=kb
     )
@@ -385,7 +384,7 @@ async def admin_panel(message: Message):
 async def check_sub_callback(callback: CallbackQuery):
     user_id = int(callback.data.split(":")[1])
     if callback.from_user.id != user_id:
-        await callback.answer("Это кнопка для другого пользователя!", show_alert=True)
+        await callback.answer("Эта кнопка для другого пользователя!", show_alert=True)
         return
 
     is_subbed = await check_subscription(user_id)
@@ -546,23 +545,8 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if not is_from_me or not message.text: return
-
-        text_raw = message.text
-        low = text_raw.lower().strip()
-        task_key = (chat_id, bc_id)
-        current_owner = bc_owners.get(bc_id, uid)
-
-        # 📢 ПРОВЕРКА ПОДПИСКИ СТРОГО В БИЗНЕС-ЧАТАХ (не в личке с самим ботом)
-        command_triggers = [
-            ".стоп", ".старт", "+линк", "подмена", "печать", "+реплай", "-реплай",
-            "ss", "dd", "set", ".мут", "!мут", ".ут", ".размут", "!размут",
-            "мой ид", "моид", "твой ид", "твоид", "!команды"
-        ]
-        
-        is_command = any(low.startswith(cmd) for cmd in command_triggers)
-        
-        if is_command and bc_id:  # Проверка срабатывает только через бизнес-соединение (в личных переписках с людьми)
+        # 📢 ПРОВЕРКА ПОДПИСКИ В БИЗНЕС-ЧАТАХ ДЛЯ СОБЕСЕДНИКА
+        if bc_id and not is_from_me and uid != owner_id:
             is_subbed = await check_subscription(uid)
             if not is_subbed:
                 await clear_cmd(chat_id, message.message_id, bc_id)
@@ -573,13 +557,20 @@ async def handle(message: Message):
                 ])
                 kwargs = {
                     "chat_id": chat_id,
-                    "text": f"⚠️ {user_link}, для использования функций необходимо подписаться на наш Telegram-канал!",
+                    "text": f"⚠️ {user_link}, без подписки бот не работает! Подпишитесь на канал для использования.",
                     "parse_mode": "HTML",
                     "reply_markup": kb
                 }
                 if bc_id: kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
                 return
+
+        if not is_from_me or not message.text: return
+
+        text_raw = message.text
+        low = text_raw.lower().strip()
+        task_key = (chat_id, bc_id)
+        current_owner = bc_owners.get(bc_id, uid)
 
         # КОМАНДЫ УПРАВЛЕНИЯ
         if low == ".стоп":
@@ -658,13 +649,19 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # МУТ И РАЗМУТ С КЛИКАБЕЛЬНЫМ ИМЕНЕМ
+        # МУТ И РАЗМУТ (ОПРЕДЕЛЕНИЕ ИМЕННИКА СЛЕДУЕТ СОБЕСЕДНИКУ В ЛИЧКЕ)
         if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
             try:
                 minutes = int(re.search(r"\d+", text_raw).group())
-                target_user = message.reply_to_message.from_user if message.reply_to_message else None
-                target_id = target_user.id if target_user else chat_id
-                target_name = target_user.first_name if target_user else message.from_user.first_name
+                
+                # Если отвечают на сообщение — берем автора реплая, иначе в бизнес-чате мутим собеседника (chat_id)
+                if message.reply_to_message and message.reply_to_message.from_user:
+                    target_user = message.reply_to_message.from_user
+                    target_id = target_user.id
+                    target_name = target_user.first_name
+                else:
+                    target_id = chat_id
+                    target_name = message.chat.first_name or "Пользователь"
                 
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
@@ -682,9 +679,13 @@ async def handle(message: Message):
             return
 
         if low in [".размут", "!размут"]:
-            target_user = message.reply_to_message.from_user if message.reply_to_message else None
-            target_id = target_user.id if target_user else chat_id
-            target_name = target_user.first_name if target_user else message.from_user.first_name
+            if message.reply_to_message and message.reply_to_message.from_user:
+                target_user = message.reply_to_message.from_user
+                target_id = target_user.id
+                target_name = target_user.first_name
+            else:
+                target_id = chat_id
+                target_name = message.chat.first_name or "Пользователь"
             
             mutes.pop(target_id, None)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -836,7 +837,6 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
     except: pass
 
-    # Запуск фоновых задач рассылки и контроля бана за удаление рекламы
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
 
