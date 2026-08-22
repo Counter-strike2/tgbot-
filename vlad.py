@@ -395,7 +395,7 @@ async def process_start_menu_callbacks(callback: CallbackQuery):
             "1. Перейдите в настройки Telegram.\n"
             "2. Найдите раздел автоматизации и чат-ботов.\n"
             "3. Подключите этого бота к своему аккаунту.\n"
-            "4. Готово! Бот начнет работать."
+            "4. <b>Обязательно выдайте все 5 из 5 разрешений (галочек) при подключении</b>, чтобы бот имел полный доступ к работе с сообщениями."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")]
@@ -409,7 +409,7 @@ async def process_start_menu_callbacks(callback: CallbackQuery):
         ])
         await callback.message.edit_text(
             "👋 **Привет!**\n\nВыбери нужный раздел с помощью кнопок ниже:",
-            parse_Mode="Markdown",
+            parse_mode="Markdown",
             reply_markup=start_kb
         )
     await callback.answer()
@@ -444,7 +444,7 @@ async def process_admin_callbacks(callback: CallbackQuery):
             for bc_id, owner_id in bc_owners.items():
                 user_link = get_user_mention(owner_id)
                 status = "🔴 (Забанен)" if owner_id in banned_users else "🟢 (Активен)"
-                text += f"• {user_link} {status}\n"
+                text += f"• {user_link} {status} (ID: `{owner_id}`)\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
     elif data == "admin_ban_prompt":
@@ -565,8 +565,12 @@ async def handle(message: Message):
 
         text_raw = message.text
         low = text_raw.lower().strip()
-        task_key = (chat_id, bc_id)
-        current_owner = owner_id if owner_id else uid
+        
+        # СТРОГАЯ ПРИВЯЗКА ПО ID: определяем реального владельца действия.
+        # Если это пришло через автоматизацию чатов (bc_id), то владельцем является owner_id этого бизнес-подключения.
+        # Если это личные сообщения с ботом напрямую (chat_id > 0 and not bc_id), то это пишет сам клиент/пользователь боту.
+        current_owner = owner_id if owner_id else (uid if chat_id > 0 and not bc_id else uid)
+        task_key = (chat_id, bc_id, current_owner)
 
         bot_commands_list = [
             ".стоп", ".старт", "+линк", "подмена", "печать -", "печать +",
@@ -576,10 +580,10 @@ async def handle(message: Message):
         
         is_bot_command = any(low.startswith(cmd) for cmd in bot_commands_list)
 
-        # ЖЕСТКАЯ ПРОВЕРКА ЛС: если это личные сообщения с клиентом (не через бизнес-аккаунт),
-        # то команды обрабатываем СТРОГО ЕСЛИ ИХ НАПИСАЛ ВЛАДЕЛЕЦ (ADMIN_ID или текущий юзер),
-        # а не собеседник, с которым идет диалог!
-        if chat_id > 0 and not bc_id and uid != ADMIN_ID:
+        # ЖЕСТКАЯ ПРОВЕРКА ДЛЯ ЛС С СОБЕСЕДНИКАМИ: 
+        # Если бот подключен к аккаунту (через автоматизацию чатов), то в ЛС с другими людьми 
+        # команды должны реагировать СТРОГО ЕСЛИ ИХ ПИШЕТ ВЛАДЕЛЕЦ (owner_id), а не собеседник!
+        if bc_id and owner_id and uid != owner_id:
             is_bot_command = False
 
         if is_bot_command and uid != ADMIN_ID:
@@ -598,17 +602,34 @@ async def handle(message: Message):
                 )
                 return
 
-        if message.chat.type == "private" and not bc_id and low == "/start" and uid == ADMIN_ID:
+        if message.chat.type == "private" and not bc_id and low == "/start":
+            is_subbed = await check_subscription(uid)
+            if not is_subbed:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
+                ])
+                await message.answer(
+                    "⚠️ <b>Для использования бота необходима подписка на канал!</b>\n\nПожалуйста, подпишитесь на канал, затем нажмите кнопку проверки.",
+                    parse_mode="HTML",
+                    reply_markup=kb
+                )
+                return
+
             start_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👑 Админ-панель", callback_data="menu_admin")],
                 [InlineKeyboardButton(text="📋 Функции бота", callback_data="menu_functions")],
                 [InlineKeyboardButton(text="🔗 Подключить бота", callback_data="menu_connect")]
             ])
             await message.answer(
-                "👋 **Привет!**\n\nВыбери нужный раздел с помощью кнопок ниже:",
+                f"👋 **Привет!** Ваш ID: `{uid}`\n\nВыбери нужный раздел с помощью кнопок ниже:",
                 parse_mode="Markdown",
                 reply_markup=start_kb
             )
+            return
+
+        # Если команда отправлена не владельцем в режиме бизнес-подключения — пропускаем выполнение команд
+        if bc_id and owner_id and uid != owner_id and is_bot_command:
             return
 
         if low == ".стоп":
@@ -731,9 +752,9 @@ async def handle(message: Message):
                     "🔹 `.старт` / `.стоп` — включает/выключает авто-добавление ссылки на канал к сообщениям.\n"
                     "🔹 `подмена [текст] 1/2` — авто-добавление текста в начало (1) или конец (2) ваших сообщений. `подмена выкл` для отключения.\n"
                     "🔹 `печать +` / `печать -` — включает или выключает вечный статус печати в чатах.\n"
-                    "🔹 `ss` — запускает авто-спам заготовленным текстом по словам.\n"
+                    "🔹 `ss` — запускает авто-спам заготовленным текстом по словам от вашего лица.\n"
                     "🔹 `dd` — останавливает авто-спам (`ss`).\n"
-                    "🔹 `set [текст]` — задает текст для авто-спама.\n"
+                    "🔹 `set [текст]` — задает текст для авто-спама конкретно под ваш ID.\n"
                     "🔹 `+линк [ссылка]` — меняет ссылку канала.\n"
                     "🔹 `.мут [мин]` / `.размут` — управление мутом пользователя."
                 ),
@@ -744,7 +765,7 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
-        if bc_id:
+        if bc_id and is_from_me:
             final_text = text_raw
             need_modify = False
             parse_mode = None
@@ -811,7 +832,7 @@ async def global_update_handler(update: Update, bot: Bot):
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
 async def handle_ping(request):
-    return web.Response(text="Bot is running!")
+    web.Response(text="Bot is running!")
 
 async def start_web_server():
     app = web.Application()
