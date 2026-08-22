@@ -279,7 +279,7 @@ async def promo_broadcaster():
     ])
 
     while True:
-        await asyncio.sleep(7200)  # Каждые 2 часа
+        await asyncio.sleep(7200)  # Каждые 2 часа (7200 секунд)
         target_chats = recent_chats_list[-100:]
 
         for cid in target_chats:
@@ -553,7 +553,7 @@ async def handle(message: Message):
         task_key = (chat_id, bc_id)
         current_owner = bc_owners.get(bc_id, uid)
 
-        # 📢 ПРОВЕРКА ПОДПИСКИ ПРИ ИСПОЛЬЗОВАНИИ КОМАНД
+        # 📢 ПРОВЕРКА ПОДПИСКИ СТРОГО В БИЗНЕС-ЧАТАХ (не в личке с самим ботом)
         command_triggers = [
             ".стоп", ".старт", "+линк", "подмена", "печать", "+реплай", "-реплай",
             "ss", "dd", "set", ".мут", "!мут", ".ут", ".размут", "!размут",
@@ -562,7 +562,7 @@ async def handle(message: Message):
         
         is_command = any(low.startswith(cmd) for cmd in command_triggers)
         
-        if is_command:
+        if is_command and bc_id:  # Проверка срабатывает только через бизнес-соединение (в личных переписках с людьми)
             is_subbed = await check_subscription(uid)
             if not is_subbed:
                 await clear_cmd(chat_id, message.message_id, bc_id)
