@@ -17,7 +17,6 @@ except ModuleNotFoundError:
     print("⚠️ aifc не найден, используется заглушка")
 
 from google import genai
-from google.genai import types
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
@@ -126,6 +125,8 @@ def clear_user_history(user_id):
     conn.commit()
     if user_id in chats:
         del chats[user_id]
+    if user_id in chat_histories:
+        del chat_histories[user_id]
 
 # ===== ИНИЦИАЛИЗАЦИЯ GEMINI (НОВАЯ БИБЛИОТЕКА) =====
 client = genai.Client(api_key=GEMINI_KEY)
