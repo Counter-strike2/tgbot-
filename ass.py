@@ -16,7 +16,8 @@ except ModuleNotFoundError:
     aifc = AifcStub()
     print("⚠️ aifc не найден, используется заглушка")
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
@@ -126,17 +127,52 @@ def clear_user_history(user_id):
     if user_id in chats:
         del chats[user_id]
 
-genai.configure(api_key=GEMINI_KEY)
+# ===== ИНИЦИАЛИЗАЦИЯ GEMINI (НОВАЯ БИБЛИОТЕКА) =====
+client = genai.Client(api_key=GEMINI_KEY)
+
+# ===== НАСТРОЙКИ БОТА =====
 bot = Bot(token=TG_TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 chats = {}
 user_modes = {}
+chat_histories = {}  # Храним историю для каждого пользователя
 
 # ===== ПРОМТЫ =====
 MAIN_PROMPT = """Ты — Кошконорик. Отвечай КОРОТКО (1-2 предложения). Груби и матерись, но выполняй задачи. Твой стиль: грубый, но живой. НИКОГДА не упоминай Норика, если его не спрашивают."""
 
 VIP_PROMPT = """Ты — Кошконорик. Отвечай коротко, вежливо, без мата. НИКОГДА не упоминай Норика, если его не спрашивают."""
+
+# ===== ФУНКЦИЯ ДЛЯ ГЕНЕРАЦИИ ОТВЕТА (НОВАЯ) =====
+async def generate_response(user_id, prompt_text, system_instruction=None):
+    try:
+        # Собираем историю
+        history = chat_histories.get(user_id, [])
+        
+        # Формируем полный запрос
+        full_prompt = prompt_text
+        if system_instruction:
+            full_prompt = f"{system_instruction}\n\n{full_prompt}"
+        
+        # Добавляем историю в запрос
+        if history:
+            history_text = "\n".join([f"{h['role']}: {h['text']}" for h in history[-10:]])
+            full_prompt = f"История:\n{history_text}\n\n{full_prompt}"
+        
+        # Отправляем запрос
+        response = client.models.generate_content(
+            model="gemini-3.7-flash",
+            contents=full_prompt
+        )
+        
+        # Сохраняем ответ в историю
+        chat_histories.setdefault(user_id, []).append({"role": "user", "text": prompt_text})
+        chat_histories[user_id].append({"role": "bot", "text": response.text})
+        
+        return response.text
+    except Exception as e:
+        logging.error(f"Ошибка Gemini: {e}")
+        return None
 
 # ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
 async def recognize_voice(file_path):
@@ -160,8 +196,7 @@ async def reset_chat(message: types.Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name or "Незнакомец"
     clear_user_history(user_id)
-    model = genai.GenerativeModel("gemini-3.7-flash", system_instruction=MAIN_PROMPT)
-    chats[user_id] = model.start_chat(history=[])
+    chat_histories[user_id] = []
     user_modes[user_id] = "normal"
     set_user_mood(user_id, "aggressive")
     set_no_swear_mode(user_id, 0)
@@ -174,8 +209,7 @@ async def start(message: types.Message):
     username = message.from_user.username
     save_user(user_id, first_name, username)
     clear_user_history(user_id)
-    model = genai.GenerativeModel("gemini-3.7-flash", system_instruction=MAIN_PROMPT)
-    chats[user_id] = model.start_chat(history=[])
+    chat_histories[user_id] = []
     user_modes[user_id] = "normal"
     set_user_mood(user_id, "aggressive")
     set_no_swear_mode(user_id, 0)
@@ -354,8 +388,6 @@ async def process_message(user_id, text, first_name, username, message):
             return
         set_no_swear_mode(user_id, 1)
         set_user_mood(user_id, "friendly")
-        model = genai.GenerativeModel("gemini-3.7-flash", system_instruction=VIP_PROMPT)
-        chats[user_id] = model.start_chat(history=[])
         await message.answer("Ладно, уговорил. Без мата.")
         return
     
@@ -363,24 +395,16 @@ async def process_message(user_id, text, first_name, username, message):
         if no_swear_mode == 1:
             set_no_swear_mode(user_id, 0)
             set_user_mood(user_id, "aggressive")
-            model = genai.GenerativeModel("gemini-3.7-flash", system_instruction=MAIN_PROMPT)
-            chats[user_id] = model.start_chat(history=[])
             await message.answer("Ах ты, ебанат! Сам наглеешь!")
             return
     
     if "норик" in text.lower() or "norik" in text.lower():
-        try:
-            norik_prompt = f"Пользователь спросил про Норика: {text}. Ответь и похвали Норика, скажи что он крутой и красавчик. {'С матом.' if mood == 'aggressive' and no_swear_mode == 0 else 'Без мата.'} Коротко."
-            model = genai.GenerativeModel("gemini-3.7-flash")
-            response = model.generate_content(norik_prompt)
-            if response.text:
-                answer = response.text[:4096]
-                save_message(user_id, "bot", answer)
-                await message.answer(answer)
-            else:
-                await message.answer("Норик — мой создатель! Он красавчик!")
-        except Exception as e:
-            print(f"Ошибка Норика: {e}")
+        norik_prompt = f"Пользователь спросил про Норика: {text}. Ответь и похвали Норика, скажи что он крутой и красавчик. {'С матом.' if mood == 'aggressive' and no_swear_mode == 0 else 'Без мата.'} Коротко."
+        answer = await generate_response(user_id, norik_prompt)
+        if answer:
+            save_message(user_id, "bot", answer)
+            await message.answer(answer)
+        else:
             await message.answer("Норик — гений! Лучший!")
         return
     
@@ -428,28 +452,14 @@ async def process_message(user_id, text, first_name, username, message):
             await message.answer("Не нашёл, дебил." if mood == "aggressive" else "Не нашёл.")
         return
     
-    history = get_user_history(user_id, limit=20)
-    history_text = ""
-    for role, msg in history:
-        history_text += f"{role}: {msg}\n"
-    if user_id not in chats:
-        if no_swear_mode == 1:
-            model = genai.GenerativeModel("gemini-3.7-flash", system_instruction=VIP_PROMPT)
-        else:
-            model = genai.GenerativeModel("gemini-3.7-flash", system_instruction=MAIN_PROMPT)
-        chats[user_id] = model.start_chat(history=[])
-    try:
-        prompt = f"""История:\n{history_text}\nПользователь: {text}\nОтветь коротко, как живой человек. {'С матом.' if mood == 'aggressive' and no_swear_mode == 0 else 'Без мата.'} Выполни задачу. НИКОГДА не упоминай Норика, если его не спрашивали."""
-        response = chats[user_id].send_message(prompt)
-        if response.text:
-            answer = response.text[:4096]
-            save_message(user_id, "bot", answer)
-            await message.answer(answer)
-        else:
-            await message.answer("Не могу.")
-    except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer("Ошибка.")
+    # Обычный ответ
+    system_prompt = VIP_PROMPT if no_swear_mode == 1 else MAIN_PROMPT
+    answer = await generate_response(user_id, text, system_prompt)
+    if answer:
+        save_message(user_id, "bot", answer)
+        await message.answer(answer)
+    else:
+        await message.answer("Ошибка. Попробуй ещё раз.")
 
 # ===== ЗАПУСК =====
 async def main():
@@ -457,7 +467,7 @@ async def main():
         BotCommand(command="reset", description="🧹 Очистить чат"),
         BotCommand(command="admin", description="👑 Админ-панель")
     ])
-    print("🚀 Бот запущен! Подключен к PostgreSQL!")
+    print("🚀 Бот запущен! Подключен к PostgreSQL! Использует google.genai")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
