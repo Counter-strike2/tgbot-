@@ -25,26 +25,25 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Хранилища состояния
-mutes = {}
-spam_tasks = {}
-typing_tasks = {}
-user_spam_texts = {}
-link_chats = set()
+mutes = {}               # user_id -> {"until": datetime}
+spam_tasks = {}          # (chat_id, bc_id) -> Task
+typing_tasks = {}        # bc_id -> Task
+user_spam_texts = {}     # user_id -> str
+link_chats = set()       # chat_ids
 reply_guard_chats = set()
 typing_disabled_chats = set()
-substitutions = {}
-msg_cache = {}
-active_chats = {}
-promo_messages = {}
-recent_business_chats = []
+substitutions = {}       # chat_id -> {"text": str, "mode": int}
+msg_cache = {}           # (chat_id, msg_id) -> dict
+active_chats = {}        # bc_id -> set(chat_ids)
+promo_messages = {}      # (chat_id, bc_id) -> message_id
+recent_business_chats = [] # Список (chat_id, bc_id) для бизнес-рассылок
 bot_id = None
-CHANNEL_LINK = None
+CHANNEL_LINK = None      
 
-bc_owners = {}  # bc_id -> user_id
-user_usernames = {}
-user_names = {}
-banned_users = set()
-all_bc_owners = set()  # Храним ВСЕХ пользователей, которые подключали бота через бизнес
+bc_owners = {}           # bc_id -> user_id
+user_usernames = {}      
+user_names = {}          
+banned_users = set()     
 
 TEXT_COMMANDS_HELP = (
     "📋 <b>СПИСОК КОМАНД:</b>\n\n"
@@ -88,8 +87,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
-                cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
-                cur.execute("CREATE TABLE IF NOT EXISTS business_owners (user_id BIGINT PRIMARY KEY)")  # Новая таблица для хранения всех владельцев
+                cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")  # Новая таблица
                 
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
@@ -121,12 +119,6 @@ def init_db():
                 cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
                 row = cur.fetchone()
                 if row: CHANNEL_LINK = row[0]
-                
-                # Загружаем всех бизнес-владельцев из БД
-                cur.execute("SELECT user_id FROM business_owners")
-                for row in cur.fetchall():
-                    all_bc_owners.add(int(row[0]))
-                    
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
 
@@ -149,30 +141,6 @@ def save_user_info(user_id: int, username: str, first_name: str):
                 conn.commit()
     except Exception as e:
         logging.error(f"Ошибка сохранения юзера: {e}")
-
-def save_business_owner(user_id: int):
-    """Сохраняет пользователя как владельца бизнес-аккаунта"""
-    user_id = int(user_id)
-    all_bc_owners.add(user_id)
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO business_owners (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
-                conn.commit()
-    except Exception as e:
-        logging.error(f"Ошибка сохранения владельца бизнеса: {e}")
-
-def remove_business_owner(user_id: int):
-    """Удаляет пользователя из списка владельцев бизнес-аккаунтов"""
-    user_id = int(user_id)
-    all_bc_owners.discard(user_id)
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM business_owners WHERE user_id = %s", (user_id,))
-                conn.commit()
-    except Exception as e:
-        logging.error(f"Ошибка удаления владельца бизнеса: {e}")
 
 def set_user_ban(user_id: int, ban: bool):
     user_id = int(user_id)
@@ -247,6 +215,7 @@ def get_user_mention(user_id: int, fallback_name: str = None) -> str:
     fname = user_names.get(user_id) or fallback_name or "Пользователь"
     return f'<a href="tg://user?id={user_id}">{fname}</a>'
 
+# Функции для работы с доставленной рекламой
 def mark_chat_promo_delivered(chat_id):
     try:
         with get_db() as conn:
@@ -357,8 +326,10 @@ async def promo_broadcaster():
     ])
 
     while True:
-        await asyncio.sleep(36000)
+        await asyncio.sleep(36000)  # 10 часов
+        # Собираем последние 20 чатов, которые ещё не получали рекламу и не принадлежат владельцу
         selected = []
+        # Идём с конца списка (самые новые)
         for chat_info in reversed(recent_business_chats[-100:]):
             if len(selected) >= 20:
                 break
@@ -372,6 +343,7 @@ async def promo_broadcaster():
                 continue
             selected.append(chat_info)
 
+        # Отправляем рекламу в отобранные чаты
         for cid, bc_id in selected:
             try:
                 msg = await bot.send_message(
@@ -382,7 +354,7 @@ async def promo_broadcaster():
                     business_connection_id=bc_id
                 )
                 promo_messages[(cid, bc_id)] = msg.message_id
-                mark_chat_promo_delivered(cid)
+                mark_chat_promo_delivered(cid)  # запоминаем, что чат получил рекламу
             except Exception as e:
                 logging.warning(f"Ошибка рассылки рекламы в бизнес-чат {cid}: {e}")
             await asyncio.sleep(3)
@@ -426,8 +398,9 @@ async def check_promo_deletions():
             except: pass
 
 async def clean_inactive_connections():
+    """Периодическая очистка неактивных бизнес-подключений"""
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(300)  # 5 минут
         inactive_bc_ids = []
         for bc_id, owner_id in list(bc_owners.items()):
             try:
@@ -435,17 +408,21 @@ async def clean_inactive_connections():
             except Exception:
                 inactive_bc_ids.append(bc_id)
         for bc_id in inactive_bc_ids:
-            owner_id = bc_owners.get(bc_id)
+            # Удаляем из всех хранилищ
             bc_owners.pop(bc_id, None)
             active_chats.pop(bc_id, None)
+            # Отменяем задачи спама
             for key in list(spam_tasks.keys()):
                 if key[1] == bc_id:
                     spam_tasks[key].cancel()
                     del spam_tasks[key]
+            # Удаляем задачи печати
             typing_tasks.pop(bc_id, None)
+            # Удаляем записи о рекламе
             for (cid, bcid) in list(promo_messages.keys()):
                 if bcid == bc_id:
                     promo_messages.pop((cid, bcid), None)
+            # Удаляем из recent_business_chats
             recent_business_chats[:] = [item for item in recent_business_chats if item[1] != bc_id]
             logging.info(f"Удалено неактивное бизнес-подключение {bc_id}")
 
@@ -453,7 +430,6 @@ async def clean_inactive_connections():
 async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
-    save_business_owner(bc.user.id)  # Сохраняем в список всех владельцев
     owner_id = int(bc.user.id)
     owner_mention = get_user_mention(owner_id, bc.user.first_name)
     
@@ -557,37 +533,24 @@ async def process_callbacks(callback: CallbackQuery):
         return
 
     if data == "admin_stats":
-        # Показываем ВСЕХ подключенных, а не только активных
-        total_owners = len(all_bc_owners)
-        active_owners = len({owner for owner in bc_owners.values() if owner not in banned_users})
-        
         await callback.message.edit_text(
             f"📊 <b>СТАТИСТИКА:</b>\n\n"
-            f"• Всего бизнес-аккаунтов: <code>{total_owners}</code>\n"
-            f"• Активных: <code>{active_owners}</code>\n"
+            f"• Бизнес-аккаунтов: <code>{len(set(bc_owners.values()))}</code>\n"
             f"• Юзеров в базе: <code>{len(user_names)}</code>\n"
             f"• Забанено: <code>{len(banned_users)}</code>",
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     elif data == "admin_users":
-        # Показываем ВСЕХ, кто когда-либо подключал бота, включая неактивных
-        text = "💼 <b>ВСЕ ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
-        if not all_bc_owners:
+        # Фильтруем только незабаненных владельцев с активными бизнес-подключениями
+        active_owners = {owner for owner in set(bc_owners.values()) if owner not in banned_users}
+        text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
+        if not active_owners: 
             text += "Нет подключенных бизнес-аккаунтов."
         else:
-            # Сортируем: сначала активные, потом неактивные
-            active_owners = {owner for owner in bc_owners.values() if owner not in banned_users}
-            inactive_owners = all_bc_owners - active_owners
-            
-            owners_list = list(active_owners) + list(inactive_owners)
-            
-            for u_id in owners_list[:50]:  # Показываем до 50
+            for u_id in list(active_owners)[:35]:
                 fname = user_names.get(u_id, "Пользователь")
                 user_link = get_user_mention(u_id, fname)
-                status = "🟢 Активен" if u_id in active_owners else "🔴 Неактивен"
-                if u_id in banned_users:
-                    status = "⛔ Забанен"
-                text += f"• {user_link} (<code>{u_id}</code>) — {status}\n"
+                text += f"• {user_link} (<code>{u_id}</code>)\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
     elif data == "admin_ban_prompt":
@@ -637,7 +600,7 @@ async def cmd_unban(message: Message):
         else:
             await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
     except:
-        await message.answer("Формат: <code>/ban 123456789</code> или <code>/ban @username</code>", parse_mode="HTML")
+        await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
 
 @dp.message()
 @dp.business_message()
@@ -645,8 +608,7 @@ async def handle(message: Message):
     global bot_id, CHANNEL_LINK
     
     try:
-        if not message.from_user or message.from_user.is_bot:
-            return
+        if not message.from_user or message.from_user.is_bot: return
 
         uid = int(message.from_user.id)
         chat_id = int(message.chat.id)
@@ -656,16 +618,6 @@ async def handle(message: Message):
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
         if bc_id:
-            # Сохраняем владельца бизнес-аккаунта если ещё не сохранён
-            if bc_id not in bc_owners:
-                try:
-                    conn_info = await bot.get_business_connection(bc_id)
-                    bc_owners[bc_id] = int(conn_info.user.id)
-                    save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
-                    save_business_owner(conn_info.user.id)
-                    owner_id = int(conn_info.user.id)
-                except: pass
-            
             chat_tuple = (chat_id, bc_id)
             if chat_tuple in recent_business_chats:
                 recent_business_chats.remove(chat_tuple)
@@ -677,9 +629,17 @@ async def handle(message: Message):
             return
 
         if bc_id:
+            if bc_id not in bc_owners:
+                try:
+                    conn_info = await bot.get_business_connection(bc_id)
+                    bc_owners[bc_id] = int(conn_info.user.id)
+                    save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
+                    owner_id = int(conn_info.user.id)
+                except: pass
+            
             is_from_me = (uid == owner_id) if owner_id else False
         else:
-            is_from_me = True  # В личке и группах все сообщения обрабатываем
+            is_from_me = (uid == chat_id) or (message.chat.type in ["group", "supergroup"])
 
         if bot_id is None:
             me = await bot.get_me()
@@ -705,32 +665,30 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if not is_from_me and chat_id in reply_guard_chats and message.reply_to_message:
+        if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if not message.text:
+        if not is_from_me or not message.text:
             return
 
-        # Проверка подписки ТОЛЬКО в личке
-        if message.chat.type == "private":
-            is_subbed = await check_subscription(uid)
-            if not is_subbed:
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                user_link = get_user_mention(uid, message.from_user.first_name)
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
-                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
-                ])
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!",
-                    "parse_mode": "HTML",
-                    "reply_markup": kb
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
-                return
+        is_subbed = await check_subscription(uid)
+        if not is_subbed:
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            user_link = get_user_mention(uid, message.from_user.first_name)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+                [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
+            ])
+            kwargs = {
+                "chat_id": chat_id,
+                "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!",
+                "parse_mode": "HTML",
+                "reply_markup": kb
+            }
+            if bc_id: kwargs["business_connection_id"] = bc_id
+            await bot.send_message(**kwargs)
+            return
 
         text_raw = message.text
         low = text_raw.lower().strip()
@@ -993,7 +951,7 @@ async def main():
     asyncio.create_task(global_typing_loop())
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
-    asyncio.create_task(clean_inactive_connections())
+    asyncio.create_task(clean_inactive_connections())  # Запускаем очистку
 
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
