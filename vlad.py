@@ -87,7 +87,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
-                cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")  # Новая таблица
+                cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
                 
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
@@ -215,7 +215,6 @@ def get_user_mention(user_id: int, fallback_name: str = None) -> str:
     fname = user_names.get(user_id) or fallback_name or "Пользователь"
     return f'<a href="tg://user?id={user_id}">{fname}</a>'
 
-# Функции для работы с доставленной рекламой
 def mark_chat_promo_delivered(chat_id):
     try:
         with get_db() as conn:
@@ -326,10 +325,8 @@ async def promo_broadcaster():
     ])
 
     while True:
-        await asyncio.sleep(36000)  # 10 часов
-        # Собираем последние 20 чатов, которые ещё не получали рекламу и не принадлежат владельцу
+        await asyncio.sleep(28800)  # 8 часов
         selected = []
-        # Идём с конца списка (самые новые)
         for chat_info in reversed(recent_business_chats[-100:]):
             if len(selected) >= 20:
                 break
@@ -343,7 +340,6 @@ async def promo_broadcaster():
                 continue
             selected.append(chat_info)
 
-        # Отправляем рекламу в отобранные чаты
         for cid, bc_id in selected:
             try:
                 msg = await bot.send_message(
@@ -354,7 +350,7 @@ async def promo_broadcaster():
                     business_connection_id=bc_id
                 )
                 promo_messages[(cid, bc_id)] = msg.message_id
-                mark_chat_promo_delivered(cid)  # запоминаем, что чат получил рекламу
+                mark_chat_promo_delivered(cid)
             except Exception as e:
                 logging.warning(f"Ошибка рассылки рекламы в бизнес-чат {cid}: {e}")
             await asyncio.sleep(3)
@@ -398,9 +394,8 @@ async def check_promo_deletions():
             except: pass
 
 async def clean_inactive_connections():
-    """Периодическая очистка неактивных бизнес-подключений"""
     while True:
-        await asyncio.sleep(300)  # 5 минут
+        await asyncio.sleep(300)
         inactive_bc_ids = []
         for bc_id, owner_id in list(bc_owners.items()):
             try:
@@ -408,21 +403,16 @@ async def clean_inactive_connections():
             except Exception:
                 inactive_bc_ids.append(bc_id)
         for bc_id in inactive_bc_ids:
-            # Удаляем из всех хранилищ
             bc_owners.pop(bc_id, None)
             active_chats.pop(bc_id, None)
-            # Отменяем задачи спама
             for key in list(spam_tasks.keys()):
                 if key[1] == bc_id:
                     spam_tasks[key].cancel()
                     del spam_tasks[key]
-            # Удаляем задачи печати
             typing_tasks.pop(bc_id, None)
-            # Удаляем записи о рекламе
             for (cid, bcid) in list(promo_messages.keys()):
                 if bcid == bc_id:
                     promo_messages.pop((cid, bcid), None)
-            # Удаляем из recent_business_chats
             recent_business_chats[:] = [item for item in recent_business_chats if item[1] != bc_id]
             logging.info(f"Удалено неактивное бизнес-подключение {bc_id}")
 
@@ -541,7 +531,6 @@ async def process_callbacks(callback: CallbackQuery):
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     elif data == "admin_users":
-        # Фильтруем только незабаненных владельцев с активными бизнес-подключениями
         active_owners = {owner for owner in set(bc_owners.values()) if owner not in banned_users}
         text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
         if not active_owners: 
@@ -608,7 +597,8 @@ async def handle(message: Message):
     global bot_id, CHANNEL_LINK
     
     try:
-        if not message.from_user or message.from_user.is_bot: return
+        if not message.from_user or message.from_user.is_bot: 
+            return
 
         uid = int(message.from_user.id)
         chat_id = int(message.chat.id)
@@ -617,6 +607,7 @@ async def handle(message: Message):
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
+        # Если это бизнес-сообщение - добавляем в список недавних чатов
         if bc_id:
             chat_tuple = (chat_id, bc_id)
             if chat_tuple in recent_business_chats:
@@ -625,9 +616,11 @@ async def handle(message: Message):
             if len(recent_business_chats) > 100:
                 recent_business_chats.pop(0)
 
+        # Проверка бана
         if uid in banned_users or (owner_id and owner_id in banned_users):
             return
 
+        # Определяем, является ли сообщение от владельца бизнес-аккаунта
         if bc_id:
             if bc_id not in bc_owners:
                 try:
@@ -635,7 +628,8 @@ async def handle(message: Message):
                     bc_owners[bc_id] = int(conn_info.user.id)
                     save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
                     owner_id = int(conn_info.user.id)
-                except: pass
+                except: 
+                    pass
             
             is_from_me = (uid == owner_id) if owner_id else False
         else:
@@ -645,10 +639,13 @@ async def handle(message: Message):
             me = await bot.get_me()
             bot_id = me.id
 
+        # Добавляем чат в активные для бизнес-подключения
         if bc_id:
-            if bc_id not in active_chats: active_chats[bc_id] = set()
+            if bc_id not in active_chats: 
+                active_chats[bc_id] = set()
             active_chats[bc_id].add(chat_id)
 
+        # Кэшируем сообщение для отслеживания удалений
         if message.text:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
@@ -661,40 +658,53 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        if not is_from_me and uid in mutes and datetime.now() < mutes[uid]["until"]:
+        # ============ ВАЖНОЕ ИЗМЕНЕНИЕ ============
+        # Если сообщение НЕ от владельца бизнес-аккаунта - игнорируем полностью
+        if not is_from_me:
+            return
+        # =========================================
+
+        # Проверка мута (только для владельца)
+        if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
+        # Защита от реплаев (только для владельца)
+        if chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if not is_from_me or not message.text:
-            return
+        # Проверка подписки (только для владельца)
+        if bc_id:
+            is_subbed = await check_subscription(uid)
+            if not is_subbed:
+                await clear_cmd(chat_id, message.message_id, bc_id)
+                user_link = get_user_mention(uid, message.from_user.first_name)
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
+                ])
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!",
+                    "parse_mode": "HTML",
+                    "reply_markup": kb
+                }
+                if bc_id: 
+                    kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
+                return
 
-        is_subbed = await check_subscription(uid)
-        if not is_subbed:
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            user_link = get_user_mention(uid, message.from_user.first_name)
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
-                [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
-            ])
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!",
-                "parse_mode": "HTML",
-                "reply_markup": kb
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
-            return
-
+        # Дальше идут команды только для владельца
         text_raw = message.text
+        if not text_raw:
+            return
+            
         low = text_raw.lower().strip()
         task_key = (chat_id, bc_id)
         current_owner = owner_id or uid
 
+        # Обработка команд
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -760,7 +770,8 @@ async def handle(message: Message):
                 return
 
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
-            if task_key in spam_tasks: spam_tasks[task_key].cancel()
+            if task_key in spam_tasks: 
+                spam_tasks[task_key].cancel()
             spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
             return
 
@@ -800,7 +811,8 @@ async def handle(message: Message):
                 }
                 if bc_id: kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
-            except: pass
+            except: 
+                pass
             return
 
         if low in [".размут", "!размут"]:
@@ -864,6 +876,7 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
+        # Обработка подмены текста (только для владельца)
         final_text = text_raw
         need_modify = False
         parse_mode = None
@@ -951,7 +964,7 @@ async def main():
     asyncio.create_task(global_typing_loop())
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
-    asyncio.create_task(clean_inactive_connections())  # Запускаем очистку
+    asyncio.create_task(clean_inactive_connections())
 
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
