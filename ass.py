@@ -26,7 +26,7 @@ from pydub import AudioSegment
 
 # ===== ТВОИ ДАННЫЕ =====
 TG_TOKEN = "8854371495:AAFpc5YvuQI8uLsqgeLtbZk2jbFqJQj6ids"
-GEMINI_KEY = "AQ.Ab8RN6L7hjs3CheAh0yqv0vglctawwTxTvr9r6hBFjRCr7qJ9Q"
+GEMINI_KEY = "AQ.Ab8RN6J3Dhh3Zd--5lzGBc9SEJX9K4uU7h0_aizHUxuMI_euaw"
 UNSPLASH_KEY = "LQeFxGDISeJ0-jFFeYjPg-JFRp8MXRzc-3tOB74Vf-s"
 TASYA_ID = 8817983884
 NORIK_ID = 5825717381
