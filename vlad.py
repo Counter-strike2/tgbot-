@@ -659,12 +659,20 @@ async def handle(message: Message):
                 msg_cache.pop(next(iter(msg_cache)))
 
         # ============ ВАЖНОЕ ИЗМЕНЕНИЕ ============
-        # Если сообщение НЕ от владельца бизнес-аккаунта - игнорируем полностью
+        # ПРОВЕРКА МУТА ДО ПРОВЕРКИ is_from_me
+        # Это гарантирует, что замученный пользователь НЕ СМОЖЕТ отправить сообщение
+        # даже если он является владельцем бизнес-аккаунта
+        if uid in mutes and datetime.now() < mutes[uid]["until"]:
+            await delete_msg(chat_id, message.message_id, bc_id)
+            return
+
+        # Теперь проверяем, от кого сообщение
+        # Если сообщение НЕ от владельца бизнес-аккаунта - игнорируем
         if not is_from_me:
             return
         # =========================================
 
-        # Проверка мута (только для владельца)
+        # Проверка мута (дополнительная проверка для владельца)
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
