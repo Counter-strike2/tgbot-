@@ -40,13 +40,11 @@ recent_business_chats = []
 bot_id = None
 CHANNEL_LINK = None
 
-bc_owners = {}
+bc_owners = {}  # bc_id -> user_id
 user_usernames = {}
 user_names = {}
 banned_users = set()
-
-# РАЗРЕШЁННЫЕ ID ЧАТОВ (если пусто - работает везде)
-ALLOWED_CHATS = set()  # Добавьте ID чатов сюда, например: {123456789, -100123456789}
+all_bc_owners = set()  # Храним ВСЕХ пользователей, которые подключали бота через бизнес
 
 TEXT_COMMANDS_HELP = (
     "📋 <b>СПИСОК КОМАНД:</b>\n\n"
@@ -91,6 +89,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
+                cur.execute("CREATE TABLE IF NOT EXISTS business_owners (user_id BIGINT PRIMARY KEY)")  # Новая таблица для хранения всех владельцев
                 
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
@@ -122,6 +121,12 @@ def init_db():
                 cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
                 row = cur.fetchone()
                 if row: CHANNEL_LINK = row[0]
+                
+                # Загружаем всех бизнес-владельцев из БД
+                cur.execute("SELECT user_id FROM business_owners")
+                for row in cur.fetchall():
+                    all_bc_owners.add(int(row[0]))
+                    
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
 
@@ -144,6 +149,30 @@ def save_user_info(user_id: int, username: str, first_name: str):
                 conn.commit()
     except Exception as e:
         logging.error(f"Ошибка сохранения юзера: {e}")
+
+def save_business_owner(user_id: int):
+    """Сохраняет пользователя как владельца бизнес-аккаунта"""
+    user_id = int(user_id)
+    all_bc_owners.add(user_id)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO business_owners (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка сохранения владельца бизнеса: {e}")
+
+def remove_business_owner(user_id: int):
+    """Удаляет пользователя из списка владельцев бизнес-аккаунтов"""
+    user_id = int(user_id)
+    all_bc_owners.discard(user_id)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM business_owners WHERE user_id = %s", (user_id,))
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка удаления владельца бизнеса: {e}")
 
 def set_user_ban(user_id: int, ban: bool):
     user_id = int(user_id)
@@ -406,6 +435,7 @@ async def clean_inactive_connections():
             except Exception:
                 inactive_bc_ids.append(bc_id)
         for bc_id in inactive_bc_ids:
+            owner_id = bc_owners.get(bc_id)
             bc_owners.pop(bc_id, None)
             active_chats.pop(bc_id, None)
             for key in list(spam_tasks.keys()):
@@ -423,6 +453,7 @@ async def clean_inactive_connections():
 async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
+    save_business_owner(bc.user.id)  # Сохраняем в список всех владельцев
     owner_id = int(bc.user.id)
     owner_mention = get_user_mention(owner_id, bc.user.first_name)
     
@@ -526,23 +557,37 @@ async def process_callbacks(callback: CallbackQuery):
         return
 
     if data == "admin_stats":
+        # Показываем ВСЕХ подключенных, а не только активных
+        total_owners = len(all_bc_owners)
+        active_owners = len({owner for owner in bc_owners.values() if owner not in banned_users})
+        
         await callback.message.edit_text(
             f"📊 <b>СТАТИСТИКА:</b>\n\n"
-            f"• Бизнес-аккаунтов: <code>{len(set(bc_owners.values()))}</code>\n"
+            f"• Всего бизнес-аккаунтов: <code>{total_owners}</code>\n"
+            f"• Активных: <code>{active_owners}</code>\n"
             f"• Юзеров в базе: <code>{len(user_names)}</code>\n"
             f"• Забанено: <code>{len(banned_users)}</code>",
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     elif data == "admin_users":
-        active_owners = {owner for owner in set(bc_owners.values()) if owner not in banned_users}
-        text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
-        if not active_owners: 
+        # Показываем ВСЕХ, кто когда-либо подключал бота, включая неактивных
+        text = "💼 <b>ВСЕ ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
+        if not all_bc_owners:
             text += "Нет подключенных бизнес-аккаунтов."
         else:
-            for u_id in list(active_owners)[:35]:
+            # Сортируем: сначала активные, потом неактивные
+            active_owners = {owner for owner in bc_owners.values() if owner not in banned_users}
+            inactive_owners = all_bc_owners - active_owners
+            
+            owners_list = list(active_owners) + list(inactive_owners)
+            
+            for u_id in owners_list[:50]:  # Показываем до 50
                 fname = user_names.get(u_id, "Пользователь")
                 user_link = get_user_mention(u_id, fname)
-                text += f"• {user_link} (<code>{u_id}</code>)\n"
+                status = "🟢 Активен" if u_id in active_owners else "🔴 Неактивен"
+                if u_id in banned_users:
+                    status = "⛔ Забанен"
+                text += f"• {user_link} (<code>{u_id}</code>) — {status}\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
     elif data == "admin_ban_prompt":
@@ -592,7 +637,7 @@ async def cmd_unban(message: Message):
         else:
             await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
     except:
-        await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
+        await message.answer("Формат: <code>/ban 123456789</code> или <code>/ban @username</code>", parse_mode="HTML")
 
 @dp.message()
 @dp.business_message()
@@ -607,19 +652,20 @@ async def handle(message: Message):
         chat_id = int(message.chat.id)
         bc_id = message.business_connection_id
 
-        # ========== НОВАЯ ПРОВЕРКА: РАБОТА В ГРУППАХ ==========
-        # Если это группа и её ID НЕ в разрешённых - игнорируем
-        if message.chat.type in ["group", "supergroup"]:
-            if ALLOWED_CHATS and chat_id not in ALLOWED_CHATS:
-                return  # Бот не работает в этой группе
-        
-        # Если это личка - всегда работаем
-        # =====================================================
-
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
         if bc_id:
+            # Сохраняем владельца бизнес-аккаунта если ещё не сохранён
+            if bc_id not in bc_owners:
+                try:
+                    conn_info = await bot.get_business_connection(bc_id)
+                    bc_owners[bc_id] = int(conn_info.user.id)
+                    save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
+                    save_business_owner(conn_info.user.id)
+                    owner_id = int(conn_info.user.id)
+                except: pass
+            
             chat_tuple = (chat_id, bc_id)
             if chat_tuple in recent_business_chats:
                 recent_business_chats.remove(chat_tuple)
@@ -631,25 +677,9 @@ async def handle(message: Message):
             return
 
         if bc_id:
-            if bc_id not in bc_owners:
-                try:
-                    conn_info = await bot.get_business_connection(bc_id)
-                    bc_owners[bc_id] = int(conn_info.user.id)
-                    save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
-                    owner_id = int(conn_info.user.id)
-                except: pass
-            
             is_from_me = (uid == owner_id) if owner_id else False
         else:
-            # ========== ВАЖНО: В ГРУППАХ ВСЕ КОМАНДЫ ОТВЕЧАЮТ ==========
-            # Теперь бот отвечает на команды в группах без проверки админа
-            if message.chat.type == "private":
-                is_from_me = True
-            else:
-                # В группах команды работают для ВСЕХ пользователей
-                # Но мут/реплай-гард применяются ко ВСЕМ
-                is_from_me = True  # <- ВСЕ команды в группах обрабатываются
-            # ==========================================================
+            is_from_me = True  # В личке и группах все сообщения обрабатываем
 
         if bot_id is None:
             me = await bot.get_me()
@@ -671,18 +701,14 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # Мут работает для всех (кроме владельца бизнеса)
         if not is_from_me and uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # Реплай-гард работает для всех (кроме владельца бизнеса)
         if not is_from_me and chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # Если сообщение НЕ от владельца/админа и это НЕ команда - игнорируем
-        # Но в группах мы разрешили is_from_me=True, поэтому все сообщения обрабатываются
         if not message.text:
             return
 
@@ -711,9 +737,6 @@ async def handle(message: Message):
         task_key = (chat_id, bc_id)
         current_owner = owner_id or uid
 
-        # ========== ВСЕ КОМАНДЫ РАБОТАЮТ В ГРУППАХ ==========
-        # Все команды ниже будут работать и в личке, и в группах
-        
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -806,11 +829,6 @@ async def handle(message: Message):
                 else:
                     target_id = chat_id
                     target_name = message.chat.first_name or "Пользователь"
-                
-                # В группах мутим только если не забанен
-                if message.chat.type in ["group", "supergroup"] and target_id in banned_users:
-                    await bot.send_message(chat_id, "❌ Этот пользователь забанен глобально!")
-                    return
                 
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
