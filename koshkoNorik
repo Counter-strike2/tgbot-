@@ -7,7 +7,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 import google.generativeai as genai
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import random
 import speech_recognition as sr
@@ -22,45 +23,83 @@ NORIK_ID = 5825717381
 CHANNEL_ID = -1001003613645834
 # ======================
 
-# ===== БАЗА ДАННЫХ =====
-conn = sqlite3.connect("bot_database.db", check_same_thread=False)
+# ===== ПОДКЛЮЧЕНИЕ К POSTGRESQL =====
+import os
+
+# Берем DATABASE_URL из переменных окружения Render
+DATABASE_URL = os.environ.get('DATABASE_URL')
+if not DATABASE_URL:
+    # Для локального тестирования
+    DATABASE_URL = "postgresql://postgres:password@localhost:5432/bot_db"
+
+# Подключаемся к PostgreSQL
+conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
-cursor.execute("""CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, first_name TEXT, username TEXT, last_msg TIMESTAMP, msg_count INTEGER DEFAULT 0, mood TEXT DEFAULT 'aggressive', no_swear_mode INTEGER DEFAULT 0)""")
-cursor.execute("""CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, role TEXT, text TEXT, timestamp TIMESTAMP)""")
+
+# Создаем таблицы
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id BIGINT PRIMARY KEY,
+    first_name TEXT,
+    username TEXT,
+    last_msg TIMESTAMP,
+    msg_count INTEGER DEFAULT 0,
+    mood TEXT DEFAULT 'aggressive',
+    no_swear_mode INTEGER DEFAULT 0
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS messages (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT,
+    role TEXT,
+    text TEXT,
+    timestamp TIMESTAMP
+)
+""")
 conn.commit()
 
+# ===== ФУНКЦИИ РАБОТЫ С БАЗОЙ =====
 def save_user(user_id, first_name, username=None):
-    cursor.execute("INSERT OR REPLACE INTO users (user_id, first_name, username, last_msg, msg_count, mood) VALUES (?, ?, ?, ?, COALESCE((SELECT msg_count FROM users WHERE user_id = ?), 0), COALESCE((SELECT mood FROM users WHERE user_id = ?), 'aggressive'))", (user_id, first_name, username, datetime.now().isoformat(), user_id, user_id))
+    cursor.execute("""
+        INSERT INTO users (user_id, first_name, username, last_msg, msg_count, mood) 
+        VALUES (%s, %s, %s, %s, COALESCE((SELECT msg_count FROM users WHERE user_id = %s), 0), COALESCE((SELECT mood FROM users WHERE user_id = %s), 'aggressive'))
+        ON CONFLICT (user_id) DO UPDATE SET 
+            first_name = EXCLUDED.first_name,
+            username = EXCLUDED.username,
+            last_msg = EXCLUDED.last_msg
+    """, (user_id, first_name, username, datetime.now(), user_id, user_id))
     conn.commit()
 
 def update_msg_count(user_id):
-    cursor.execute("UPDATE users SET msg_count = msg_count + 1, last_msg = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
+    cursor.execute("UPDATE users SET msg_count = msg_count + 1, last_msg = %s WHERE user_id = %s", (datetime.now(), user_id))
     conn.commit()
 
 def save_message(user_id, role, text):
-    cursor.execute("INSERT INTO messages (user_id, role, text, timestamp) VALUES (?, ?, ?, ?)", (user_id, role, text, datetime.now().isoformat()))
+    cursor.execute("INSERT INTO messages (user_id, role, text, timestamp) VALUES (%s, %s, %s, %s)", (user_id, role, text, datetime.now()))
     conn.commit()
 
 def get_user_mood(user_id):
-    cursor.execute("SELECT mood FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT mood FROM users WHERE user_id = %s", (user_id,))
     result = cursor.fetchone()
     return result[0] if result else "aggressive"
 
 def set_user_mood(user_id, mood):
-    cursor.execute("UPDATE users SET mood = ? WHERE user_id = ?", (mood, user_id))
+    cursor.execute("UPDATE users SET mood = %s WHERE user_id = %s", (mood, user_id))
     conn.commit()
 
 def get_no_swear_mode(user_id):
-    cursor.execute("SELECT no_swear_mode FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT no_swear_mode FROM users WHERE user_id = %s", (user_id,))
     result = cursor.fetchone()
     return int(result[0]) if result and result[0] is not None else 0
 
 def set_no_swear_mode(user_id, mode):
-    cursor.execute("UPDATE users SET no_swear_mode = ? WHERE user_id = ?", (mode, user_id))
+    cursor.execute("UPDATE users SET no_swear_mode = %s WHERE user_id = %s", (mode, user_id))
     conn.commit()
 
 def get_user_history(user_id, limit=20):
-    cursor.execute("SELECT role, text FROM messages WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
+    cursor.execute("SELECT role, text FROM messages WHERE user_id = %s ORDER BY timestamp DESC LIMIT %s", (user_id, limit))
     return cursor.fetchall()[::-1]
 
 def get_user_stats():
@@ -68,17 +107,17 @@ def get_user_stats():
     return cursor.fetchall()
 
 def get_user_chat(user_id, limit=30, offset=0):
-    cursor.execute("SELECT role, text, timestamp FROM messages WHERE user_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?", (user_id, limit, offset))
+    cursor.execute("SELECT role, text, timestamp FROM messages WHERE user_id = %s ORDER BY timestamp DESC LIMIT %s OFFSET %s", (user_id, limit, offset))
     return cursor.fetchall()[::-1]
 
 def get_total_messages(user_id):
-    cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s", (user_id,))
     return cursor.fetchone()[0]
 
 def clear_user_history(user_id):
     """Удаляет всю историю сообщений пользователя и сбрасывает счетчик"""
-    cursor.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
-    cursor.execute("UPDATE users SET msg_count = 0 WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
+    cursor.execute("UPDATE users SET msg_count = 0 WHERE user_id = %s", (user_id,))
     conn.commit()
     # Удаляем чат из памяти
     if user_id in chats:
@@ -210,7 +249,7 @@ def get_chat_keyboard(user_id, page=0, per_page=30):
 
 # ===== ПОКАЗ ЧАТА С ПАГИНАЦИЕЙ =====
 async def show_chat(call, user_id, page=0, per_page=30):
-    cursor.execute("SELECT first_name FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT first_name FROM users WHERE user_id = %s", (user_id,))
     user = cursor.fetchone()
     name = user[0] if user else str(user_id)
     
@@ -466,7 +505,7 @@ async def main():
         BotCommand(command="reset", description="🧹 Очистить чат"),
         BotCommand(command="admin", description="👑 Админ-панель")
     ])
-    print("🚀 Бот запущен!")
+    print("🚀 Бот запущен! Подключен к PostgreSQL!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
