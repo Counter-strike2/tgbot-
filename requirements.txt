@@ -5,4 +5,3 @@ google-generativeai
 SpeechRecognition==3.10.4
 pydub
 requests
-aifc
