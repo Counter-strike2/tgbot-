@@ -7,7 +7,6 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 
-# ОБХОД ДЛЯ AIFC В PYTHON 3.14+
 try:
     import aifc
 except ModuleNotFoundError:
@@ -27,7 +26,7 @@ from pydub import AudioSegment
 
 # ===== ТВОИ ДАННЫЕ =====
 TG_TOKEN = "8854371495:AAFpc5YvuQI8uLsqgeLtbZk2jbFqJQj6ids"
-GEMINI_KEY = "AIzaSyAL4wHdXRpYhAOuGCYt9YgDT9b284I_ut8"
+GEMINI_KEY = "AQ.Ab8RN6K96gZZxXKtH7KxrUkL2LP1bqcwYRiT71wVMI93MqAOhw"
 UNSPLASH_KEY = "LQeFxGDISeJ0-jFFeYjPg-JFRp8MXRzc-3tOB74Vf-s"
 TASYA_ID = 8817983884
 NORIK_ID = 5825717381
