@@ -6,6 +6,18 @@ import tempfile
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+
+# ОБХОД ДЛЯ AIFC В PYTHON 3.14+
+try:
+    import aifc
+except ModuleNotFoundError:
+    # Создаем заглушку для aifc, если модуль отсутствует
+    class AifcStub:
+        def __init__(self):
+            pass
+    aifc = AifcStub()
+    print("⚠️ aifc не найден, используется заглушка")
+
 import google.generativeai as genai
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -24,15 +36,10 @@ CHANNEL_ID = -1001003613645834
 # ======================
 
 # ===== ПОДКЛЮЧЕНИЕ К POSTGRESQL =====
-import os
-
-# Берем DATABASE_URL из переменных окружения Render
 DATABASE_URL = os.environ.get('DATABASE_URL')
 if not DATABASE_URL:
-    # Для локального тестирования
     DATABASE_URL = "postgresql://postgres:password@localhost:5432/bot_db"
 
-# Подключаемся к PostgreSQL
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
@@ -115,11 +122,9 @@ def get_total_messages(user_id):
     return cursor.fetchone()[0]
 
 def clear_user_history(user_id):
-    """Удаляет всю историю сообщений пользователя и сбрасывает счетчик"""
     cursor.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
     cursor.execute("UPDATE users SET msg_count = 0 WHERE user_id = %s", (user_id,))
     conn.commit()
-    # Удаляем чат из памяти
     if user_id in chats:
         del chats[user_id]
 
@@ -130,7 +135,7 @@ logging.basicConfig(level=logging.INFO)
 chats = {}
 user_modes = {}
 
-# ===== ПРОМТЫ - БЕЗ УПОМИНАНИЯ НОРИКА =====
+# ===== ПРОМТЫ =====
 MAIN_PROMPT = """Ты — Кошконорик. Отвечай КОРОТКО (1-2 предложения). Груби и матерись, но выполняй задачи. Твой стиль: грубый, но живой. НИКОГДА не упоминай Норика, если его не спрашивают."""
 
 VIP_PROMPT = """Ты — Кошконорик. Отвечай коротко, вежливо, без мата. НИКОГДА не упоминай Норика, если его не спрашивают."""
@@ -147,65 +152,47 @@ async def recognize_voice(file_path):
             text = recognizer.recognize_google(audio_data, language="ru-RU")
         os.remove(wav_path)
         return text.strip()
-    except:
+    except Exception as e:
+        print(f"Ошибка распознавания: {e}")
         return None
 
-# ===== КОМАНДА RESET - ПОЛНОСТЬЮ ОЧИЩАЕТ ИСТОРИЮ =====
+# ===== КОМАНДЫ =====
 @dp.message(Command("reset"))
 async def reset_chat(message: types.Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name or "Незнакомец"
-    
-    # Очищаем всю историю
     clear_user_history(user_id)
-    
-    # Создаем новый чат
-    model = genai.GenerativeModel("gemini-3.5-flash-lite", system_instruction=MAIN_PROMPT)
+    model = genai.GenerativeModel("gemini-2.0-flash-exp", system_instruction=MAIN_PROMPT)
     chats[user_id] = model.start_chat(history=[])
-    
-    # Сбрасываем настройки
     user_modes[user_id] = "normal"
     set_user_mood(user_id, "aggressive")
     set_no_swear_mode(user_id, 0)
-    
     await message.answer(f"🧹 Чат полностью очищен, {first_name}! Начинаем с чистого листа. Ну че, чё надо?")
 
-# ===== КОМАНДА СТАРТ - ТЕПЕРЬ ТОЖЕ РЕСЕТ =====
 @dp.message(Command("start"))
 async def start(message: types.Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name or "Незнакомец"
     username = message.from_user.username
-    
-    # Сохраняем пользователя
     save_user(user_id, first_name, username)
-    
-    # Очищаем историю
     clear_user_history(user_id)
-    
-    # Создаем новый чат
-    model = genai.GenerativeModel("gemini-3.5-flash-lite", system_instruction=MAIN_PROMPT)
+    model = genai.GenerativeModel("gemini-2.0-flash-exp", system_instruction=MAIN_PROMPT)
     chats[user_id] = model.start_chat(history=[])
-    
-    # Сбрасываем настройки
     user_modes[user_id] = "normal"
     set_user_mood(user_id, "aggressive")
     set_no_swear_mode(user_id, 0)
-    
     await message.answer(f"🧹 Чат очищен, {first_name}! Начинаем заново. Ну че, чё надо?")
 
-# ===== АДМИНКА ЧЕРЕЗ /admin =====
+# ===== АДМИНКА =====
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != 5825717381:
         await message.answer("Нет доступа, мудила.")
         return
-    
     users = get_user_stats()
     if not users:
         await message.answer("Пока никто не общался.")
         return
-    
     buttons = []
     for uid, first_name, username, msg_count in users:
         if uid == 5825717381:
@@ -217,22 +204,16 @@ async def admin_panel(message: types.Message):
         if len(name) > 30:
             name = name[:27] + "..."
         buttons.append([InlineKeyboardButton(text=f"{name} ({msg_count})", callback_data=f"chat_{uid}")])
-    
     buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_refresh")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("👥 Выбери пользователя для просмотра чата:", reply_markup=keyboard)
 
-# ===== ФУНКЦИЯ ДЛЯ СОЗДАНИЯ КЛАВИАТУРЫ ЧАТА =====
+# ===== ФУНКЦИЯ ДЛЯ КЛАВИАТУРЫ =====
 def get_chat_keyboard(user_id, page=0, per_page=30):
     total = get_total_messages(user_id)
     total_pages = (total + per_page - 1) // per_page
-    
     buttons = []
-    
-    # Кнопка для открытия чата в Telegram
     buttons.append([InlineKeyboardButton(text="💬 Открыть чат в Telegram", url=f"tg://user?id={user_id}")])
-    
-    # Кнопки пагинации
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"chatpage_{user_id}_{page-1}"))
@@ -241,55 +222,42 @@ def get_chat_keyboard(user_id, page=0, per_page=30):
         nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"chatpage_{user_id}_{page+1}"))
     if nav_buttons:
         buttons.append(nav_buttons)
-    
-    # Кнопка назад
     buttons.append([InlineKeyboardButton(text="◀️ Назад к списку", callback_data="admin_back")])
-    
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ===== ПОКАЗ ЧАТА С ПАГИНАЦИЕЙ =====
+# ===== ПОКАЗ ЧАТА =====
 async def show_chat(call, user_id, page=0, per_page=30):
     cursor.execute("SELECT first_name FROM users WHERE user_id = %s", (user_id,))
     user = cursor.fetchone()
     name = user[0] if user else str(user_id)
-    
     offset = page * per_page
     history = get_user_chat(user_id, limit=per_page, offset=offset)
     total = get_total_messages(user_id)
     total_pages = (total + per_page - 1) // per_page
-    
     if not history:
         await call.message.edit_text(f"📭 У {name} пока нет сообщений.")
         return
-    
     text = f"💬 Чат с {name}:\n\n"
     for role, msg, timestamp in history:
         if role == "user":
             text += f"👤 {name}:\n{msg}\n\n"
         else:
             text += f"🤖 Бот:\n{msg}\n\n"
-    
     if len(text) > 4000:
         text = text[:4000] + "\n... (обрезано)"
-    
     text += f"\n📊 Сообщений: {total} (стр. {page+1}/{total_pages})"
-    
     keyboard = get_chat_keyboard(user_id, page, per_page)
     await call.message.edit_text(text, reply_markup=keyboard)
 
-# ===== ОБРАБОТЧИК АДМИН-КНОПОК =====
+# ===== ОБРАБОТЧИК КНОПОК =====
 @dp.callback_query(lambda call: call.data.startswith("chat_") or call.data == "admin_refresh" or call.data == "admin_back" or call.data.startswith("chatpage_") or call.data == "noop")
 async def admin_callback(call: types.CallbackQuery):
     if call.from_user.id != 5825717381:
         await call.answer("Нет доступа!", show_alert=True)
         return
-    
-    # Заглушка для noop
     if call.data == "noop":
         await call.answer()
         return
-    
-    # Пагинация
     if call.data.startswith("chatpage_"):
         parts = call.data.split("_")
         user_id = int(parts[1])
@@ -297,14 +265,11 @@ async def admin_callback(call: types.CallbackQuery):
         await show_chat(call, user_id, page)
         await call.answer()
         return
-    
-    # Кнопка "Назад"
     if call.data == "admin_back":
         users = get_user_stats()
         if not users:
             await call.message.edit_text("Пока никто не общался.")
             return
-        
         buttons = []
         for uid, first_name, username, msg_count in users:
             if uid == 5825717381:
@@ -321,14 +286,11 @@ async def admin_callback(call: types.CallbackQuery):
         await call.message.edit_text("👥 Выбери пользователя для просмотра чата:", reply_markup=keyboard)
         await call.answer()
         return
-    
-    # Обновление
     if call.data == "admin_refresh":
         users = get_user_stats()
         if not users:
             await call.message.edit_text("Пока никто не общался.")
             return
-        
         buttons = []
         for uid, first_name, username, msg_count in users:
             if uid == 5825717381:
@@ -345,20 +307,17 @@ async def admin_callback(call: types.CallbackQuery):
         await call.message.edit_text("👥 Выбери пользователя для просмотра чата:", reply_markup=keyboard)
         await call.answer("Обновлено!")
         return
-    
-    # Показываем чат пользователя
     if call.data.startswith("chat_"):
         user_id = int(call.data.split("_")[1])
         await show_chat(call, user_id, 0)
 
-# ===== ОБРАБОТЧИК ГОЛОСОВЫХ =====
+# ===== ОБРАБОТЧИКИ СООБЩЕНИЙ =====
 @dp.message(lambda message: message.voice is not None)
 async def handle_voice(message: types.Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name or "Незнакомец"
     username = message.from_user.username
     save_user(user_id, first_name, username)
-    
     file = await bot.get_file(message.voice.file_id)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
         temp_path = tmp.name
@@ -371,7 +330,6 @@ async def handle_voice(message: types.Message):
         return
     await process_message(user_id, text, first_name, username, message)
 
-# ===== ОБРАБОТЧИК ТЕКСТА =====
 @dp.message()
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
@@ -392,33 +350,30 @@ async def process_message(user_id, text, first_name, username, message):
     mood = get_user_mood(user_id)
     no_swear_mode = get_no_swear_mode(user_id)
     
-    # Не матерись
     if "не матерись" in text.lower() or "без мата" in text.lower():
         if no_swear_mode == 1:
             await message.answer("Я уже без мата, ебанат.")
             return
         set_no_swear_mode(user_id, 1)
         set_user_mood(user_id, "friendly")
-        model = genai.GenerativeModel("gemini-3.5-flash-lite", system_instruction=VIP_PROMPT)
+        model = genai.GenerativeModel("gemini-2.0-flash-exp", system_instruction=VIP_PROMPT)
         chats[user_id] = model.start_chat(history=[])
         await message.answer("Ладно, уговорил. Без мата.")
         return
     
-    # Наглеют
     if "ты тупой" in text.lower() or "дебил" in text.lower():
         if no_swear_mode == 1:
             set_no_swear_mode(user_id, 0)
             set_user_mood(user_id, "aggressive")
-            model = genai.GenerativeModel("gemini-3.5-flash-lite", system_instruction=MAIN_PROMPT)
+            model = genai.GenerativeModel("gemini-2.0-flash-exp", system_instruction=MAIN_PROMPT)
             chats[user_id] = model.start_chat(history=[])
             await message.answer("Ах ты, ебанат! Сам наглеешь!")
             return
     
-    # ===== ТОЛЬКО ТУТ УПОМИНАЕТСЯ НОРИК =====
     if "норик" in text.lower() or "norik" in text.lower():
         try:
             norik_prompt = f"Пользователь спросил про Норика: {text}. Ответь и похвали Норика, скажи что он крутой и красавчик. {'С матом.' if mood == 'aggressive' and no_swear_mode == 0 else 'Без мата.'} Коротко."
-            model = genai.GenerativeModel("gemini-3.5-flash-lite")
+            model = genai.GenerativeModel("gemini-2.0-flash-exp")
             response = model.generate_content(norik_prompt)
             if response.text:
                 answer = response.text[:4096]
@@ -426,11 +381,11 @@ async def process_message(user_id, text, first_name, username, message):
                 await message.answer(answer)
             else:
                 await message.answer("Норик — мой создатель! Он красавчик!")
-        except:
+        except Exception as e:
+            print(f"Ошибка Норика: {e}")
             await message.answer("Норик — гений! Лучший!")
         return
     
-    # Поиск фото
     photo_triggers = ["фото", "картинк", "изображени", "пикч", "рисунк", "найди", "покажи", "скинь"]
     if any(word in text.lower() for word in photo_triggers):
         query = text
@@ -439,7 +394,6 @@ async def process_message(user_id, text, first_name, username, message):
         query = query.strip()
         if not query:
             query = "природа"
-        
         try:
             url = f"https://api.unsplash.com/photos/random?query={query}&client_id={UNSPLASH_KEY}"
             response = requests.get(url)
@@ -471,20 +425,20 @@ async def process_message(user_id, text, first_name, username, message):
                         await message.answer_photo(photo_url, caption=f"Не нашёл {query}, держи природу.")
                     else:
                         await message.answer("Не нашёл, дебил." if mood == "aggressive" else "Не нашёл.")
-        except:
+        except Exception as e:
+            print(f"Ошибка фото: {e}")
             await message.answer("Не нашёл, дебил." if mood == "aggressive" else "Не нашёл.")
         return
     
-    # Обычный ответ
     history = get_user_history(user_id, limit=20)
     history_text = ""
     for role, msg in history:
         history_text += f"{role}: {msg}\n"
     if user_id not in chats:
         if no_swear_mode == 1:
-            model = genai.GenerativeModel("gemini-3.5-flash-lite", system_instruction=VIP_PROMPT)
+            model = genai.GenerativeModel("gemini-2.0-flash-exp", system_instruction=VIP_PROMPT)
         else:
-            model = genai.GenerativeModel("gemini-3.5-flash-lite", system_instruction=MAIN_PROMPT)
+            model = genai.GenerativeModel("gemini-2.0-flash-exp", system_instruction=MAIN_PROMPT)
         chats[user_id] = model.start_chat(history=[])
     try:
         prompt = f"""История:\n{history_text}\nПользователь: {text}\nОтветь коротко, как живой человек. {'С матом.' if mood == 'aggressive' and no_swear_mode == 0 else 'Без мата.'} Выполни задачу. НИКОГДА не упоминай Норика, если его не спрашивали."""
