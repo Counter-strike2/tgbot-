@@ -3,6 +3,7 @@ import os
 import psycopg2
 import re
 import logging
+import math
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -59,7 +60,11 @@ TEXT_COMMANDS_HELP = (
     "• <code>+реплай</code> / <code>-реплай</code> — защита от ответов реплаем\n"
     "• <code>+линк [ссылка]</code> — установить авто-ссылку\n"
     "• <code>мой ид</code> / <code>твой ид</code> — узнать ID\n"
-    "• <code>!команды</code> — меню команд"
+    "• <code>!команды</code> — меню команд\n\n"
+    "🔹 <b>Калькулятор:</b>\n"
+    "• Просто напишите пример: <code>1458+2414</code> или <code>100*5-30</code>\n"
+    "• Поддерживаются: <code>+ - * / ** % sqrt()</code>\n"
+    "• Примеры: <code>2+2*2</code>, <code>sqrt(16)</code>, <code>10%3</code>"
 )
 
 TEXT_CONNECT_INSTRUCTION = (
@@ -416,6 +421,85 @@ async def clean_inactive_connections():
             recent_business_chats[:] = [item for item in recent_business_chats if item[1] != bc_id]
             logging.info(f"Удалено неактивное бизнес-подключение {bc_id}")
 
+# ============ НОВЫЙ КАЛЬКУЛЯТОР ============
+def calculate_expression(expression: str) -> tuple:
+    """
+    Вычисляет математическое выражение с поддержкой:
+    +, -, *, /, ** (степень), % (остаток), sqrt()
+    """
+    try:
+        # Удаляем пробелы
+        expr = expression.replace(" ", "")
+        
+        # Проверяем, что выражение содержит только разрешенные символы
+        allowed_chars = r'[\d+\-*/()%**sqrt. ]'
+        if not re.match(r'^[\d+\-*/()%**sqrt.]+$', expr):
+            return None, "❌ Некорректное выражение"
+        
+        # Заменяем sqrt на math.sqrt
+        expr = expr.replace("sqrt", "math.sqrt")
+        
+        # Безопасное вычисление с использованием ограниченного пространства имен
+        safe_dict = {
+            "math": math,
+            "__builtins__": None
+        }
+        
+        # Вычисляем
+        result = eval(expr, safe_dict)
+        
+        # Проверяем результат
+        if result is None:
+            return None, "❌ Ошибка вычисления"
+        
+        # Форматируем результат
+        if isinstance(result, float):
+            if result.is_integer():
+                result = int(result)
+            else:
+                result = round(result, 10)
+        
+        return result, None
+        
+    except ZeroDivisionError:
+        return None, "❌ Деление на ноль!"
+    except Exception as e:
+        return None, f"❌ Ошибка: {str(e)}"
+
+def is_calculator_expression(text: str) -> bool:
+    """
+    Проверяет, является ли текст математическим выражением
+    """
+    if not text:
+        return False
+    
+    # Удаляем пробелы для проверки
+    cleaned = text.replace(" ", "")
+    
+    # Проверяем, есть ли в тексте математические операторы
+    math_patterns = [
+        r'[\d]+[\+\-\*/%][\d]+',  # базовые операции с числами
+        r'[\d]+\*\*[\d]+',        # степень
+        r'sqrt\([\d]+\)',         # квадратный корень
+        r'[\d]+%[\d]+'            # остаток от деления
+    ]
+    
+    # Если есть хоть один математический оператор
+    for pattern in math_patterns:
+        if re.search(pattern, cleaned):
+            return True
+    
+    # Проверяем, что текст состоит только из цифр, операторов и скобок
+    # и содержит хотя бы один оператор
+    if re.match(r'^[\d+\-*/()%**sqrt.]+$', cleaned):
+        operators = ['+', '-', '*', '/', '%', '**']
+        for op in operators:
+            if op in cleaned:
+                return True
+    
+    return False
+# ==========================================
+
 @dp.business_connection()
 async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
@@ -658,19 +742,43 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # ============ ВАЖНОЕ ИЗМЕНЕНИЕ ============
-        # ПРОВЕРКА МУТА ДО ПРОВЕРКИ is_from_me
-        # Это гарантирует, что замученный пользователь НЕ СМОЖЕТ отправить сообщение
-        # даже если он является владельцем бизнес-аккаунта
+        # Проверка мута ДО проверки is_from_me
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # Теперь проверяем, от кого сообщение
+        # ============ НОВЫЙ КАЛЬКУЛЯТОР ============
+        # Проверяем, является ли сообщение математическим выражением
+        # И обрабатываем его ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ (не только владельцев)
+        text_raw = message.text
+        if text_raw and is_calculator_expression(text_raw):
+            result, error = calculate_expression(text_raw)
+            if result is not None:
+                # Форматируем ответ
+                if isinstance(result, float):
+                    formatted_result = f"{result:.10f}".rstrip('0').rstrip('.')
+                else:
+                    formatted_result = str(result)
+                
+                new_text = f"{text_raw} = <b>{formatted_result}</b>"
+                await edit_message(chat_id, message.message_id, new_text, bc_id, parse_mode="HTML")
+                return
+            elif error:
+                # Если ошибка - отправляем сообщение с ошибкой
+                error_msg = f"❌ {error}"
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": error_msg,
+                    "parse_mode": "HTML"
+                }
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
+                return
+        # ============================================
+
         # Если сообщение НЕ от владельца бизнес-аккаунта - игнорируем
         if not is_from_me:
             return
-        # =========================================
 
         # Проверка мута (дополнительная проверка для владельца)
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
@@ -704,7 +812,6 @@ async def handle(message: Message):
                 return
 
         # Дальше идут команды только для владельца
-        text_raw = message.text
         if not text_raw:
             return
             
