@@ -87,6 +87,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
+                cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")  # Новая таблица
                 
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
@@ -214,6 +215,26 @@ def get_user_mention(user_id: int, fallback_name: str = None) -> str:
     fname = user_names.get(user_id) or fallback_name or "Пользователь"
     return f'<a href="tg://user?id={user_id}">{fname}</a>'
 
+# Функции для работы с доставленной рекламой
+def mark_chat_promo_delivered(chat_id):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO delivered_promo (chat_id) VALUES (%s) ON CONFLICT DO NOTHING", (chat_id,))
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка записи доставленной рекламы: {e}")
+
+def is_chat_promo_delivered(chat_id):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM delivered_promo WHERE chat_id = %s", (chat_id,))
+                return cur.fetchone() is not None
+    except Exception as e:
+        logging.error(f"Ошибка проверки доставленной рекламы: {e}")
+        return False
+
 async def check_subscription(user_id: int) -> bool:
     if user_id == ADMIN_ID:
         return True
@@ -305,14 +326,25 @@ async def promo_broadcaster():
     ])
 
     while True:
-        await asyncio.sleep(7200)
-        target_chats = recent_business_chats[-100:]
-
-        for chat_info in target_chats:
+        await asyncio.sleep(36000)  # 10 часов
+        # Собираем последние 20 чатов, которые ещё не получали рекламу и не принадлежат владельцу
+        selected = []
+        # Идём с конца списка (самые новые)
+        for chat_info in reversed(recent_business_chats[-100:]):
+            if len(selected) >= 20:
+                break
             cid, bc_id = chat_info
             owner_id = bc_owners.get(bc_id)
+            if owner_id == ADMIN_ID:
+                continue
             if owner_id and owner_id in banned_users:
                 continue
+            if is_chat_promo_delivered(cid):
+                continue
+            selected.append(chat_info)
+
+        # Отправляем рекламу в отобранные чаты
+        for cid, bc_id in selected:
             try:
                 msg = await bot.send_message(
                     chat_id=cid,
@@ -322,6 +354,7 @@ async def promo_broadcaster():
                     business_connection_id=bc_id
                 )
                 promo_messages[(cid, bc_id)] = msg.message_id
+                mark_chat_promo_delivered(cid)  # запоминаем, что чат получил рекламу
             except Exception as e:
                 logging.warning(f"Ошибка рассылки рекламы в бизнес-чат {cid}: {e}")
             await asyncio.sleep(3)
@@ -363,6 +396,35 @@ async def check_promo_deletions():
                         except: pass
                     promo_messages.pop((cid, bc_id), None)
             except: pass
+
+async def clean_inactive_connections():
+    """Периодическая очистка неактивных бизнес-подключений"""
+    while True:
+        await asyncio.sleep(300)  # 5 минут
+        inactive_bc_ids = []
+        for bc_id, owner_id in list(bc_owners.items()):
+            try:
+                await bot.get_business_connection(bc_id)
+            except Exception:
+                inactive_bc_ids.append(bc_id)
+        for bc_id in inactive_bc_ids:
+            # Удаляем из всех хранилищ
+            bc_owners.pop(bc_id, None)
+            active_chats.pop(bc_id, None)
+            # Отменяем задачи спама
+            for key in list(spam_tasks.keys()):
+                if key[1] == bc_id:
+                    spam_tasks[key].cancel()
+                    del spam_tasks[key]
+            # Удаляем задачи печати
+            typing_tasks.pop(bc_id, None)
+            # Удаляем записи о рекламе
+            for (cid, bcid) in list(promo_messages.keys()):
+                if bcid == bc_id:
+                    promo_messages.pop((cid, bcid), None)
+            # Удаляем из recent_business_chats
+            recent_business_chats[:] = [item for item in recent_business_chats if item[1] != bc_id]
+            logging.info(f"Удалено неактивное бизнес-подключение {bc_id}")
 
 @dp.business_connection()
 async def handle_bc(bc):
@@ -479,16 +541,16 @@ async def process_callbacks(callback: CallbackQuery):
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     elif data == "admin_users":
+        # Фильтруем только незабаненных владельцев с активными бизнес-подключениями
+        active_owners = {owner for owner in set(bc_owners.values()) if owner not in banned_users}
         text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
-        bc_users = list(set(bc_owners.values()))
-        if not bc_users: 
+        if not active_owners: 
             text += "Нет подключенных бизнес-аккаунтов."
         else:
-            for u_id in bc_users[:35]:
+            for u_id in list(active_owners)[:35]:
                 fname = user_names.get(u_id, "Пользователь")
-                user_link = f'<a href="tg://user?id={u_id}">{fname}</a>'
-                status = "🔴 (Бан)" if u_id in banned_users else "🟢"
-                text += f"• {user_link} (<code>{u_id}</code>) {status}\n"
+                user_link = get_user_mention(u_id, fname)
+                text += f"• {user_link} (<code>{u_id}</code>)\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
     elif data == "admin_ban_prompt":
@@ -889,6 +951,7 @@ async def main():
     asyncio.create_task(global_typing_loop())
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
+    asyncio.create_task(clean_inactive_connections())  # Запускаем очистку
 
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
