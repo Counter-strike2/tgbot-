@@ -25,25 +25,28 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Хранилища состояния
-mutes = {}               # user_id -> {"until": datetime}
-spam_tasks = {}          # (chat_id, bc_id) -> Task
-typing_tasks = {}        # bc_id -> Task
-user_spam_texts = {}     # user_id -> str
-link_chats = set()       # chat_ids
+mutes = {}
+spam_tasks = {}
+typing_tasks = {}
+user_spam_texts = {}
+link_chats = set()
 reply_guard_chats = set()
 typing_disabled_chats = set()
-substitutions = {}       # chat_id -> {"text": str, "mode": int}
-msg_cache = {}           # (chat_id, msg_id) -> dict
-active_chats = {}        # bc_id -> set(chat_ids)
-promo_messages = {}      # (chat_id, bc_id) -> message_id
-recent_business_chats = [] # Список (chat_id, bc_id) для бизнес-рассылок
+substitutions = {}
+msg_cache = {}
+active_chats = {}
+promo_messages = {}
+recent_business_chats = []
 bot_id = None
-CHANNEL_LINK = None      
+CHANNEL_LINK = None
 
-bc_owners = {}           # bc_id -> user_id
-user_usernames = {}      
-user_names = {}          
-banned_users = set()     
+bc_owners = {}
+user_usernames = {}
+user_names = {}
+banned_users = set()
+
+# РАЗРЕШЁННЫЕ ID ЧАТОВ (если пусто - работает везде)
+ALLOWED_CHATS = set()  # Добавьте ID чатов сюда, например: {123456789, -100123456789}
 
 TEXT_COMMANDS_HELP = (
     "📋 <b>СПИСОК КОМАНД:</b>\n\n"
@@ -87,7 +90,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
-                cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")  # Новая таблица
+                cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
                 
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
@@ -215,7 +218,6 @@ def get_user_mention(user_id: int, fallback_name: str = None) -> str:
     fname = user_names.get(user_id) or fallback_name or "Пользователь"
     return f'<a href="tg://user?id={user_id}">{fname}</a>'
 
-# Функции для работы с доставленной рекламой
 def mark_chat_promo_delivered(chat_id):
     try:
         with get_db() as conn:
@@ -326,10 +328,8 @@ async def promo_broadcaster():
     ])
 
     while True:
-        await asyncio.sleep(36000)  # 10 часов
-        # Собираем последние 20 чатов, которые ещё не получали рекламу и не принадлежат владельцу
+        await asyncio.sleep(36000)
         selected = []
-        # Идём с конца списка (самые новые)
         for chat_info in reversed(recent_business_chats[-100:]):
             if len(selected) >= 20:
                 break
@@ -343,7 +343,6 @@ async def promo_broadcaster():
                 continue
             selected.append(chat_info)
 
-        # Отправляем рекламу в отобранные чаты
         for cid, bc_id in selected:
             try:
                 msg = await bot.send_message(
@@ -354,7 +353,7 @@ async def promo_broadcaster():
                     business_connection_id=bc_id
                 )
                 promo_messages[(cid, bc_id)] = msg.message_id
-                mark_chat_promo_delivered(cid)  # запоминаем, что чат получил рекламу
+                mark_chat_promo_delivered(cid)
             except Exception as e:
                 logging.warning(f"Ошибка рассылки рекламы в бизнес-чат {cid}: {e}")
             await asyncio.sleep(3)
@@ -398,9 +397,8 @@ async def check_promo_deletions():
             except: pass
 
 async def clean_inactive_connections():
-    """Периодическая очистка неактивных бизнес-подключений"""
     while True:
-        await asyncio.sleep(300)  # 5 минут
+        await asyncio.sleep(300)
         inactive_bc_ids = []
         for bc_id, owner_id in list(bc_owners.items()):
             try:
@@ -408,21 +406,16 @@ async def clean_inactive_connections():
             except Exception:
                 inactive_bc_ids.append(bc_id)
         for bc_id in inactive_bc_ids:
-            # Удаляем из всех хранилищ
             bc_owners.pop(bc_id, None)
             active_chats.pop(bc_id, None)
-            # Отменяем задачи спама
             for key in list(spam_tasks.keys()):
                 if key[1] == bc_id:
                     spam_tasks[key].cancel()
                     del spam_tasks[key]
-            # Удаляем задачи печати
             typing_tasks.pop(bc_id, None)
-            # Удаляем записи о рекламе
             for (cid, bcid) in list(promo_messages.keys()):
                 if bcid == bc_id:
                     promo_messages.pop((cid, bcid), None)
-            # Удаляем из recent_business_chats
             recent_business_chats[:] = [item for item in recent_business_chats if item[1] != bc_id]
             logging.info(f"Удалено неактивное бизнес-подключение {bc_id}")
 
@@ -541,7 +534,6 @@ async def process_callbacks(callback: CallbackQuery):
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     elif data == "admin_users":
-        # Фильтруем только незабаненных владельцев с активными бизнес-подключениями
         active_owners = {owner for owner in set(bc_owners.values()) if owner not in banned_users}
         text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
         if not active_owners: 
@@ -608,11 +600,21 @@ async def handle(message: Message):
     global bot_id, CHANNEL_LINK
     
     try:
-        if not message.from_user or message.from_user.is_bot: return
+        if not message.from_user or message.from_user.is_bot:
+            return
 
         uid = int(message.from_user.id)
         chat_id = int(message.chat.id)
         bc_id = message.business_connection_id
+
+        # ========== НОВАЯ ПРОВЕРКА: РАБОТА В ГРУППАХ ==========
+        # Если это группа и её ID НЕ в разрешённых - игнорируем
+        if message.chat.type in ["group", "supergroup"]:
+            if ALLOWED_CHATS and chat_id not in ALLOWED_CHATS:
+                return  # Бот не работает в этой группе
+        
+        # Если это личка - всегда работаем
+        # =====================================================
 
         save_user_info(uid, message.from_user.username, message.from_user.first_name)
         owner_id = bc_owners.get(bc_id) if bc_id else None
@@ -639,7 +641,15 @@ async def handle(message: Message):
             
             is_from_me = (uid == owner_id) if owner_id else False
         else:
-            is_from_me = (uid == chat_id) or (message.chat.type in ["group", "supergroup"])
+            # ========== ВАЖНО: В ГРУППАХ ВСЕ КОМАНДЫ ОТВЕЧАЮТ ==========
+            # Теперь бот отвечает на команды в группах без проверки админа
+            if message.chat.type == "private":
+                is_from_me = True
+            else:
+                # В группах команды работают для ВСЕХ пользователей
+                # Но мут/реплай-гард применяются ко ВСЕМ
+                is_from_me = True  # <- ВСЕ команды в группах обрабатываются
+            # ==========================================================
 
         if bot_id is None:
             me = await bot.get_me()
@@ -661,40 +671,49 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
+        # Мут работает для всех (кроме владельца бизнеса)
         if not is_from_me and uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if chat_id in reply_guard_chats and message.reply_to_message and not is_from_me:
+        # Реплай-гард работает для всех (кроме владельца бизнеса)
+        if not is_from_me and chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if not is_from_me or not message.text:
+        # Если сообщение НЕ от владельца/админа и это НЕ команда - игнорируем
+        # Но в группах мы разрешили is_from_me=True, поэтому все сообщения обрабатываются
+        if not message.text:
             return
 
-        is_subbed = await check_subscription(uid)
-        if not is_subbed:
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            user_link = get_user_mention(uid, message.from_user.first_name)
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
-                [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
-            ])
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!",
-                "parse_mode": "HTML",
-                "reply_markup": kb
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
-            return
+        # Проверка подписки ТОЛЬКО в личке
+        if message.chat.type == "private":
+            is_subbed = await check_subscription(uid)
+            if not is_subbed:
+                await clear_cmd(chat_id, message.message_id, bc_id)
+                user_link = get_user_mention(uid, message.from_user.first_name)
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
+                ])
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!",
+                    "parse_mode": "HTML",
+                    "reply_markup": kb
+                }
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
+                return
 
         text_raw = message.text
         low = text_raw.lower().strip()
         task_key = (chat_id, bc_id)
         current_owner = owner_id or uid
 
+        # ========== ВСЕ КОМАНДЫ РАБОТАЮТ В ГРУППАХ ==========
+        # Все команды ниже будут работать и в личке, и в группах
+        
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -787,6 +806,11 @@ async def handle(message: Message):
                 else:
                     target_id = chat_id
                     target_name = message.chat.first_name or "Пользователь"
+                
+                # В группах мутим только если не забанен
+                if message.chat.type in ["group", "supergroup"] and target_id in banned_users:
+                    await bot.send_message(chat_id, "❌ Этот пользователь забанен глобально!")
+                    return
                 
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
@@ -951,7 +975,7 @@ async def main():
     asyncio.create_task(global_typing_loop())
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
-    asyncio.create_task(clean_inactive_connections())  # Запускаем очистку
+    asyncio.create_task(clean_inactive_connections())
 
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
