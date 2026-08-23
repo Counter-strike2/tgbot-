@@ -89,7 +89,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
-                cur.execute("CREATE TABLE IF NOT EXISTS business_owners (user_id BIGINT PRIMARY KEY)")  # Новая таблица для хранения всех владельцев
+                cur.execute("CREATE TABLE IF NOT EXISTS business_owners (user_id BIGINT PRIMARY KEY)")
                 
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
@@ -122,7 +122,6 @@ def init_db():
                 row = cur.fetchone()
                 if row: CHANNEL_LINK = row[0]
                 
-                # Загружаем всех бизнес-владельцев из БД
                 cur.execute("SELECT user_id FROM business_owners")
                 for row in cur.fetchall():
                     all_bc_owners.add(int(row[0]))
@@ -151,7 +150,6 @@ def save_user_info(user_id: int, username: str, first_name: str):
         logging.error(f"Ошибка сохранения юзера: {e}")
 
 def save_business_owner(user_id: int):
-    """Сохраняет пользователя как владельца бизнес-аккаунта"""
     user_id = int(user_id)
     all_bc_owners.add(user_id)
     try:
@@ -163,7 +161,6 @@ def save_business_owner(user_id: int):
         logging.error(f"Ошибка сохранения владельца бизнеса: {e}")
 
 def remove_business_owner(user_id: int):
-    """Удаляет пользователя из списка владельцев бизнес-аккаунтов"""
     user_id = int(user_id)
     all_bc_owners.discard(user_id)
     try:
@@ -267,6 +264,7 @@ def is_chat_promo_delivered(chat_id):
         return False
 
 async def check_subscription(user_id: int) -> bool:
+    """Проверяет подписку ТОЛЬКО для владельцев бизнес-аккаунтов"""
     if user_id == ADMIN_ID:
         return True
     try:
@@ -453,7 +451,7 @@ async def clean_inactive_connections():
 async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
-    save_business_owner(bc.user.id)  # Сохраняем в список всех владельцев
+    save_business_owner(bc.user.id)
     owner_id = int(bc.user.id)
     owner_mention = get_user_mention(owner_id, bc.user.first_name)
     
@@ -557,7 +555,6 @@ async def process_callbacks(callback: CallbackQuery):
         return
 
     if data == "admin_stats":
-        # Показываем ВСЕХ подключенных, а не только активных
         total_owners = len(all_bc_owners)
         active_owners = len({owner for owner in bc_owners.values() if owner not in banned_users})
         
@@ -570,18 +567,16 @@ async def process_callbacks(callback: CallbackQuery):
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
     elif data == "admin_users":
-        # Показываем ВСЕХ, кто когда-либо подключал бота, включая неактивных
         text = "💼 <b>ВСЕ ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
         if not all_bc_owners:
             text += "Нет подключенных бизнес-аккаунтов."
         else:
-            # Сортируем: сначала активные, потом неактивные
             active_owners = {owner for owner in bc_owners.values() if owner not in banned_users}
             inactive_owners = all_bc_owners - active_owners
             
             owners_list = list(active_owners) + list(inactive_owners)
             
-            for u_id in owners_list[:50]:  # Показываем до 50
+            for u_id in owners_list[:50]:
                 fname = user_names.get(u_id, "Пользователь")
                 user_link = get_user_mention(u_id, fname)
                 status = "🟢 Активен" if u_id in active_owners else "🔴 Неактивен"
@@ -637,7 +632,7 @@ async def cmd_unban(message: Message):
         else:
             await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
     except:
-        await message.answer("Формат: <code>/ban 123456789</code> или <code>/ban @username</code>", parse_mode="HTML")
+        await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
 
 @dp.message()
 @dp.business_message()
@@ -656,7 +651,6 @@ async def handle(message: Message):
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
         if bc_id:
-            # Сохраняем владельца бизнес-аккаунта если ещё не сохранён
             if bc_id not in bc_owners:
                 try:
                     conn_info = await bot.get_business_connection(bc_id)
@@ -679,7 +673,7 @@ async def handle(message: Message):
         if bc_id:
             is_from_me = (uid == owner_id) if owner_id else False
         else:
-            is_from_me = True  # В личке и группах все сообщения обрабатываем
+            is_from_me = True
 
         if bot_id is None:
             me = await bot.get_me()
@@ -712,11 +706,17 @@ async def handle(message: Message):
         if not message.text:
             return
 
-        # Проверка подписки ТОЛЬКО в личке
-        if message.chat.type == "private":
-            is_subbed = await check_subscription(uid)
+        text_raw = message.text
+        low = text_raw.lower().strip()
+        task_key = (chat_id, bc_id)
+        current_owner = owner_id or uid
+
+        # ⚠️ ПРОВЕРКА ПОДПИСКИ ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦЕВ БИЗНЕС-АККАУНТОВ
+        # Если это бизнес-чат и пользователь - владелец
+        if bc_id and owner_id and owner_id == uid:
+            is_subbed = await check_subscription(owner_id)
             if not is_subbed:
-                await clear_cmd(chat_id, message.message_id, bc_id)
+                # Отправляем сообщение о подписке только владельцу
                 user_link = get_user_mention(uid, message.from_user.first_name)
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
@@ -730,12 +730,8 @@ async def handle(message: Message):
                 }
                 if bc_id: kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
+                # Не удаляем сообщение владельца, а просто не обрабатываем команды
                 return
-
-        text_raw = message.text
-        low = text_raw.lower().strip()
-        task_key = (chat_id, bc_id)
-        current_owner = owner_id or uid
 
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
