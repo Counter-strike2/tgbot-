@@ -2,6 +2,6 @@ aiogram>=3.17.0
 aiohttp>=3.9.0
 psycopg2-binary
 google-generativeai
-speech_recognition
+SpeechRecognition==3.10.4
 pydub
 requests
