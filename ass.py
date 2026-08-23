@@ -161,7 +161,7 @@ async def reset_chat(message: types.Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name or "Незнакомец"
     clear_user_history(user_id)
-    model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=MAIN_PROMPT)
+    model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=MAIN_PROMPT)
     chats[user_id] = model.start_chat(history=[])
     user_modes[user_id] = "normal"
     set_user_mood(user_id, "aggressive")
@@ -175,7 +175,7 @@ async def start(message: types.Message):
     username = message.from_user.username
     save_user(user_id, first_name, username)
     clear_user_history(user_id)
-    model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=MAIN_PROMPT)
+    model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=MAIN_PROMPT)
     chats[user_id] = model.start_chat(history=[])
     user_modes[user_id] = "normal"
     set_user_mood(user_id, "aggressive")
@@ -355,7 +355,7 @@ async def process_message(user_id, text, first_name, username, message):
             return
         set_no_swear_mode(user_id, 1)
         set_user_mood(user_id, "friendly")
-        model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=VIP_PROMPT)
+        model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=VIP_PROMPT)
         chats[user_id] = model.start_chat(history=[])
         await message.answer("Ладно, уговорил. Без мата.")
         return
@@ -364,7 +364,7 @@ async def process_message(user_id, text, first_name, username, message):
         if no_swear_mode == 1:
             set_no_swear_mode(user_id, 0)
             set_user_mood(user_id, "aggressive")
-            model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=MAIN_PROMPT)
+            model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=MAIN_PROMPT)
             chats[user_id] = model.start_chat(history=[])
             await message.answer("Ах ты, ебанат! Сам наглеешь!")
             return
@@ -372,7 +372,7 @@ async def process_message(user_id, text, first_name, username, message):
     if "норик" in text.lower() or "norik" in text.lower():
         try:
             norik_prompt = f"Пользователь спросил про Норика: {text}. Ответь и похвали Норика, скажи что он крутой и красавчик. {'С матом.' if mood == 'aggressive' and no_swear_mode == 0 else 'Без мата.'} Коротко."
-            model = genai.GenerativeModel("gemini-2.5-flash")
+            model = genai.GenerativeModel("gemini-3.6-flash")
             response = model.generate_content(norik_prompt)
             if response.text:
                 answer = response.text[:4096]
@@ -435,9 +435,9 @@ async def process_message(user_id, text, first_name, username, message):
         history_text += f"{role}: {msg}\n"
     if user_id not in chats:
         if no_swear_mode == 1:
-            model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=VIP_PROMPT)
+            model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=VIP_PROMPT)
         else:
-            model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=MAIN_PROMPT)
+            model = genai.GenerativeModel("gemini-3.6-flash", system_instruction=MAIN_PROMPT)
         chats[user_id] = model.start_chat(history=[])
     try:
         prompt = f"""История:\n{history_text}\nПользователь: {text}\nОтветь коротко, как живой человек. {'С матом.' if mood == 'aggressive' and no_swear_mode == 0 else 'Без мата.'} Выполни задачу. НИКОГДА не упоминай Норика, если его не спрашивали."""
