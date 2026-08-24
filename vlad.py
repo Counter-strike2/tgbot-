@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
-    Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, 
+    Message, Update, InlineKeyboardMarkup, InlineKeyboardButton,
     CallbackQuery, ReplyKeyboardRemove
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
@@ -45,28 +45,45 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # In-memory stores
-mutes = {}               
-spam_tasks = {}          
-user_spam_texts = {}     
-link_chats = set()       
+mutes = {}
+spam_tasks = {}
+user_spam_texts = {}
+link_chats = set()
 reply_guard_chats = set()
 typing_disabled_chats = set()
-substitutions = {}       
-msg_cache = {}           
-active_chats = {}        
-promo_messages = {}      
-recent_business_chats = [] 
-bc_owners = {}           
-user_usernames = {}      
-user_names = {}          
-banned_users = set()     
+substitutions = {}
+msg_cache = {}
+active_chats = {}
+promo_messages = {}
+recent_business_chats = []
+bc_owners = {}
+user_usernames = {}
+user_names = {}
+banned_users = set()
 bot_id = None
-CHANNEL_LINK = None      
+CHANNEL_LINK = None
 
 class AuthState(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_2fa = State()
+
+# Обновлённая инструкция с пояснением про Business API и безопасность
+TEXT_CONNECT_INSTRUCTION = (
+    "🚀 <b>Инструкция по подключению Юзербота:</b>\n\n"
+    "Чтобы бот мог работать в ваших группах и чатах, необходимо привязать аккаунт через Telegram Business API.\n\n"
+    "🔒 <b>Это официально и безопасно:</b>\n"
+    "• Бот НЕ получает доступ к вашим личным сообщениям, паролям и данным.\n"
+    "• Вся авторизация проходит через официальные серверы Telegram.\n"
+    "• Подключение аккаунта даёт боту возможность отправлять сообщения от вашего имени только в те чаты, где вы его используете.\n\n"
+    "📌 <b>Важно:</b>\n"
+    "• Для работы в <b>личных сообщениях</b> достаточно просто запустить бота.\n"
+    "• Для работы в <b>группах и супергруппах</b> нужно добавить бота как <i>Business-аккаунт</i> через настройки Telegram (раздел «Бизнес»).\n\n"
+    "1️⃣ Нажмите кнопку <b>«📱 Подключить аккаунт»</b> ниже.\n"
+    "2️⃣ Отправьте свой номер телефона (кнопка с запросом контакта).\n"
+    "3️⃣ Введите код подтверждения из Telegram (разделяя цифры точкой, например: <code>56.785</code>).\n"
+    "4️⃣ Если включена двухфакторная аутентификация, введите пароль."
+)
 
 TEXT_COMMANDS_HELP = (
     "📋 <b>СПИСОК КОМАНД:</b>\n\n"
@@ -86,15 +103,6 @@ TEXT_COMMANDS_HELP = (
     "🔹 <b>Калькулятор:</b>\n"
     "• Просто напишите пример: <code>1458+2414</code> или <code>100*5-30</code>\n"
     "• Поддерживаются: <code>+ - * / ** % sqrt()</code>"
-)
-
-TEXT_CONNECT_INSTRUCTION = (
-    "🚀 <b>Инструкция по подключению Юзербота:</b>\n\n"
-    "Чтобы бот мог полностью работать во всех Ваших чатах и группах, "
-    "необходимо привязать сессию аккаунта.\n\n"
-    "1️⃣ Нажмите кнопку <b>«📱 Подключить аккаунт»</b> ниже.\n"
-    "2️⃣ Отправьте номер через появившуюся зеленую кнопку контактов.\n"
-    "3️⃣ Введите код подтверждения из Telegram (разделяя цифры точкой, например: <code>56.785</code>)."
 )
 
 def get_db():
@@ -503,16 +511,23 @@ async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
-# AUTH SCENARIO (Telethon FSM)
+# ===== ОБНОВЛЁННЫЙ ОБРАБОТЧИК АВТОРИЗАЦИИ =====
 @dp.callback_query(F.data == "btn_connect_account")
 async def start_auth_process(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="📱 Отправить телефон", request_contact=True)
-    builder.adjust(1)
-    
+    # Сначала показываем развёрнутую инструкцию
     await callback.message.answer(
-        "📱 Нажмите зеленую кнопку ниже, чтобы передать номер телефона:",
+        TEXT_CONNECT_INSTRUCTION,
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+    # Затем клавиатура для отправки контакта
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📱 Отправить номер телефона", request_contact=True)
+    builder.adjust(1)
+
+    await callback.message.answer(
+        "Теперь нажмите кнопку ниже, чтобы передать номер:",
         parse_mode="HTML",
         reply_markup=builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
     )
@@ -525,12 +540,19 @@ async def process_phone(message: Message, state: FSMContext):
     if not phone.startswith('+'): phone = '+' + phone
 
     msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
-    
+
     try:
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
-        res = await client.send_code_request(phone)
-        
+        # Таймаут на запрос кода
+        try:
+            res = await asyncio.wait_for(client.send_code_request(phone), timeout=10.0)
+        except asyncio.TimeoutError:
+            await client.disconnect()
+            await msg.edit_text("⏱️ Превышено время ожидания ответа от Telegram. Попробуйте снова.")
+            await state.clear()
+            return
+
         await state.update_data(
             phone=phone,
             phone_code_hash=res.phone_code_hash,
@@ -548,7 +570,7 @@ async def process_phone(message: Message, state: FSMContext):
         await state.set_state(AuthState.waiting_for_code)
     except Exception as e:
         logging.error(f"Ошибка при отправке кода: {e}")
-        await msg.edit_text(f"❌ Ошибка при отправке кода: {e}\nПопробуйте заново.")
+        await msg.edit_text(f"❌ Ошибка при отправке кода: {e}\nПопробуйте заново, нажав кнопку «Подключить аккаунт».")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_code, F.text)
@@ -559,6 +581,11 @@ async def process_code(message: Message, state: FSMContext):
     phone_code_hash = data.get("phone_code_hash")
     session_str = data.get("session_str")
 
+    if not phone or not phone_code_hash:
+        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Подключить аккаунт».")
+        await state.clear()
+        return
+
     client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
     await client.connect()
 
@@ -568,7 +595,7 @@ async def process_code(message: Message, state: FSMContext):
         save_session(message.from_user.id, final_session)
         await client.disconnect()
 
-        await message.answer("✅ <b>Аккаунт успешно подключен!</b> Теперь юзербот активен во всех чатах.", parse_mode="HTML")
+        await message.answer("✅ <b>Аккаунт успешно подключен!</b> Теперь юзербот активен во всех чатах, где вы его используете.", parse_mode="HTML")
         await state.clear()
     except SessionPasswordNeededError:
         await client.disconnect()
@@ -576,10 +603,15 @@ async def process_code(message: Message, state: FSMContext):
         await state.set_state(AuthState.waiting_for_2fa)
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
         await client.disconnect()
-        await message.answer("❌ Введен неверный или истекший код. Попробуйте еще раз:")
+        await message.answer(
+            f"❌ Неверный или истекший код ({str(e)}).\nПопробуйте ещё раз, или запросите новый код через кнопку.",
+            parse_mode="HTML"
+        )
+        # Состояние остаётся, чтобы пользователь мог ввести код повторно
     except Exception as e:
         await client.disconnect()
-        await message.answer(f"❌ Ошибка входа: {e}")
+        logging.error(f"Ошибка входа: {e}")
+        await message.answer(f"❌ Ошибка входа: {e}\nНачните заново через кнопку «Подключить аккаунт».")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_2fa, F.text)
@@ -602,6 +634,12 @@ async def process_2fa(message: Message, state: FSMContext):
     except Exception as e:
         await client.disconnect()
         await message.answer(f"❌ Неверный пароль или ошибка: {e}\nПопробуйте ввести пароль еще раз:")
+
+# ===== ОБНОВЛЁННЫЙ ОБРАБОТЧИК КНОПКИ "Как подключить бота" =====
+@dp.callback_query(F.data == "btn_how_to_connect")
+async def how_to_connect(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(TEXT_CONNECT_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.callback_query(F.data.startswith("check_sub:"))
 async def check_sub_callback(callback: CallbackQuery):
@@ -626,7 +664,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     if data == "btn_how_to_connect":
-        await callback.message.answer(TEXT_CONNECT_INSTRUCTION, parse_mode="HTML")
+        # уже обработано выше, но на всякий случай
         await callback.answer()
         return
     if data == "btn_admin_panel":
