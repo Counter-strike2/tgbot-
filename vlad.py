@@ -10,6 +10,9 @@ from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardB
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 from aiohttp import web
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+import json
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -21,6 +24,10 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 REQUIRED_CHANNEL = "@norikx"
 REQUIRED_CHANNEL_URL = "https://t.me/norikx"
 OWNER_TG_LINK = "https://t.me/NorikAmiri"
+
+# API ID и HASH для Telethon (нужно зарегистрировать приложение на my.telegram.org)
+API_ID = int(os.environ.get('API_ID', 12345))  # Замени на свой
+API_HASH = os.environ.get('API_HASH', 'your_api_hash_here')
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -46,8 +53,16 @@ user_usernames = {}
 user_names = {}          
 banned_users = set()     
 
+# Хранилище сессий Telethon
+user_sessions = {}       # user_id -> TelegramClient
+user_session_strings = {} # user_id -> session_string (для восстановления)
+auth_state = {}          # user_id -> {'phone': str, 'phone_code_hash': str, 'step': 'phone'|'code'}
+
 TEXT_COMMANDS_HELP = (
     "📋 <b>СПИСОК КОМАНД:</b>\n\n"
+    "🔹 <b>Авторизация:</b>\n"
+    "• <code>/login</code> — войти в аккаунт (для работы в чатах)\n"
+    "• <code>/logout</code> — выйти из аккаунта\n\n"
     "🔹 <b>Спам:</b>\n"
     "• <code>set [текст]</code> — задать текст для спама\n"
     "• <code>ss</code> — запустить спам\n"
@@ -93,6 +108,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
+                cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
                 
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
@@ -124,8 +140,51 @@ def init_db():
                 cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
                 row = cur.fetchone()
                 if row: CHANNEL_LINK = row[0]
+
+                # Загружаем сессии
+                cur.execute("SELECT user_id, session_string FROM user_sessions")
+                for row in cur.fetchall():
+                    uid, sess_str = int(row[0]), row[1]
+                    user_session_strings[uid] = sess_str
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
+
+def save_session(user_id: int, session_string: str):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO user_sessions (user_id, session_string) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET session_string = EXCLUDED.session_string", (user_id, session_string))
+                conn.commit()
+                user_session_strings[user_id] = session_string
+    except Exception as e:
+        logging.error(f"Ошибка сохранения сессии: {e}")
+
+def delete_session(user_id: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM user_sessions WHERE user_id = %s", (user_id,))
+                conn.commit()
+                user_session_strings.pop(user_id, None)
+                if user_id in user_sessions:
+                    asyncio.create_task(user_sessions[user_id].disconnect())
+                    del user_sessions[user_id]
+    except Exception as e:
+        logging.error(f"Ошибка удаления сессии: {e}")
+
+async def get_user_client(user_id: int) -> TelegramClient:
+    if user_id in user_sessions:
+        return user_sessions[user_id]
+    sess_str = user_session_strings.get(user_id)
+    if sess_str:
+        client = TelegramClient(StringSession(sess_str), API_ID, API_HASH)
+        await client.connect()
+        if await client.is_user_authorized():
+            user_sessions[user_id] = client
+            return client
+        else:
+            delete_session(user_id)
+    return None
 
 def save_user_info(user_id: int, username: str, first_name: str):
     user_id = int(user_id)
@@ -251,7 +310,109 @@ async def check_subscription(user_id: int) -> bool:
 
 init_db()
 
-async def delete_msg(chat_id, msg_id, bc_id):
+# ============ Функции для работы с Telethon ============
+async def send_message_via_client(client: TelegramClient, chat_id: int, text: str, parse_mode=None, reply_to=None):
+    try:
+        # Преобразуем chat_id в int, если строка
+        if isinstance(chat_id, str):
+            chat_id = int(chat_id)
+        # Отправка сообщения
+        result = await client.send_message(chat_id, text, parse_mode=parse_mode, reply_to=reply_to)
+        return result
+    except Exception as e:
+        logging.error(f"Ошибка отправки через Telethon: {e}")
+        raise
+
+async def edit_message_via_client(client: TelegramClient, chat_id: int, msg_id: int, text: str, parse_mode=None):
+    try:
+        await client.edit_message(chat_id, msg_id, text, parse_mode=parse_mode)
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка редактирования через Telethon: {e}")
+        return False
+
+async def delete_msg_via_client(client: TelegramClient, chat_id: int, msg_id: int):
+    try:
+        await client.delete_messages(chat_id, [msg_id])
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка удаления через Telethon: {e}")
+        return False
+
+# ============ Хендлеры для логина ============
+@dp.message(Command("login"))
+async def cmd_login(message: Message):
+    user_id = message.from_user.id
+    if user_id in user_sessions or user_id in user_session_strings:
+        await message.answer("✅ Вы уже авторизованы. Используйте /logout для выхода.")
+        return
+    auth_state[user_id] = {'step': 'phone'}
+    await message.answer("📱 Отправьте свой номер телефона в формате <code>+1234567890</code> для входа.")
+
+@dp.message(Command("logout"))
+async def cmd_logout(message: Message):
+    user_id = message.from_user.id
+    if user_id not in user_sessions and user_id not in user_session_strings:
+        await message.answer("❌ Вы не авторизованы.")
+        return
+    delete_session(user_id)
+    auth_state.pop(user_id, None)
+    await message.answer("✅ Вы вышли из аккаунта.")
+
+@dp.message(F.text)
+async def handle_auth(message: Message):
+    user_id = message.from_user.id
+    if user_id not in auth_state:
+        return
+    state = auth_state[user_id]
+    text = message.text.strip()
+    
+    if state['step'] == 'phone':
+        # Проверка номера
+        if not re.match(r'^\+?\d{10,15}$', text):
+            await message.answer("❌ Неверный формат номера. Отправьте номер в формате +1234567890")
+            return
+        # Запрос кода
+        try:
+            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            await client.connect()
+            # Отправляем запрос кода
+            result = await client.send_code_request(text)
+            auth_state[user_id] = {'step': 'code', 'phone': text, 'phone_code_hash': result.phone_code_hash, 'client': client}
+            await message.answer("🔑 Код подтверждения отправлен в Telegram. Введите его сюда (только цифры).")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при отправке кода: {str(e)}")
+            auth_state.pop(user_id, None)
+    elif state['step'] == 'code':
+        # Подтверждение кода
+        code = text.strip()
+        if not code.isdigit():
+            await message.answer("❌ Код должен состоять только из цифр. Попробуйте снова.")
+            return
+        client = state.get('client')
+        if not client:
+            await message.answer("❌ Ошибка: сессия истекла. Начните заново командой /login")
+            auth_state.pop(user_id, None)
+            return
+        try:
+            await client.sign_in(state['phone'], code, phone_code_hash=state['phone_code_hash'])
+            # Сохраняем сессию
+            session_string = client.session.save()
+            save_session(user_id, session_string)
+            user_sessions[user_id] = client
+            auth_state.pop(user_id, None)
+            await message.answer("✅ Вход выполнен успешно! Теперь бот может работать в любых чатах от вашего имени.")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка подтверждения: {str(e)}. Попробуйте заново командой /login")
+            auth_state.pop(user_id, None)
+
+# ============ Остальные функции ============
+
+async def delete_msg(chat_id, msg_id, bc_id, user_id=None):
+    if user_id and user_id in user_sessions:
+        client = user_sessions[user_id]
+        await delete_msg_via_client(client, chat_id, msg_id)
+        return
     if bc_id:
         try:
             await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[msg_id])
@@ -261,7 +422,10 @@ async def delete_msg(chat_id, msg_id, bc_id):
         await bot.delete_message(chat_id, msg_id)
     except: pass
 
-async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
+async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None, user_id=None):
+    if user_id and user_id in user_sessions:
+        client = user_sessions[user_id]
+        return await edit_message_via_client(client, chat_id, msg_id, text, parse_mode)
     try:
         kwargs = {
             "chat_id": chat_id,
@@ -272,15 +436,14 @@ async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None):
         }
         if bc_id:
             kwargs["business_connection_id"] = bc_id
-
         await bot.edit_message_text(**kwargs)
         return True
     except Exception as e:
         logging.warning(f"Ошибка редактирования: {e}")
         return False
 
-async def clear_cmd(chat_id, msg_id, bc_id):
-    await delete_msg(chat_id, msg_id, bc_id)
+async def clear_cmd(chat_id, msg_id, bc_id, user_id=None):
+    await delete_msg(chat_id, msg_id, bc_id, user_id)
 
 async def global_typing_loop():
     while True:
@@ -296,14 +459,18 @@ async def global_typing_loop():
             logging.error(f"Ошибка автоматической печати: {e}")
             await asyncio.sleep(4)
 
-async def spam_worker(chat_id, bc_id, reply_to, text):
+async def spam_worker(chat_id, bc_id, reply_to, text, user_id=None):
     try:
         words = text.split()
         while True:
             for word in words:
-                kwargs = {"chat_id": chat_id, "text": word, "reply_to_message_id": reply_to}
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                if user_id and user_id in user_sessions:
+                    client = user_sessions[user_id]
+                    await send_message_via_client(client, chat_id, word, reply_to=reply_to)
+                else:
+                    kwargs = {"chat_id": chat_id, "text": word, "reply_to_message_id": reply_to}
+                    if bc_id: kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
                 await asyncio.sleep(0.3)
     except asyncio.CancelledError: pass
 
@@ -720,11 +887,11 @@ async def handle(message: Message):
         # 1. ПРОВЕРКА МУТА (для всех пользователей)
         # ======================================================
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
-            await delete_msg(chat_id, message.message_id, bc_id)
+            await delete_msg(chat_id, message.message_id, bc_id, uid)
             return
 
         # ======================================================
-        # 2. КАЛЬКУЛЯТОР (работает для ВСЕХ, даже не владельцев)
+        # 2. КАЛЬКУЛЯТОР (работает для ВСЕХ)
         # ======================================================
         text_raw = message.text
         if text_raw and is_calculator_expression(text_raw):
@@ -734,31 +901,33 @@ async def handle(message: Message):
                     formatted_result = f"{result:.10f}".rstrip('0').rstrip('.')
                 else:
                     formatted_result = str(result)
-                
                 new_text = f"{text_raw} = <b>{formatted_result}</b>"
-                # Пытаемся отредактировать исходное сообщение (в бизнес-чатах должно работать)
-                edited = await edit_message(chat_id, message.message_id, new_text, bc_id, parse_mode="HTML")
+                # Пытаемся отредактировать исходное сообщение
+                edited = await edit_message(chat_id, message.message_id, new_text, bc_id, parse_mode="HTML", user_id=uid if uid in user_sessions else None)
                 if not edited:
-                    # Если не удалось (например, нет прав), отправляем новое сообщение как ответ
-                    kwargs = {
-                        "chat_id": chat_id,
-                        "text": new_text,
-                        "parse_mode": "HTML",
-                        "reply_to_message_id": message.message_id
-                    }
-                    if bc_id: kwargs["business_connection_id"] = bc_id
-                    await bot.send_message(**kwargs)
-                return  # выходим, чтобы не обрабатывать дальше
+                    # Если не удалось, отправляем новое сообщение
+                    try:
+                        if uid in user_sessions:
+                            client = user_sessions[uid]
+                            await send_message_via_client(client, chat_id, new_text, parse_mode='HTML')
+                        else:
+                            kwargs = {"chat_id": chat_id, "text": new_text, "parse_mode": "HTML"}
+                            if bc_id: kwargs["business_connection_id"] = bc_id
+                            await bot.send_message(**kwargs)
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки результата калькулятора: {e}")
+                return
             elif error:
-                # Если ошибка - отправляем сообщение с ошибкой
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": error,
-                    "parse_mode": "HTML",
-                    "reply_to_message_id": message.message_id
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                try:
+                    if uid in user_sessions:
+                        client = user_sessions[uid]
+                        await send_message_via_client(client, chat_id, error, parse_mode='HTML')
+                    else:
+                        kwargs = {"chat_id": chat_id, "text": error, "parse_mode": "HTML"}
+                        if bc_id: kwargs["business_connection_id"] = bc_id
+                        await bot.send_message(**kwargs)
+                except Exception as e:
+                    logging.error(f"Ошибка отправки ошибки калькулятора: {e}")
                 return
 
         # ======================================================
@@ -767,35 +936,33 @@ async def handle(message: Message):
         if not is_from_me:
             return
 
-        # Доп. проверка мута для владельца (на случай, если он замучен)
+        # Доп. проверка мута для владельца
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
-            await delete_msg(chat_id, message.message_id, bc_id)
+            await delete_msg(chat_id, message.message_id, bc_id, uid)
             return
 
         # Защита от реплаев
         if chat_id in reply_guard_chats and message.reply_to_message:
-            await delete_msg(chat_id, message.message_id, bc_id)
+            await delete_msg(chat_id, message.message_id, bc_id, uid)
             return
 
         # Проверка подписки
         if bc_id:
             is_subbed = await check_subscription(uid)
             if not is_subbed:
-                await clear_cmd(chat_id, message.message_id, bc_id)
+                await clear_cmd(chat_id, message.message_id, bc_id, uid)
                 user_link = get_user_mention(uid, message.from_user.first_name)
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
                     [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
                 ])
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!",
-                    "parse_mode": "HTML",
-                    "reply_markup": kb
-                }
-                if bc_id: 
-                    kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                if uid in user_sessions:
+                    client = user_sessions[uid]
+                    await send_message_via_client(client, chat_id, f"⚠️ {user_link}, подпишитесь на канал для использования бота!", parse_mode='HTML', reply_to=message.message_id)
+                else:
+                    kwargs = {"chat_id": chat_id, "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!", "parse_mode": "HTML", "reply_markup": kb}
+                    if bc_id: kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
                 return
 
         # Дальше идут команды (только для владельца)
@@ -806,15 +973,15 @@ async def handle(message: Message):
         task_key = (chat_id, bc_id)
         current_owner = owner_id or uid
 
-        # Обработка команд (как было)
+        # Обработка команд
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low == ".старт":
             save_setting(chat_id, 'enabled_links', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low.startswith("+линк"):
@@ -824,7 +991,7 @@ async def handle(message: Message):
                 if not new_link.startswith("http"):
                     new_link = "https://t.me/" + new_link.lstrip("@")
                 save_channel_link(new_link)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low.startswith("подмена "):
@@ -835,50 +1002,50 @@ async def handle(message: Message):
                 else:
                     mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
                     save_substitution(chat_id, parts[1], mode)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low == "печать -":
             save_setting(chat_id, 'typing_disabled', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low == "печать +":
             save_setting(chat_id, 'typing_disabled', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low == "+реплай":
             save_setting(chat_id, 'reply_guard', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low == "-реплай":
             save_setting(chat_id, 'reply_guard', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low == "ss":
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             text = user_spam_texts.get(str(current_owner))
             if not text:
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": "⚠️ Сначала задайте текст через команду: <code>set [текст]</code>",
-                    "parse_mode": "HTML"
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                if uid in user_sessions:
+                    client = user_sessions[uid]
+                    await send_message_via_client(client, chat_id, "⚠️ Сначала задайте текст через команду: <code>set [текст]</code>", parse_mode='HTML')
+                else:
+                    kwargs = {"chat_id": chat_id, "text": "⚠️ Сначала задайте текст через команду: <code>set [текст]</code>", "parse_mode": "HTML"}
+                    if bc_id: kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
                 return
 
             reply_to = message.reply_to_message.message_id if message.reply_to_message else None
             if task_key in spam_tasks: 
                 spam_tasks[task_key].cancel()
-            spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
+            spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text, uid if uid in user_sessions else None))
             return
 
         if low == "dd":
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             if task_key in spam_tasks:
                 spam_tasks[task_key].cancel()
                 del spam_tasks[task_key]
@@ -886,7 +1053,7 @@ async def handle(message: Message):
 
         if low.startswith("set "):
             save_spam_text(str(current_owner), text_raw[4:].strip())
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             return
 
         if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
@@ -903,16 +1070,16 @@ async def handle(message: Message):
                 
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
-                await clear_cmd(chat_id, message.message_id, bc_id)
+                await clear_cmd(chat_id, message.message_id, bc_id, uid)
                 
                 user_link = get_user_mention(target_id, target_name)
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.",
-                    "parse_mode": "HTML"
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                if uid in user_sessions:
+                    client = user_sessions[uid]
+                    await send_message_via_client(client, chat_id, f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.", parse_mode='HTML')
+                else:
+                    kwargs = {"chat_id": chat_id, "text": f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.", "parse_mode": "HTML"}
+                    if bc_id: kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
             except: 
                 pass
             return
@@ -927,55 +1094,55 @@ async def handle(message: Message):
                 target_name = message.chat.first_name or "Пользователь"
             
             mutes.pop(target_id, None)
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             user_link = get_user_mention(target_id, target_name)
             
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
+            if uid in user_sessions:
+                client = user_sessions[uid]
+                await send_message_via_client(client, chat_id, f"🔊 С {user_link} снят <b>МУТ</b>.", parse_mode='HTML')
+            else:
+                kwargs = {"chat_id": chat_id, "text": f"🔊 С {user_link} снят <b>МУТ</b>.", "parse_mode": "HTML"}
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
             return
 
         if low in ["мой ид", "моид"]:
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             my_link = get_user_mention(uid, message.from_user.first_name)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🆔 {my_link} (<code>{uid}</code>)",
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
+            if uid in user_sessions:
+                client = user_sessions[uid]
+                await send_message_via_client(client, chat_id, f"🆔 {my_link} (<code>{uid}</code>)", parse_mode='HTML')
+            else:
+                kwargs = {"chat_id": chat_id, "text": f"🆔 {my_link} (<code>{uid}</code>)", "parse_mode": "HTML"}
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
             return
 
         if low in ["твой ид", "твоид"]:
-            await clear_cmd(chat_id, message.message_id, bc_id)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
             target_user = message.reply_to_message.from_user if message.reply_to_message else None
             target_id = target_user.id if target_user else (chat_id if chat_id > 0 else None)
             if target_id:
                 t_fname = target_user.first_name if target_user else None
                 t_link = get_user_mention(target_id, t_fname)
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"🆔 {t_link} (<code>{target_id}</code>)",
-                    "parse_mode": "HTML"
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
+                if uid in user_sessions:
+                    client = user_sessions[uid]
+                    await send_message_via_client(client, chat_id, f"🆔 {t_link} (<code>{target_id}</code>)", parse_mode='HTML')
+                else:
+                    kwargs = {"chat_id": chat_id, "text": f"🆔 {t_link} (<code>{target_id}</code>)", "parse_mode": "HTML"}
+                    if bc_id: kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
             return
 
         if low == "!команды":
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": TEXT_COMMANDS_HELP,
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
+            await clear_cmd(chat_id, message.message_id, bc_id, uid)
+            if uid in user_sessions:
+                client = user_sessions[uid]
+                await send_message_via_client(client, chat_id, TEXT_COMMANDS_HELP, parse_mode='HTML')
+            else:
+                kwargs = {"chat_id": chat_id, "text": TEXT_COMMANDS_HELP, "parse_mode": "HTML"}
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
             return
 
         # Обработка подмены текста (только для владельца)
@@ -1003,7 +1170,7 @@ async def handle(message: Message):
                 parse_mode = "HTML"
         
         if need_modify:
-            await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
+            await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode, user_id=uid if uid in user_sessions else None)
                 
     except Exception as e:
         logging.error(f"❌ Ошибка обработки сообщения: {e}")
@@ -1031,15 +1198,18 @@ async def global_update_handler(update: Update, bot: Bot):
                         f"💬 {cached['text']}"
                     )
 
-                    kwargs = {
-                        "chat_id": cached_chat_id,
-                        "text": text_to_send,
-                        "parse_mode": "HTML"
-                    }
-                    bc_target = bc_id or cached.get("bc_id")
-                    if bc_target: kwargs["business_connection_id"] = bc_target
-
-                    await bot.send_message(**kwargs)
+                    if uid in user_sessions:
+                        client = user_sessions[uid]
+                        await send_message_via_client(client, cached_chat_id, text_to_send, parse_mode='HTML')
+                    else:
+                        kwargs = {
+                            "chat_id": cached_chat_id,
+                            "text": text_to_send,
+                            "parse_mode": "HTML"
+                        }
+                        bc_target = bc_id or cached.get("bc_id")
+                        if bc_target: kwargs["business_connection_id"] = bc_target
+                        await bot.send_message(**kwargs)
                     msg_cache.pop((cached_chat_id, cached_msg_id), None)
     except Exception as e:
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
