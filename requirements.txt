@@ -5,3 +5,4 @@ google-genai
 SpeechRecognition==3.10.4
 pydub
 requests
+telethon
