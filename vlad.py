@@ -6,7 +6,7 @@ import logging
 import math
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Contact
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 from aiohttp import web
@@ -24,14 +24,14 @@ REQUIRED_CHANNEL = "@norikx"
 REQUIRED_CHANNEL_URL = "https://t.me/norikx"
 OWNER_TG_LINK = "https://t.me/NorikAmiri"
 
-# Telethon API (зарегистрируйте приложение на my.telegram.org)
-API_ID = int(os.environ.get('API_ID', 12345))  # замените на свой
-API_HASH = os.environ.get('API_HASH', 'your_api_hash_here')
+# !!! ЗАМЕНИТЕ ЭТИ ЗНАЧЕНИЯ НА СВОИ С my.telegram.org !!!
+API_ID = int(os.environ.get('API_ID', 12345))   # ваш api_id
+API_HASH = os.environ.get('API_HASH', 'your_api_hash_here')  # ваш api_hash
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилища состояния (все как было)
+# Хранилища состояния
 mutes = {}
 spam_tasks = {}
 typing_tasks = {}
@@ -59,25 +59,23 @@ auth_state = {}
 TEXT_COMMANDS_HELP = (
     "📋 <b>СПИСОК КОМАНД:</b>\n\n"
     "🔹 <b>Авторизация:</b>\n"
-    "• <code>/login</code> — войти в аккаунт (для работы в любых чатах)\n"
+    "• <code>/login</code> — войти в аккаунт\n"
     "• <code>/logout</code> — выйти из аккаунта\n\n"
     "🔹 <b>Спам:</b>\n"
     "• <code>set [текст]</code> — задать текст для спама\n"
     "• <code>ss</code> — запустить спам\n"
     "• <code>dd</code> — остановить спам\n\n"
-    "🔹 <b>Модерация и управление:</b>\n"
+    "🔹 <b>Модерация:</b>\n"
     "• <code>.мут [минуты]</code> / <code>.размут</code> — мут/размут\n"
-    "• <code>печать +</code> / <code>печать -</code> — вкл/выкл постоянную печать\n"
-    "• <code>подмена [текст] [1/2/выкл]</code> — авто-подмена сообщений\n"
-    "• <code>.старт</code> / <code>.стоп</code> — вкл/выкл авто-ссылку\n"
-    "• <code>+реплай</code> / <code>-реплай</code> — защита от ответов реплаем\n"
-    "• <code>+линк [ссылка]</code> — установить авто-ссылку\n"
-    "• <code>мой ид</code> / <code>твой ид</code> — узнать ID\n"
-    "• <code>!команды</code> — меню команд\n\n"
+    "• <code>печать +</code> / <code>печать -</code> — печать\n"
+    "• <code>подмена [текст] [1/2/выкл]</code> — подмена\n"
+    "• <code>.старт</code> / <code>.стоп</code> — авто-ссылка\n"
+    "• <code>+реплай</code> / <code>-реплай</code> — защита от реплаев\n"
+    "• <code>+линк [ссылка]</code> — установить ссылку\n"
+    "• <code>мой ид</code> / <code>твой ид</code> — ID\n"
+    "• <code>!команды</code> — меню\n\n"
     "🔹 <b>Калькулятор:</b>\n"
-    "• Просто напишите пример: <code>1458+2414</code> или <code>100*5-30</code>\n"
-    "• Поддерживаются: <code>+ - * / ** % sqrt()</code>\n"
-    "• Примеры: <code>2+2*2</code>, <code>sqrt(16)</code>, <code>10%3</code>"
+    "• Пишите пример: <code>1458+2414</code>, <code>sqrt(16)</code>"
 )
 
 TEXT_CONNECT_INSTRUCTION = (
@@ -91,7 +89,7 @@ TEXT_CONNECT_INSTRUCTION = (
     "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы."
 )
 
-# ---------- Работа с БД (без изменений) ----------
+# ---------- РАБОТА С БАЗОЙ ДАННЫХ ----------
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -110,7 +108,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
                 cur.execute("ALTER TABLE user_map ADD COLUMN IF NOT EXISTS first_name TEXT")
                 conn.commit()
-                
+
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
@@ -282,7 +280,7 @@ async def check_subscription(user_id: int) -> bool:
 
 init_db()
 
-# ---------- Вспомогательные функции для работы с Telethon ----------
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ TELEGRAM API ----------
 async def get_user_client(user_id: int):
     if user_id in user_sessions:
         return user_sessions[user_id]
@@ -320,7 +318,7 @@ async def delete_msg_via_client(client, chat_id, msg_id):
         logging.error(f"Ошибка удаления через Telethon: {e}")
         return False
 
-# ---------- Базовые функции для сообщений (общие) ----------
+# ---------- ОБЩИЕ ФУНКЦИИ ДЛЯ СООБЩЕНИЙ ----------
 async def delete_msg(chat_id, msg_id, bc_id, user_id=None):
     if user_id and user_id in user_sessions:
         client = user_sessions[user_id]
@@ -351,7 +349,7 @@ async def edit_message(chat_id, msg_id, text, bc_id, parse_mode=None, user_id=No
 async def clear_cmd(chat_id, msg_id, bc_id, user_id=None):
     await delete_msg(chat_id, msg_id, bc_id, user_id)
 
-# ---------- Остальные функции (типинг, спам, мут, промо, и т.д.) ----------
+# ---------- ФОНОВЫЕ ЗАДАЧИ ----------
 async def global_typing_loop():
     while True:
         try:
@@ -499,18 +497,17 @@ async def handle_bc(bc):
     except Exception as e:
         logging.error(f"Не удалось отправить приветствие: {e}")
 
-# ---------- СТАРТОВОЕ МЕНЮ (ОБНОВЛЁННОЕ) ----------
+# ---------- СТАРТОВОЕ МЕНЮ ----------
 def get_start_keyboard(user_id: int):
     buttons = []
     if user_id == ADMIN_ID:
         buttons.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="btn_admin_panel")])
     buttons.append([InlineKeyboardButton(text="📖 Функционал", callback_data="btn_features")])
     buttons.append([InlineKeyboardButton(text="⚡ Как подключить бота", callback_data="btn_how_to_connect")])
-    # Проверяем, авторизован ли пользователь
     if user_id in user_sessions or user_id in user_session_strings:
         buttons.append([InlineKeyboardButton(text="🔓 Выйти из аккаунта", callback_data="btn_logout")])
     else:
-        buttons.append([InlineKeyboardButton(text="📱 Вход в аккаунт (работа в чатах)", callback_data="btn_login")])
+        buttons.append([InlineKeyboardButton(text="📱 Подключить аккаунт", callback_data="btn_login")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @dp.message(Command("start"))
@@ -523,8 +520,8 @@ async def cmd_start(message: Message):
     await message.answer(
         f"👋 Добро пожаловать, {user_mention}!\n\n"
         f"💬 <b>Обратите внимание:</b> Бот работает только в личных сообщениях!\n\n"
-        f"🔹 Для работы в <b>любых чатах</b> (даже там, где бот не добавлен) нажмите кнопку «Вход в аккаунт» и авторизуйтесь.\n"
-        f"🔹 При входе бот получает доступ к отправке сообщений от вашего имени, но <b>не читает ваши переписки</b> и не имеет доступа к аккаунту.\n"
+        f"🔹 Для работы в <b>любых чатах</b> нажмите кнопку «Подключить аккаунт» и авторизуйтесь.\n"
+        f"🔹 Бот <b>НЕ читает</b> ваши личные переписки и не имеет доступа к аккаунту.\n"
         f"🔹 Вся ответственность за действия бота лежит на вас.\n\n"
         f"Выберите раздел:",
         parse_mode="HTML", reply_markup=keyboard
@@ -552,39 +549,38 @@ async def process_callbacks(callback: CallbackQuery):
         await callback.answer()
         return
 
-    # ---------- НОВАЯ КНОПКА: ВХОД ----------
+    # ----- КНОПКА "Подключить аккаунт" -----
     if data == "btn_login":
-        # Проверяем, не авторизован ли уже
         if uid in user_sessions or uid in user_session_strings:
-            await callback.message.edit_text("✅ Вы уже авторизованы. Используйте кнопку «Выйти из аккаунта».")
-            await callback.answer()
+            await callback.answer("Вы уже авторизованы", show_alert=True)
             return
-        # Начинаем процесс входа
-        auth_state[uid] = {'step': 'phone'}
+        # Отправляем сообщение с кнопкой для отправки контакта
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Отправить номер телефона", request_contact=True)]
+        ])
         await callback.message.edit_text(
-            "📱 <b>Вход в аккаунт для работы в чатах</b>\n\n"
+            "📱 <b>Подключение аккаунта</b>\n\n"
             "⚠️ <b>Важно:</b>\n"
-            "• Бот будет отправлять сообщения от вашего имени в любые чаты.\n"
+            "• Бот будет отправлять сообщения от вашего имени в чаты, где вы его используете.\n"
             "• Бот <b>НЕ читает</b> ваши личные переписки и не имеет доступа к аккаунту.\n"
             "• Вы несёте полную ответственность за действия бота.\n\n"
-            "Отправьте свой номер телефона в формате <code>+71234567890</code>",
-            parse_mode="HTML"
+            "Нажмите кнопку ниже, чтобы отправить свой номер телефона.",
+            parse_mode="HTML", reply_markup=kb
         )
         await callback.answer()
         return
 
-    # ---------- КНОПКА: ВЫХОД ----------
+    # ----- КНОПКА "Выйти из аккаунта" -----
     if data == "btn_logout":
         delete_session(uid)
         auth_state.pop(uid, None)
-        await callback.message.edit_text("✅ Вы вышли из аккаунта. Теперь бот не может отправлять сообщения от вашего имени.")
-        # Обновляем клавиатуру
+        await callback.message.edit_text("✅ Вы вышли из аккаунта.")
         keyboard = get_start_keyboard(uid)
         await callback.message.edit_reply_markup(reply_markup=keyboard)
         await callback.answer()
         return
 
-    # Обработка админских кнопок (без изменений)
+    # Админские кнопки
     if uid != ADMIN_ID:
         await callback.answer()
         return
@@ -666,52 +662,68 @@ async def resolve_user_id(target_raw: str):
         return int(target)
     return None
 
-# ---------- ОБРАБОТЧИК СООБЩЕНИЙ (ЛОГИН / КОД) ----------
+# ---------- ОБРАБОТЧИК КОНТАКТА ----------
+@dp.message(F.contact)
+async def handle_contact(message: Message):
+    user_id = message.from_user.id
+    # Если не в процессе входа (не нажали кнопку), просим сначала нажать
+    if user_id not in auth_state:
+        await message.answer("Сначала нажмите кнопку «Подключить аккаунт» в главном меню.")
+        return
+    contact = message.contact
+    if not contact:
+        return
+    phone = contact.phone_number
+    if not phone:
+        await message.answer("Не удалось получить номер телефона. Попробуйте ещё раз.")
+        return
+    if user_id in user_sessions or user_id in user_session_strings:
+        await message.answer("Вы уже авторизованы. Используйте «Выйти из аккаунта» для смены.")
+        return
+    try:
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        await client.connect()
+        result = await client.send_code_request(phone)
+        auth_state[user_id] = {'step': 'code', 'phone': phone, 'phone_code_hash': result.phone_code_hash, 'client': client}
+        await message.answer("🔑 Код подтверждения отправлен в Telegram. Введите его сюда (только цифры).")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при отправке кода: {str(e)}\n\nУбедитесь, что API_ID и API_HASH правильные.")
+        auth_state.pop(user_id, None)
+        logging.error(f"Ошибка отправки кода: {e}")
+
+# ---------- ОБРАБОТЧИК КОДА (текстовые сообщения, если не команды) ----------
 @dp.message(F.text)
-async def handle_auth(message: Message):
+async def handle_auth_code(message: Message):
     user_id = message.from_user.id
     if user_id not in auth_state:
         return
     state = auth_state[user_id]
-    text = message.text.strip()
+    if state['step'] != 'code':
+        return
+    code = message.text.strip()
+    if not code.isdigit():
+        await message.answer("❌ Код должен состоять только из цифр. Попробуйте снова.")
+        return
+    client = state.get('client')
+    if not client:
+        await message.answer("❌ Ошибка: сессия истекла. Начните заново через кнопку «Подключить аккаунт».")
+        auth_state.pop(user_id, None)
+        return
+    try:
+        await client.sign_in(state['phone'], code, phone_code_hash=state['phone_code_hash'])
+        session_string = client.session.save()
+        save_session(user_id, session_string)
+        user_sessions[user_id] = client
+        auth_state.pop(user_id, None)
+        await message.answer("✅ Вход выполнен успешно! Теперь бот может работать в чатах от вашего имени.")
+        # Обновляем клавиатуру в стартовом меню (можно отправить новое сообщение)
+        keyboard = get_start_keyboard(user_id)
+        await message.answer("Главное меню обновлено.", reply_markup=keyboard)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка подтверждения: {str(e)}. Попробуйте заново через кнопку «Подключить аккаунт».")
+        auth_state.pop(user_id, None)
 
-    if state['step'] == 'phone':
-        if not re.match(r'^\+?\d{10,15}$', text):
-            await message.answer("❌ Неверный формат номера. Отправьте номер в формате +71234567890")
-            return
-        try:
-            client = TelegramClient(StringSession(), API_ID, API_HASH)
-            await client.connect()
-            result = await client.send_code_request(text)
-            auth_state[user_id] = {'step': 'code', 'phone': text, 'phone_code_hash': result.phone_code_hash, 'client': client}
-            await message.answer("🔑 Код подтверждения отправлен в Telegram. Введите его сюда (только цифры).")
-        except Exception as e:
-            await message.answer(f"❌ Ошибка при отправке кода: {str(e)}")
-            auth_state.pop(user_id, None)
-    elif state['step'] == 'code':
-        code = text.strip()
-        if not code.isdigit():
-            await message.answer("❌ Код должен состоять только из цифр. Попробуйте снова.")
-            return
-        client = state.get('client')
-        if not client:
-            await message.answer("❌ Ошибка: сессия истекла. Начните заново через кнопку «Вход в аккаунт».")
-            auth_state.pop(user_id, None)
-            return
-        try:
-            await client.sign_in(state['phone'], code, phone_code_hash=state['phone_code_hash'])
-            session_string = client.session.save()
-            save_session(user_id, session_string)
-            user_sessions[user_id] = client
-            auth_state.pop(user_id, None)
-            await message.answer("✅ Вход выполнен успешно! Теперь бот может работать в любых чатах от вашего имени.")
-            # Обновляем клавиатуру в последнем сообщении (если есть)
-            # Можно попробовать отредактировать предыдущее сообщение, но проще отправить новое
-        except Exception as e:
-            await message.answer(f"❌ Ошибка подтверждения: {str(e)}. Попробуйте заново через кнопку «Вход в аккаунт».")
-            auth_state.pop(user_id, None)
-
-# ---------- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ (ВСЕ ФУНКЦИИ) ----------
+# ---------- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ (все функции) ----------
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
@@ -758,12 +770,12 @@ async def handle(message: Message):
             msg_cache[cache_key] = {"text": message.text, "user": message.from_user.first_name or "Пользователь", "user_id": uid, "chat_id": chat_id, "bc_id": bc_id}
             if len(msg_cache) > 5000: msg_cache.pop(next(iter(msg_cache)))
 
-        # ---------- МУТ (для всех) ----------
+        # ---------- МУТ ----------
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id, uid)
             return
 
-        # ---------- КАЛЬКУЛЯТОР (для всех) ----------
+        # ---------- КАЛЬКУЛЯТОР ----------
         text_raw = message.text
         if text_raw and is_calculator_expression(text_raw):
             result, error = calculate_expression(text_raw)
@@ -799,7 +811,7 @@ async def handle(message: Message):
                     logging.error(f"Ошибка отправки ошибки калькулятора: {e}")
                 return
 
-        # ---------- ДАЛЕЕ ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА ----------
+        # ---------- ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА ----------
         if not is_from_me:
             return
 
@@ -1006,6 +1018,20 @@ async def handle(message: Message):
 
     except Exception as e:
         logging.error(f"❌ Ошибка обработки сообщения: {e}")
+
+@dp.callback_query(F.data.startswith("check_sub:"))
+async def check_sub_callback(callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    if callback.from_user.id != user_id:
+        await callback.answer("Кнопка предназначена для владельца!", show_alert=True)
+        return
+    is_subbed = await check_subscription(user_id)
+    if is_subbed:
+        try: await callback.message.delete()
+        except: pass
+        await callback.answer("✅ Подписка подтверждена!", show_alert=True)
+    else:
+        await callback.answer("❌ Подписка не обнаружена!", show_alert=True)
 
 # ---------- ОБРАБОТЧИК УДАЛЕНИЙ ----------
 @dp.update()
