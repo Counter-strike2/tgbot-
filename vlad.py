@@ -421,38 +421,25 @@ async def clean_inactive_connections():
             recent_business_chats[:] = [item for item in recent_business_chats if item[1] != bc_id]
             logging.info(f"Удалено неактивное бизнес-подключение {bc_id}")
 
-# ============ НОВЫЙ КАЛЬКУЛЯТОР ============
+# ============ КАЛЬКУЛЯТОР ============
 def calculate_expression(expression: str) -> tuple:
     """
     Вычисляет математическое выражение с поддержкой:
     +, -, *, /, ** (степень), % (остаток), sqrt()
     """
     try:
-        # Удаляем пробелы
         expr = expression.replace(" ", "")
-        
-        # Проверяем, что выражение содержит только разрешенные символы
         allowed_chars = r'[\d+\-*/()%**sqrt. ]'
         if not re.match(r'^[\d+\-*/()%**sqrt.]+$', expr):
             return None, "❌ Некорректное выражение"
         
-        # Заменяем sqrt на math.sqrt
         expr = expr.replace("sqrt", "math.sqrt")
-        
-        # Безопасное вычисление с использованием ограниченного пространства имен
-        safe_dict = {
-            "math": math,
-            "__builtins__": None
-        }
-        
-        # Вычисляем
+        safe_dict = {"math": math, "__builtins__": None}
         result = eval(expr, safe_dict)
         
-        # Проверяем результат
         if result is None:
             return None, "❌ Ошибка вычисления"
         
-        # Форматируем результат
         if isinstance(result, float):
             if result.is_integer():
                 result = int(result)
@@ -467,36 +454,23 @@ def calculate_expression(expression: str) -> tuple:
         return None, f"❌ Ошибка: {str(e)}"
 
 def is_calculator_expression(text: str) -> bool:
-    """
-    Проверяет, является ли текст математическим выражением
-    """
     if not text:
         return False
-    
-    # Удаляем пробелы для проверки
     cleaned = text.replace(" ", "")
-    
-    # Проверяем, есть ли в тексте математические операторы
     math_patterns = [
-        r'[\d]+[\+\-\*/%][\d]+',  # базовые операции с числами
-        r'[\d]+\*\*[\d]+',        # степень
-        r'sqrt\([\d]+\)',         # квадратный корень
-        r'[\d]+%[\d]+'            # остаток от деления
+        r'[\d]+[\+\-\*/%][\d]+',
+        r'[\d]+\*\*[\d]+',
+        r'sqrt\([\d]+\)',
+        r'[\d]+%[\d]+'
     ]
-    
-    # Если есть хоть один математический оператор
     for pattern in math_patterns:
         if re.search(pattern, cleaned):
             return True
-    
-    # Проверяем, что текст состоит только из цифр, операторов и скобок
-    # и содержит хотя бы один оператор
     if re.match(r'^[\d+\-*/()%**sqrt.]+$', cleaned):
         operators = ['+', '-', '*', '/', '%', '**']
         for op in operators:
             if op in cleaned:
                 return True
-    
     return False
 # ==========================================
 
@@ -742,45 +716,53 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # Проверка мута ДО проверки is_from_me
+        # Проверка мута (для всех пользователей)
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # ============ НОВЫЙ КАЛЬКУЛЯТОР ============
-        # Проверяем, является ли сообщение математическим выражением
-        # И обрабатываем его ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ (не только владельцев)
+        # ============ КАЛЬКУЛЯТОР (для ВСЕХ пользователей) ============
         text_raw = message.text
         if text_raw and is_calculator_expression(text_raw):
             result, error = calculate_expression(text_raw)
             if result is not None:
-                # Форматируем ответ
                 if isinstance(result, float):
                     formatted_result = f"{result:.10f}".rstrip('0').rstrip('.')
                 else:
                     formatted_result = str(result)
                 
                 new_text = f"{text_raw} = <b>{formatted_result}</b>"
-                await edit_message(chat_id, message.message_id, new_text, bc_id, parse_mode="HTML")
-                return
+                # Пытаемся отредактировать исходное сообщение
+                edited = await edit_message(chat_id, message.message_id, new_text, bc_id, parse_mode="HTML")
+                if not edited:
+                    # Если не удалось (нет прав), отправляем новое сообщение как ответ
+                    kwargs = {
+                        "chat_id": chat_id,
+                        "text": new_text,
+                        "parse_mode": "HTML",
+                        "reply_to_message_id": message.message_id
+                    }
+                    if bc_id: kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
+                return  # выходим, чтобы не обрабатывать дальше
             elif error:
                 # Если ошибка - отправляем сообщение с ошибкой
-                error_msg = f"❌ {error}"
                 kwargs = {
                     "chat_id": chat_id,
-                    "text": error_msg,
-                    "parse_mode": "HTML"
+                    "text": error,
+                    "parse_mode": "HTML",
+                    "reply_to_message_id": message.message_id
                 }
                 if bc_id: kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
                 return
-        # ============================================
+        # =============================================================
 
-        # Если сообщение НЕ от владельца бизнес-аккаунта - игнорируем
+        # Если сообщение НЕ от владельца бизнес-аккаунта - игнорируем все остальное
         if not is_from_me:
             return
 
-        # Проверка мута (дополнительная проверка для владельца)
+        # Проверка мута (дополнительная для владельца)
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
