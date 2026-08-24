@@ -716,12 +716,16 @@ async def handle(message: Message):
             if len(msg_cache) > 5000:
                 msg_cache.pop(next(iter(msg_cache)))
 
-        # Проверка мута (для всех пользователей)
+        # ======================================================
+        # 1. ПРОВЕРКА МУТА (для всех пользователей)
+        # ======================================================
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # ============ КАЛЬКУЛЯТОР (для ВСЕХ пользователей) ============
+        # ======================================================
+        # 2. КАЛЬКУЛЯТОР (работает для ВСЕХ, даже не владельцев)
+        # ======================================================
         text_raw = message.text
         if text_raw and is_calculator_expression(text_raw):
             result, error = calculate_expression(text_raw)
@@ -732,10 +736,10 @@ async def handle(message: Message):
                     formatted_result = str(result)
                 
                 new_text = f"{text_raw} = <b>{formatted_result}</b>"
-                # Пытаемся отредактировать исходное сообщение
+                # Пытаемся отредактировать исходное сообщение (в бизнес-чатах должно работать)
                 edited = await edit_message(chat_id, message.message_id, new_text, bc_id, parse_mode="HTML")
                 if not edited:
-                    # Если не удалось (нет прав), отправляем новое сообщение как ответ
+                    # Если не удалось (например, нет прав), отправляем новое сообщение как ответ
                     kwargs = {
                         "chat_id": chat_id,
                         "text": new_text,
@@ -756,23 +760,24 @@ async def handle(message: Message):
                 if bc_id: kwargs["business_connection_id"] = bc_id
                 await bot.send_message(**kwargs)
                 return
-        # =============================================================
 
-        # Если сообщение НЕ от владельца бизнес-аккаунта - игнорируем все остальное
+        # ======================================================
+        # 3. ДАЛЕЕ – ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА БИЗНЕС-АККАУНТА
+        # ======================================================
         if not is_from_me:
             return
 
-        # Проверка мута (дополнительная для владельца)
+        # Доп. проверка мута для владельца (на случай, если он замучен)
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # Защита от реплаев (только для владельца)
+        # Защита от реплаев
         if chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        # Проверка подписки (только для владельца)
+        # Проверка подписки
         if bc_id:
             is_subbed = await check_subscription(uid)
             if not is_subbed:
@@ -793,7 +798,7 @@ async def handle(message: Message):
                 await bot.send_message(**kwargs)
                 return
 
-        # Дальше идут команды только для владельца
+        # Дальше идут команды (только для владельца)
         if not text_raw:
             return
             
@@ -801,7 +806,7 @@ async def handle(message: Message):
         task_key = (chat_id, bc_id)
         current_owner = owner_id or uid
 
-        # Обработка команд
+        # Обработка команд (как было)
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
