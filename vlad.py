@@ -277,15 +277,6 @@ def is_chat_promo_delivered(chat_id):
         logging.error(f"Ошибка проверки доставленной рекламы: {e}")
         return False
 
-async def check_subscription(user_id: int) -> bool:
-    if user_id == ADMIN_ID: return True
-    try:
-        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
-        return member.status in ["creator", "administrator", "member"]
-    except Exception as e:
-        logging.warning(f"Ошибка проверки подписки: {e}")
-        return True
-
 init_db()
 
 # ---- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----
@@ -536,6 +527,12 @@ async def group_info(callback: CallbackQuery):
 # ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON =====
 @dp.callback_query(F.data == "btn_connect_account")
 async def start_auth_process(callback: CallbackQuery, state: FSMContext):
+    # Проверяем, не идет ли уже авторизация
+    current_state = await state.get_state()
+    if current_state in (AuthState.waiting_for_phone.state, AuthState.waiting_for_code.state, AuthState.waiting_for_2fa.state):
+        await callback.answer("⏳ Авторизация уже выполняется. Дождитесь завершения или введите код.", show_alert=True)
+        return
+    
     await callback.answer()
     builder = ReplyKeyboardBuilder()
     builder.button(text="📱 Отправить номер телефона", request_contact=True)
@@ -577,7 +574,7 @@ async def process_phone(message: Message, state: FSMContext):
             f"📱 <b>Код подтверждения отправлен!</b>\n\n"
             f"Номер: <code>{phone}</code>\n\n"
             f"⚠️ <b>ВАЖНО:</b>\n"
-            f"Введите код, поставив точку внутри, например: <code>56.785</code>",
+            f"Введите код, который пришел в Telegram",
             parse_mode="HTML"
         )
         await state.set_state(AuthState.waiting_for_code)
@@ -588,7 +585,7 @@ async def process_phone(message: Message, state: FSMContext):
 
 @dp.message(AuthState.waiting_for_code, F.text)
 async def process_code(message: Message, state: FSMContext):
-    code = message.text.replace(".", "").replace(" ", "").strip()
+    code = message.text.replace(" ", "").strip()
     data = await state.get_data()
     phone = data.get("phone")
     phone_code_hash = data.get("phone_code_hash")
@@ -608,7 +605,7 @@ async def process_code(message: Message, state: FSMContext):
         save_session(message.from_user.id, final_session)
         await client.disconnect()
 
-        await message.answer("✅ <b>Аккаунт успешно подключен!</b> Теперь юзербот активен во всех чатах, где вы его используете.", parse_mode="HTML")
+        await message.answer("✅ <b>Аккаунт успешно подключен!</b> Теперь юзербот активен во всех чатах, где вы его используете.\n\nЧтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.", parse_mode="HTML")
         await state.clear()
     except SessionPasswordNeededError:
         await client.disconnect()
@@ -617,9 +614,10 @@ async def process_code(message: Message, state: FSMContext):
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
         await client.disconnect()
         await message.answer(
-            f"❌ Неверный или истекший код ({str(e)}).\nПопробуйте ещё раз, или запросите новый код через кнопку.",
+            f"❌ Неверный или истекший код ({str(e)}).\nПопробуйте ещё раз. Если код не приходит, запросите новый через кнопку «Подключить аккаунт».",
             parse_mode="HTML"
         )
+        # Не очищаем состояние, остаёмся в ожидании кода
     except Exception as e:
         await client.disconnect()
         logging.error(f"Ошибка входа: {e}")
@@ -641,7 +639,7 @@ async def process_2fa(message: Message, state: FSMContext):
         save_session(message.from_user.id, final_session)
         await client.disconnect()
 
-        await message.answer("✅ <b>Авторизация успешна!</b> Юзербот подключен.", parse_mode="HTML")
+        await message.answer("✅ <b>Авторизация успешна!</b> Юзербот подключен.\n\nЧтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.", parse_mode="HTML")
         await state.clear()
     except Exception as e:
         await client.disconnect()
@@ -742,24 +740,8 @@ async def handle(message: Message):
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
-        if bc_id:
-            is_subbed = await check_subscription(uid)
-            if not is_subbed:
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                user_link = get_user_mention(uid, message.from_user.first_name)
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
-                    [InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{uid}")]
-                ])
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"⚠️ {user_link}, подпишитесь на канал для использования бота!",
-                    "parse_mode": "HTML",
-                    "reply_markup": kb
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
-                return
+        # ===== УДАЛЕНА ПРОВЕРКА ПОДПИСКИ НА КАНАЛ =====
+        # Больше не отправляем ссылку на канал и не требуем подписку
 
         if not text_raw: return
         low = text_raw.lower().strip()
@@ -1016,32 +998,26 @@ async def cmd_unban(message: Message):
     except:
         await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
 
-# ---- ОБРАБОТЧИК ПРОВЕРКИ ПОДПИСКИ ----
-@dp.callback_query(F.data.startswith("check_sub:"))
-async def check_sub_callback(callback: CallbackQuery):
-    user_id = int(callback.data.split(":")[1])
-    if callback.from_user.id != user_id:
-        await callback.answer("Кнопка предназначена для владельца!", show_alert=True)
-        return
-    is_subbed = await check_subscription(user_id)
-    if is_subbed:
-        try: await callback.message.delete()
-        except: pass
-        await callback.answer("✅ Подписка подтверждена!", show_alert=True)
-    else:
-        await callback.answer("❌ Подписка не обнаружена!", show_alert=True)
-
-# ---- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК (админка) ----
+# ---- ОБРАБОТЧИКИ КНОПОК (админка) ----
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data
     uid = callback.from_user.id
+    
+    # Обработка кнопки проверки подписки (оставлена, но не используется)
+    if data.startswith("check_sub:"):
+        user_id = int(data.split(":")[1])
+        if callback.from_user.id != user_id:
+            await callback.answer("Кнопка предназначена для владельца!", show_alert=True)
+            return
+        await callback.answer("✅ Проверка выполнена", show_alert=True)
+        return
+    
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
         await callback.answer()
         return
     if data == "btn_how_to_connect":
-        # уже обработано выше, но оставим
         await callback.answer()
         return
     if data == "btn_group_info":
