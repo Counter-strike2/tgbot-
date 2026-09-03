@@ -60,6 +60,7 @@ user_usernames = {}
 user_names = {}
 banned_users = set()
 bot_id = None
+CHANNEL_LINK = None  # Глобальная переменная объявлена здесь
 
 # Для ручного добавления пользователей
 manual_added_users = set()
@@ -661,11 +662,9 @@ async def process_phone(message: Message, state: FSMContext):
             raise ValueError("Некорректный номер телефона")
         
         try:
-            # Отправляем запрос на получение кода
             res = await client.send_code_request(phone)
             logging.info(f"Код отправлен на номер {phone}, hash: {res.phone_code_hash}")
             
-            # Сохраняем данные для верификации
             await state.update_data(
                 phone=phone,
                 phone_code_hash=res.phone_code_hash,
@@ -781,7 +780,7 @@ async def process_2fa(message: Message, state: FSMContext):
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
-    global bot_id
+    global bot_id, CHANNEL_LINK  # Добавляем CHANNEL_LINK в global
     
     try:
         if not message.from_user or message.from_user.is_bot: return
@@ -891,9 +890,7 @@ async def handle(message: Message):
             if len(parts) > 1:
                 new_link = parts[1].strip()
                 if not new_link.startswith("http"): new_link = "https://t.me/" + new_link.lstrip("@")
-                # Сохраняем ссылку в глобальной переменной
-                global CHANNEL_LINK
-                CHANNEL_LINK = new_link
+                CHANNEL_LINK = new_link  # Теперь это работает, так как CHANNEL_LINK объявлен как global
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
         if low.startswith("подмена "):
@@ -1042,7 +1039,6 @@ async def handle(message: Message):
 
         # Авто-ссылка (глобальная)
         if chat_id in link_chats:
-            global CHANNEL_LINK
             if CHANNEL_LINK:
                 has_link = False
                 if message.entities:
@@ -1154,26 +1150,22 @@ async def admin_add_user(callback: CallbackQuery):
     )
     await callback.answer()
 
+# Обработчик для добавления пользователя через ввод
 @dp.message()
 async def handle_add_user(message: Message):
     if message.from_user.id != ADMIN_ID: return
     if message.text and (message.text.startswith("@") or message.text.isdigit()):
-        # Проверяем, что мы в режиме добавления пользователя
-        # Просто обрабатываем как добавление
         target = message.text.strip()
         target_id = await resolve_user_id(target)
         
         if target_id:
-            # Проверяем, есть ли уже такой пользователь
             users = get_all_users()
             existing = [u for u in users if u[0] == target_id]
             
             if existing:
                 await message.answer(f"ℹ️ Пользователь уже есть в списке.")
             else:
-                # Добавляем пользователя
                 try:
-                    # Пытаемся получить информацию о пользователе
                     user_info = await bot.get_chat(target_id)
                     username = user_info.username or None
                     first_name = user_info.first_name or "Пользователь"
@@ -1260,7 +1252,6 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     elif data.startswith("user_"):
         user_id = int(data.split("_")[1])
         
-        # Определяем тип пользователя
         users = get_all_users()
         user_info = None
         user_type = "unknown"
@@ -1291,11 +1282,8 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         
     elif data.startswith("delete_user_"):
         user_id = int(data.split("_")[2])
-        
-        # Удаляем из всех таблиц
         delete_business_account(user_id)
         delete_manual_user(user_id)
-        
         await callback.answer("✅ Пользователь удален из списка!", show_alert=True)
         await callback.message.edit_text(
             "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
@@ -1315,7 +1303,6 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             set_user_ban(user_id, True)
             await callback.answer("🚫 Пользователь забанен!", show_alert=True)
         
-        # Обновляем информацию
         user_link = get_user_mention(user_id)
         status = "забанен" if user_id in banned_users else "разбанен"
         await callback.message.edit_text(
