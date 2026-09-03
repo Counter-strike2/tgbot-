@@ -23,7 +23,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
     SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError, 
-    PhoneCodeInvalidError, PhoneNumberInvalidError
+    PhoneCodeInvalidError, PhoneNumberInvalidError, FloodWaitError
 )
 
 # Logging
@@ -38,8 +38,6 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 API_ID = 39536916
 API_HASH = "7d8fe2d99b3cb67797f8560016ae69cf"
 
-REQUIRED_CHANNEL = "@norikx"
-REQUIRED_CHANNEL_URL = "https://t.me/norikx"
 OWNER_TG_LINK = "https://t.me/NorikAmiri"
 
 bot = Bot(token=BOT_TOKEN)
@@ -62,14 +60,16 @@ user_usernames = {}
 user_names = {}
 banned_users = set()
 bot_id = None
-CHANNEL_LINK = None
+
+# Для ручного добавления пользователей
+manual_added_users = set()
 
 class AuthState(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_2fa = State()
 
-# Инструкция "Как подключить бота" (ручное добавление)
+# Инструкция "Как подключить бота"
 MANUAL_INSTRUCTION = (
     "🚀 <b>Инструкция по подключению бота (ручное):</b>\n\n"
     "1️⃣ Перейдите в <b>Настройки</b> Telegram.\n"
@@ -81,7 +81,6 @@ MANUAL_INSTRUCTION = (
     "<b>Удалять рекламу строго запрещено!</b> В случае удаления рекламного сообщения вы будете заблокированы."
 )
 
-# Инструкция для кнопки "Бот для групп"
 GROUP_INSTRUCTION = (
     "ℹ️ <b>Обратите внимание:</b>\n"
     "• На данный момент бот работает <b>только в личных сообщениях</b>.\n"
@@ -120,20 +119,20 @@ def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
-    global CHANNEL_LINK
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
                 cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
                 cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)")
-                cur.execute("CREATE TABLE IF NOT EXISTS global_config (key TEXT PRIMARY KEY, value TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS business_accounts (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+                cur.execute("CREATE TABLE IF NOT EXISTS manual_users (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
                 conn.commit()
+                
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
@@ -151,9 +150,8 @@ def init_db():
                     uid, uname, fname = int(row[0]), row[1], row[2]
                     if uname: user_usernames[uname.lower()] = uid
                     if fname: user_names[uid] = fname
-                cur.execute("SELECT value FROM global_config WHERE key='channel_link'")
-                row = cur.fetchone()
-                if row: CHANNEL_LINK = row[0]
+                cur.execute("SELECT user_id FROM manual_users")
+                for row in cur.fetchall(): manual_added_users.add(int(row[0]))
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
 
@@ -169,6 +167,48 @@ def save_business_account(user_id: int, username: str, first_name: str):
                 conn.commit()
     except Exception as e:
         logging.error(f"Ошибка сохранения бизнес-аккаунта: {e}")
+
+def save_manual_user(user_id: int, username: str, first_name: str):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO manual_users (user_id, username, first_name) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name",
+                    (user_id, username, first_name)
+                )
+                conn.commit()
+                manual_added_users.add(user_id)
+    except Exception as e:
+        logging.error(f"Ошибка сохранения ручного пользователя: {e}")
+
+def delete_manual_user(user_id: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM manual_users WHERE user_id = %s", (user_id,))
+                conn.commit()
+                manual_added_users.discard(user_id)
+    except Exception as e:
+        logging.error(f"Ошибка удаления ручного пользователя: {e}")
+
+def get_all_users():
+    """Получить всех пользователей (бизнес-аккаунты + ручные)"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT user_id, username, first_name, connected_at, 'business' as type 
+                    FROM business_accounts
+                    UNION
+                    SELECT user_id, username, first_name, added_at, 'manual' as type 
+                    FROM manual_users
+                    ORDER BY connected_at DESC
+                """)
+                return cur.fetchall()
+    except Exception as e:
+        logging.error(f"Ошибка получения пользователей: {e}")
+        return []
 
 def get_business_accounts():
     try:
@@ -276,17 +316,6 @@ def save_spam_text(key_id, text):
     except Exception as e:
         logging.error(f"Ошибка сохранения текста спама: {e}")
 
-def save_channel_link(link_url):
-    global CHANNEL_LINK
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO global_config (key, value) VALUES ('channel_link', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (link_url,))
-                conn.commit()
-                CHANNEL_LINK = link_url
-    except Exception as e:
-        logging.error(f"Ошибка сохранения ссылки: {e}")
-
 def get_user_mention(user_id: int, fallback_name: str = None) -> str:
     user_id = int(user_id)
     fname = user_names.get(user_id) or fallback_name or "Пользователь"
@@ -386,7 +415,7 @@ async def unmute(user_id, chat_id, bc_id, user_name):
 async def promo_broadcaster():
     promo_text = "Можешь, пожалуйста, на наш канал подписаться? Если не трудно ❤️"
     promo_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ Подписаться", url=REQUIRED_CHANNEL_URL)]
+        [InlineKeyboardButton(text="❤️ Подписаться", url="https://t.me/norikx")]
     ])
     while True:
         await asyncio.sleep(28800)
@@ -415,7 +444,7 @@ async def check_promo_deletions():
         [InlineKeyboardButton(text="💬 Написать владельцу", url=OWNER_TG_LINK)]
     ])
     promo_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ Подписаться", url=REQUIRED_CHANNEL_URL)]
+        [InlineKeyboardButton(text="❤️ Подписаться", url="https://t.me/norikx")]
     ])
     while True:
         await asyncio.sleep(15)
@@ -518,33 +547,34 @@ def get_start_keyboard(user_id: int):
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="💼 Бизнес-аккаунты", callback_data="admin_users")],
-        [InlineKeyboardButton(text="🗑 Управление чатами", callback_data="admin_chats")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="admin_add_user")],
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
 
-def get_chats_keyboard(page: int = 0):
-    accounts = get_business_accounts()
+def get_users_keyboard(page: int = 0):
+    users = get_all_users()
     keyboard = []
     start_idx = page * 10
-    end_idx = min(start_idx + 10, len(accounts))
+    end_idx = min(start_idx + 10, len(users))
     
     for i in range(start_idx, end_idx):
-        user_id, username, first_name, connected_at = accounts[i]
+        user_id, username, first_name, date, user_type = users[i]
         name = first_name or username or f"ID:{user_id}"
         display_name = f"{name[:20]}..." if len(name) > 20 else name
+        type_icon = "📱" if user_type == "business" else "👤"
         keyboard.append([
             InlineKeyboardButton(
-                text=f"👤 {display_name}",
-                callback_data=f"chat_user_{user_id}"
+                text=f"{type_icon} {display_name}",
+                callback_data=f"user_{user_id}"
             )
         ])
     
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"chats_page_{page-1}"))
-    if end_idx < len(accounts):
-        nav_buttons.append(InlineKeyboardButton(text="➡️ Вперед", callback_data=f"chats_page_{page+1}"))
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"users_page_{page-1}"))
+    if end_idx < len(users):
+        nav_buttons.append(InlineKeyboardButton(text="➡️ Вперед", callback_data=f"users_page_{page+1}"))
     if nav_buttons:
         keyboard.append(nav_buttons)
     
@@ -612,61 +642,60 @@ async def process_phone(message: Message, state: FSMContext):
     msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
     
     try:
-        # Получаем номер телефона
         if message.contact:
             phone = message.contact.phone_number
         else:
             phone = message.text.strip()
-            # Очищаем номер от лишних символов
             phone = re.sub(r'[^\d+]', '', phone)
-            # Если номер начинается с 8, заменяем на +7
             if phone.startswith('8') and len(phone) == 11:
                 phone = '+7' + phone[1:]
-            # Если номер не начинается с +, добавляем +
             elif not phone.startswith('+'):
                 phone = '+' + phone
         
         logging.info(f"Обработка номера: {phone}")
         
-        # Создаем клиент
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
         
-        # Проверяем валидность номера
         if len(phone) < 10:
             raise ValueError("Некорректный номер телефона")
         
         try:
-            res = await asyncio.wait_for(client.send_code_request(phone), timeout=15.0)
-        except asyncio.TimeoutError:
-            await client.disconnect()
-            await msg.edit_text("⏱️ Превышено время ожидания от Telegram. Попробуйте снова.")
+            # Отправляем запрос на получение кода
+            res = await client.send_code_request(phone)
+            logging.info(f"Код отправлен на номер {phone}, hash: {res.phone_code_hash}")
+            
+            # Сохраняем данные для верификации
+            await state.update_data(
+                phone=phone,
+                phone_code_hash=res.phone_code_hash,
+                session_str=client.session.save()
+            )
+            
+            await msg.edit_text(
+                f"📱 <b>Код подтверждения отправлен!</b>\n\n"
+                f"Номер: <code>{phone}</code>\n\n"
+                f"Введите код, который пришел в Telegram (например, 12345):\n"
+                f"<i>Если код не приходит, проверьте правильность номера.</i>",
+                parse_mode="HTML"
+            )
+            await state.set_state(AuthState.waiting_for_code)
+            
+        except FloodWaitError as e:
+            await msg.edit_text(f"⏳ Слишком много попыток. Подождите {e.seconds} секунд.")
             await state.clear()
-            return
         except PhoneNumberInvalidError:
-            await client.disconnect()
             await msg.edit_text("❌ Некорректный номер телефона. Проверьте правильность ввода.")
-            return
-
-        await state.update_data(
-            phone=phone,
-            phone_code_hash=res.phone_code_hash,
-            session_str=client.session.save()
-        )
+            await state.clear()
+            
         await client.disconnect()
-
-        await msg.edit_text(
-            f"📱 <b>Код подтверждения отправлен!</b>\n\n"
-            f"Номер: <code>{phone}</code>\n\n"
-            f"Введите код, который пришел в Telegram:",
-            parse_mode="HTML"
-        )
-        await state.set_state(AuthState.waiting_for_code)
         
     except PhoneNumberInvalidError:
         await msg.edit_text("❌ Некорректный номер телефона. Проверьте правильность ввода.")
+        await state.clear()
     except ValueError as e:
         await msg.edit_text(f"❌ {str(e)}")
+        await state.clear()
     except Exception as e:
         logging.error(f"Ошибка при отправке кода: {e}")
         await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново, нажав кнопку «Подключить аккаунт».")
@@ -752,7 +781,7 @@ async def process_2fa(message: Message, state: FSMContext):
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
-    global bot_id, CHANNEL_LINK
+    global bot_id
     
     try:
         if not message.from_user or message.from_user.is_bot: return
@@ -862,7 +891,9 @@ async def handle(message: Message):
             if len(parts) > 1:
                 new_link = parts[1].strip()
                 if not new_link.startswith("http"): new_link = "https://t.me/" + new_link.lstrip("@")
-                save_channel_link(new_link)
+                # Сохраняем ссылку в глобальной переменной
+                global CHANNEL_LINK
+                CHANNEL_LINK = new_link
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
         if low.startswith("подмена "):
@@ -1009,17 +1040,20 @@ async def handle(message: Message):
             need_modify = True
             parse_mode = "HTML"
 
-        if chat_id in link_chats and CHANNEL_LINK:
-            has_link = False
-            if message.entities:
-                for entity in message.entities:
-                    if entity.type in ["url", "text_link"]:
-                        has_link = True
-                        break
-            if not has_link and CHANNEL_LINK not in final_text:
-                final_text = f'<a href="{CHANNEL_LINK}">{final_text}</a>'
-                need_modify = True
-                parse_mode = "HTML"
+        # Авто-ссылка (глобальная)
+        if chat_id in link_chats:
+            global CHANNEL_LINK
+            if CHANNEL_LINK:
+                has_link = False
+                if message.entities:
+                    for entity in message.entities:
+                        if entity.type in ["url", "text_link"]:
+                            has_link = True
+                            break
+                if not has_link and CHANNEL_LINK not in final_text:
+                    final_text = f'<a href="{CHANNEL_LINK}">{final_text}</a>'
+                    need_modify = True
+                    parse_mode = "HTML"
 
         if need_modify:
             await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
@@ -1078,6 +1112,7 @@ async def cmd_ban(message: Message):
         if target_id:
             set_user_ban(target_id, True)
             delete_business_account(target_id)
+            delete_manual_user(target_id)
             user_link = get_user_mention(target_id)
             await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
         else:
@@ -1100,19 +1135,63 @@ async def cmd_unban(message: Message):
     except:
         await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
 
+# ---- ОБРАБОТЧИКИ ДОБАВЛЕНИЯ ПОЛЬЗОВАТЕЛЕЙ ----
+@dp.callback_query(F.data == "admin_add_user")
+async def admin_add_user(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    
+    await callback.message.edit_text(
+        "➕ <b>Добавление пользователя</b>\n\n"
+        "Отправьте ID или @username пользователя, которого хотите добавить.\n"
+        "Например: <code>123456789</code> или <code>@username</code>\n\n"
+        "Чтобы отменить, нажмите кнопку «Назад».",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel_back")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@dp.message()
+async def handle_add_user(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    if message.text and (message.text.startswith("@") or message.text.isdigit()):
+        # Проверяем, что мы в режиме добавления пользователя
+        # Просто обрабатываем как добавление
+        target = message.text.strip()
+        target_id = await resolve_user_id(target)
+        
+        if target_id:
+            # Проверяем, есть ли уже такой пользователь
+            users = get_all_users()
+            existing = [u for u in users if u[0] == target_id]
+            
+            if existing:
+                await message.answer(f"ℹ️ Пользователь уже есть в списке.")
+            else:
+                # Добавляем пользователя
+                try:
+                    # Пытаемся получить информацию о пользователе
+                    user_info = await bot.get_chat(target_id)
+                    username = user_info.username or None
+                    first_name = user_info.first_name or "Пользователь"
+                    save_manual_user(target_id, username, first_name)
+                    save_user_info(target_id, username, first_name)
+                    
+                    user_link = get_user_mention(target_id, first_name)
+                    await message.answer(f"✅ {user_link} <b>добавлен</b> в список пользователей!", parse_mode="HTML")
+                except Exception as e:
+                    await message.answer(f"❌ Ошибка при добавлении: {str(e)}")
+        else:
+            await message.answer(f"❌ Пользователь <code>{target}</code> не найден.", parse_mode="HTML")
+
 # ---- ОБРАБОТЧИКИ АДМИН-КНОПОК ----
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data
     uid = callback.from_user.id
-    
-    if data.startswith("check_sub:"):
-        user_id = int(data.split(":")[1])
-        if callback.from_user.id != user_id:
-            await callback.answer("Кнопка предназначена для владельца!", show_alert=True)
-            return
-        await callback.answer("✅ Проверка выполнена", show_alert=True)
-        return
     
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
@@ -1143,79 +1222,128 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         return
 
     if data == "admin_stats":
-        accounts = get_business_accounts()
+        business_users = get_business_accounts()
+        manual_users = get_all_users()
+        total_manual = len([u for u in manual_users if u[4] == 'manual'])
+        
         await callback.message.edit_text(
             f"📊 <b>СТАТИСТИКА:</b>\n\n"
-            f"• Бизнес-аккаунтов: <code>{len(accounts)}</code>\n"
+            f"• Бизнес-аккаунтов: <code>{len(business_users)}</code>\n"
+            f"• Ручных пользователей: <code>{total_manual}</code>\n"
+            f"• Всего пользователей: <code>{len(manual_users)}</code>\n"
             f"• Юзеров в базе: <code>{len(user_names)}</code>\n"
             f"• Забанено: <code>{len(banned_users)}</code>",
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
         
     elif data == "admin_users":
-        accounts = get_business_accounts()
-        text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
-        if not accounts: 
-            text += "Нет подключенных бизнес-аккаунтов."
-        else:
-            for user_id, username, first_name, connected_at in accounts[:20]:
-                name = first_name or username or f"ID:{user_id}"
-                user_link = get_user_mention(user_id, name)
-                time_str = connected_at.strftime("%d.%m.%Y %H:%M") if connected_at else "неизвестно"
-                text += f"• {user_link} — {time_str}\n"
-        await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
-        
-    elif data == "admin_chats":
         await callback.message.edit_text(
-            "🗑 <b>УПРАВЛЕНИЕ ЧАТАМИ</b>\n\n"
-            "Список пользователей, подключивших бота:",
-            reply_markup=get_chats_keyboard(0),
+            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
+            "📱 — подключены через бизнес-аккаунт\n"
+            "👤 — добавлены вручную\n\n"
+            "Выберите пользователя для управления:",
+            reply_markup=get_users_keyboard(0),
             parse_mode="HTML"
         )
         
-    elif data.startswith("chats_page_"):
+    elif data.startswith("users_page_"):
         page = int(data.split("_")[2])
         await callback.message.edit_text(
-            "🗑 <b>УПРАВЛЕНИЕ ЧАТАМИ</b>\n\n"
-            "Список пользователей, подключивших бота:",
-            reply_markup=get_chats_keyboard(page),
+            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
+            "📱 — подключены через бизнес-аккаунт\n"
+            "👤 — добавлены вручную\n\n"
+            "Выберите пользователя для управления:",
+            reply_markup=get_users_keyboard(page),
             parse_mode="HTML"
         )
         
-    elif data.startswith("chat_user_"):
-        user_id = int(data.split("_")[2])
+    elif data.startswith("user_"):
+        user_id = int(data.split("_")[1])
+        
+        # Определяем тип пользователя
+        users = get_all_users()
+        user_info = None
+        user_type = "unknown"
+        for u in users:
+            if u[0] == user_id:
+                user_info = u
+                user_type = u[4]
+                break
+        
         user_link = get_user_mention(user_id)
+        
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Удалить чат", callback_data=f"delete_chat_{user_id}")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_chats")]
+            [InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{user_id}")],
+            [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_user_{user_id}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
         ])
+        
+        type_text = "📱 Бизнес-аккаунт" if user_type == "business" else "👤 Ручное добавление"
         await callback.message.edit_text(
             f"👤 <b>Информация о пользователе</b>\n\n"
             f"ID: <code>{user_id}</code>\n"
-            f"Имя: {user_link}\n\n"
+            f"Имя: {user_link}\n"
+            f"Тип: {type_text}\n\n"
             f"Выберите действие:",
             reply_markup=kb,
             parse_mode="HTML"
         )
         
-    elif data.startswith("delete_chat_"):
+    elif data.startswith("delete_user_"):
         user_id = int(data.split("_")[2])
+        
+        # Удаляем из всех таблиц
         delete_business_account(user_id)
-        await callback.answer("✅ Чат удален из списка!", show_alert=True)
+        delete_manual_user(user_id)
+        
+        await callback.answer("✅ Пользователь удален из списка!", show_alert=True)
         await callback.message.edit_text(
-            "🗑 <b>УПРАВЛЕНИЕ ЧАТАМИ</b>\n\n"
-            "Список пользователей, подключивших бота:",
-            reply_markup=get_chats_keyboard(0),
+            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
+            "📱 — подключены через бизнес-аккаунт\n"
+            "👤 — добавлены вручную\n\n"
+            "Выберите пользователя для управления:",
+            reply_markup=get_users_keyboard(0),
+            parse_mode="HTML"
+        )
+        
+    elif data.startswith("ban_user_"):
+        user_id = int(data.split("_")[2])
+        if user_id in banned_users:
+            set_user_ban(user_id, False)
+            await callback.answer("✅ Пользователь разбанен!", show_alert=True)
+        else:
+            set_user_ban(user_id, True)
+            await callback.answer("🚫 Пользователь забанен!", show_alert=True)
+        
+        # Обновляем информацию
+        user_link = get_user_mention(user_id)
+        status = "забанен" if user_id in banned_users else "разбанен"
+        await callback.message.edit_text(
+            f"👤 <b>Информация о пользователе</b>\n\n"
+            f"ID: <code>{user_id}</code>\n"
+            f"Имя: {user_link}\n"
+            f"Статус: {status}\n\n"
+            f"Выберите действие:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{user_id}")],
+                [InlineKeyboardButton(text="🚫 Забанить/Разбанить", callback_data=f"ban_user_{user_id}")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
+            ]),
             parse_mode="HTML"
         )
         
     elif data == "admin_ban_prompt":
         await callback.message.edit_text(
+            "🚫 <b>Управление банами</b>\n\n"
             "Команды бана/разбана:\n\n"
             "• <code>/ban 123456789</code> или <code>/ban @username</code>\n"
-            "• <code>/unban 123456789</code> или <code>/unban @username</code>",
+            "• <code>/unban 123456789</code> или <code>/unban @username</code>\n\n"
+            "Также можно использовать кнопки в списке пользователей.",
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
+        
+    elif data == "admin_add_user":
+        await admin_add_user(callback)
         
     await callback.answer()
 
