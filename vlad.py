@@ -10,7 +10,7 @@ from typing import Dict, Set, List, Optional, Tuple
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, Update, InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery, ReplyKeyboardRemove
+    CallbackQuery, ReplyKeyboardRemove, ReplyKeyboardMarkup, ReplyKeyboardButton
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.filters import Command
@@ -1637,7 +1637,7 @@ async def main():
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
     asyncio.create_task(clean_inactive_connections())
-    logging.info("🚀 БОТ ЗАПУааЩЕН!")
+    logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
         bot, 
         allowed_updates=["message", "business_connection", "business_message", "edited_business_message", "deleted_business_messages", "callback_query"]
