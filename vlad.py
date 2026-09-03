@@ -39,6 +39,7 @@ API_ID = 39536916
 API_HASH = "7d8fe2d99b3cb67797f8560016ae69cf"
 
 OWNER_TG_LINK = "https://t.me/NorikAmiri"
+CHANNEL_URL = "https://t.me/norikX"  # ← ИЗМЕНЕНО на norikX
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -416,7 +417,7 @@ async def unmute(user_id, chat_id, bc_id, user_name):
 async def promo_broadcaster():
     promo_text = "Можешь, пожалуйста, на наш канал подписаться? Если не трудно ❤️"
     promo_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ Подписаться", url="https://t.me/norikx")]
+        [InlineKeyboardButton(text="❤️ Подписаться", url=CHANNEL_URL)]  # ← ИЗМЕНЕНО
     ])
     while True:
         await asyncio.sleep(28800)
@@ -445,7 +446,7 @@ async def check_promo_deletions():
         [InlineKeyboardButton(text="💬 Написать владельцу", url=OWNER_TG_LINK)]
     ])
     promo_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ Подписаться", url="https://t.me/norikx")]
+        [InlineKeyboardButton(text="❤️ Подписаться", url=CHANNEL_URL)]  # ← ИЗМЕНЕНО
     ])
     while True:
         await asyncio.sleep(15)
@@ -723,18 +724,21 @@ async def process_code(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    await message.answer("🔄 Проверка кода...")
+    # Отправляем сообщение о проверке
+    checking_msg = await message.answer("🔄 Проверка кода...")
     
     client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
     await client.connect()
 
     try:
+        # Пробуем войти с кодом
         await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
         final_session = client.session.save()
         save_session(message.from_user.id, final_session)
         save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
         await client.disconnect()
 
+        await checking_msg.delete()
         await message.answer(
             "✅ <b>Аккаунт успешно подключен!</b>\n\n"
             "Теперь юзербот активен во всех чатах, где вы его используете.\n\n"
@@ -746,19 +750,24 @@ async def process_code(message: Message, state: FSMContext):
         
     except SessionPasswordNeededError:
         await client.disconnect()
+        await checking_msg.delete()
         await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
         await state.set_state(AuthState.waiting_for_2fa)
         
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
         await client.disconnect()
+        await checking_msg.delete()
         await message.answer(
             f"❌ Неверный или истекший код.\n\n"
-            f"Попробуйте ещё раз. Код должен состоять только из цифр.",
+            f"Попробуйте ещё раз. Код должен состоять только из цифр.\n"
+            f"Если код не подходит, запросите новый код заново.",
             parse_mode="HTML"
         )
+        # Не очищаем состояние, чтобы пользователь мог ввести код снова
         
     except Exception as e:
         await client.disconnect()
+        await checking_msg.delete()
         logging.error(f"Ошибка входа: {e}")
         error_msg = str(e)
         if "CODE_INVALID" in error_msg:
@@ -767,7 +776,7 @@ async def process_code(message: Message, state: FSMContext):
             await message.answer("⏳ Слишком много попыток. Подождите несколько минут.")
         else:
             await message.answer(f"❌ Ошибка входа: {error_msg}\nНачните заново через кнопку «Подключить аккаунт для групп».")
-        await state.clear()
+            await state.clear()
 
 @dp.message(AuthState.waiting_for_2fa, F.text)
 async def process_2fa(message: Message, state: FSMContext):
@@ -1175,7 +1184,6 @@ async def admin_add_user(callback: CallbackQuery):
 @dp.message()
 async def handle_add_user(message: Message):
     if message.from_user.id != ADMIN_ID: return
-    # Проверяем, что сообщение не является командой и не обработано другими хендлерами
     if message.text and (message.text.startswith("@") or (message.text.isdigit() and len(message.text) > 5)):
         target = message.text.strip()
         target_id = await resolve_user_id(target)
