@@ -7,10 +7,11 @@ import math
 from datetime import datetime, timedelta
 from typing import Dict, Set, List, Optional, Tuple
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import (
     Message, Update, InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery, ReplyKeyboardRemove, ReplyKeyboardMarkup, ReplyKeyboardButton
+    CallbackQuery, ReplyKeyboardRemove, KeyboardButton,
+    ReplyKeyboardMarkup
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.filters import Command
@@ -30,8 +31,8 @@ from telethon.errors import (
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Config
-BOT_TOKEN = "8959860095:AAGoL-Ng0r--K4l2K_I0RJusKfQLI8dzwSw"
+# Config - НОВЫЙ ТОКЕН
+BOT_TOKEN = "8959860095:AAEnbAbGuCBWYQHCAF3uPaMD8y1It1IBby8"
 ADMIN_ID = 5825717381
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
@@ -743,19 +744,22 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("⏳ Авторизация уже выполняется. Дождитесь завершения или введите код.")
         return
     
+    # Создаем клавиатуру с кнопкой для отправки контакта
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Отправить номер телефона", request_contact=True)]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    
     await callback.message.answer(
         f"{GROUP_INSTRUCTION}\n\n"
         "📱 <b>Отправьте номер телефона</b> в формате:\n"
         "<code>+79123456789</code>\n\n"
         "Или нажмите кнопку ниже для отправки контакта:",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[
-                ReplyKeyboardButton(text="📱 Отправить номер телефона", request_contact=True)
-            ]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
+        reply_markup=keyboard
     )
     await state.set_state(AuthState.waiting_for_phone)
 
