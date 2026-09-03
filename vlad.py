@@ -31,7 +31,7 @@ from telethon.errors import (
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Config - НОВЫЙ ТОКЕН
+# Config
 BOT_TOKEN = "8959860095:AAEnbAbGuCBWYQHCAF3uPaMD8y1It1IBby8"
 ADMIN_ID = 5825717381
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -756,14 +756,14 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"{GROUP_INSTRUCTION}\n\n"
         "📱 <b>Отправьте номер телефона</b> в формате:\n"
-        "<code>+79123456789</code>\n\n"
+        "<code>79123456789</code>\n\n"
         "Или нажмите кнопку ниже для отправки контакта:",
         parse_mode="HTML",
         reply_markup=keyboard
     )
     await state.set_state(AuthState.waiting_for_phone)
 
-# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON =====
+# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON (ИСПРАВЛЕННАЯ) =====
 @dp.message(AuthState.waiting_for_phone, F.contact | F.text)
 async def process_phone(message: Message, state: FSMContext):
     msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
@@ -797,9 +797,13 @@ async def process_phone(message: Message, state: FSMContext):
             await msg.edit_text(
                 f"📱 <b>Код подтверждения отправлен!</b>\n\n"
                 f"Номер: <code>{phone}</code>\n\n"
-                f"Введите код из Telegram (только цифры):\n"
-                f"<i>Например: 12345</i>",
-                parse_mode="HTML"
+                f"<b>Введите код из Telegram</b> (только цифры):\n"
+                f"<i>Например: 12345</i>\n\n"
+                f"⚠️ Если код не приходит, проверьте:\n"
+                f"• Правильность номера\n"
+                f"• Интернет-соединение",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
             )
             await state.set_state(AuthState.waiting_for_code)
             
@@ -821,8 +825,13 @@ async def process_phone(message: Message, state: FSMContext):
         await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново.")
         await state.clear()
 
-@dp.message(AuthState.waiting_for_code, F.text)
+@dp.message(AuthState.waiting_for_code)
 async def process_code(message: Message, state: FSMContext):
+    # Проверяем, что это текст
+    if not message.text:
+        await message.answer("❌ Пожалуйста, введите код цифрами.")
+        return
+    
     code = re.sub(r'\s+', '', message.text.strip())
     
     if not code.isdigit():
@@ -835,7 +844,7 @@ async def process_code(message: Message, state: FSMContext):
     session_str = data.get("session_str")
 
     if not phone or not phone_code_hash:
-        await message.answer("❌ Данные авторизации устарели. Начните заново.")
+        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Подключить аккаунт для групп».")
         await state.clear()
         return
 
@@ -852,18 +861,23 @@ async def process_code(message: Message, state: FSMContext):
         
         # Получаем диалоги
         dialogs = await get_user_dialogs(client)
+        
+        # Сохраняем чаты в БД
+        chat_count = 0
         for chat_id, chat_name in dialogs:
             save_user_chat(message.from_user.id, chat_id, chat_name)
+            chat_count += 1
         
         await client.disconnect()
         
         await checking_msg.delete()
         await message.answer(
             f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
-            f"📊 Загружено чатов: <code>{len(dialogs)}</code>\n\n"
+            f"📊 Загружено чатов: <code>{chat_count}</code>\n\n"
             f"Теперь бот может работать в ваших группах и чатах.\n\n"
             f"{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
         )
         await state.clear()
         
@@ -876,14 +890,24 @@ async def process_code(message: Message, state: FSMContext):
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
         await client.disconnect()
         await checking_msg.delete()
-        await message.answer("❌ Неверный или истекший код. Попробуйте ещё раз.", parse_mode="HTML")
+        await message.answer(
+            "❌ <b>Неверный код!</b>\n\n"
+            "Проверьте код и попробуйте ещё раз.\n"
+            "Код должен состоять только из цифр.",
+            parse_mode="HTML"
+        )
+        # Не очищаем состояние, чтобы можно было ввести код снова
         
     except Exception as e:
         await client.disconnect()
         await checking_msg.delete()
         logging.error(f"Ошибка входа: {e}")
-        await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново.", parse_mode="HTML")
-        await state.clear()
+        error_msg = str(e)
+        if "FLOOD" in error_msg:
+            await message.answer("⏳ Слишком много попыток. Подождите несколько минут.")
+        else:
+            await message.answer(f"❌ Ошибка входа: {error_msg}\nНачните заново через кнопку «Подключить аккаунт для групп».")
+            await state.clear()
 
 @dp.message(AuthState.waiting_for_2fa, F.text)
 async def process_2fa(message: Message, state: FSMContext):
@@ -902,17 +926,20 @@ async def process_2fa(message: Message, state: FSMContext):
         
         # Получаем диалоги
         dialogs = await get_user_dialogs(client)
+        chat_count = 0
         for chat_id, chat_name in dialogs:
             save_user_chat(message.from_user.id, chat_id, chat_name)
+            chat_count += 1
         
         await client.disconnect()
 
         await message.answer(
             f"✅ <b>Авторизация успешна!</b>\n\n"
-            f"📊 Загружено чатов: <code>{len(dialogs)}</code>\n\n"
+            f"📊 Загружено чатов: <code>{chat_count}</code>\n\n"
             f"Теперь бот может работать в ваших группах и чатах.\n\n"
             f"{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
         )
         await state.clear()
         
