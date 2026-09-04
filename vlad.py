@@ -113,7 +113,6 @@ def init_db():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                # ВСЕ ТАБЛИЦЫ С ПРАВИЛЬНОЙ СТРУКТУРОЙ
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS chat_settings (
                         chat_id BIGINT, 
@@ -183,7 +182,6 @@ def init_db():
                 """)
                 conn.commit()
                 
-                # Загружаем данные в память
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
@@ -737,6 +735,16 @@ async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
+@dp.callback_query(F.data == "btn_features")
+async def features(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
+
+@dp.callback_query(F.data == "btn_how_to_connect")
+async def how_to_connect(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
+
 # ==================== АВТОРИЗАЦИЯ ====================
 @dp.callback_query(F.data == "btn_group_auth")
 async def group_auth(callback: CallbackQuery, state: FSMContext):
@@ -755,7 +763,9 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
         "2️⃣ Или отправь номер в формате:\n"
         "<code>79123456789</code>\n\n"
         "3️⃣ Введи код из Telegram\n"
-        "4️⃣ Если есть 2FA - введи пароль",
+        "4️⃣ Если есть 2FA - введи пароль\n\n"
+        "⚠️ <b>ВАЖНО:</b> Если код не принимается, попробуй поставить точку перед кодом.\n"
+        "Например: <code>.12345</code>",
         parse_mode="HTML",
         reply_markup=keyboard
     )
@@ -778,14 +788,10 @@ async def process_phone(message: Message, state: FSMContext):
             return
         logging.info(f"📱 Номер: {phone}")
         
-        # ===== СОЗДАЕМ КЛИЕНТ =====
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
-        
-        # ===== ОТПРАВЛЯЕМ КОД =====
         await client.send_code_request(phone)
         
-        # ===== СОХРАНЯЕМ В СОСТОЯНИЕ =====
         await state.update_data(
             phone=phone,
             client=client
@@ -795,7 +801,8 @@ async def process_phone(message: Message, state: FSMContext):
             f"📱 <b>Код отправлен!</b>\n\n"
             f"Номер: <code>{phone}</code>\n\n"
             f"<b>Введи код из Telegram</b>\n"
-            f"<i>Например: 12345</i>",
+            f"<i>Например: 12345</i>\n\n"
+            f"⚠️ Если код не принимается, попробуй с точкой: <code>.12345</code>",
             parse_mode="HTML"
         )
         await state.set_state(AuthState.waiting_for_code)
@@ -813,7 +820,13 @@ async def process_phone(message: Message, state: FSMContext):
 
 @dp.message(StateFilter(AuthState.waiting_for_code), F.text)
 async def process_code(message: Message, state: FSMContext):
-    code = re.sub(r'\s+', '', message.text.strip())
+    # Получаем код, убираем точку если есть
+    code_raw = message.text.strip()
+    if code_raw.startswith('.'):
+        code = code_raw[1:]
+        logging.info(f"Код с точкой: {code_raw} -> {code}")
+    else:
+        code = code_raw
     
     if not code.isdigit():
         await message.answer("❌ Код должен содержать только цифры")
@@ -831,17 +844,12 @@ async def process_code(message: Message, state: FSMContext):
     await message.answer("🔄 Проверка кода...")
     
     try:
-        # ===== ПРАВИЛЬНЫЙ ВХОД =====
         await client.sign_in(phone=phone, code=code)
         
-        # ===== ПОЛУЧАЕМ СЕССИЮ =====
         final_session = client.session.save()
-        
-        # ===== СОХРАНЯЕМ В БД =====
         save_session(message.from_user.id, final_session)
         save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
         
-        # ===== ЗАПУСКАЕМ TELETHON =====
         await start_telethon_listener(message.from_user.id, final_session)
         
         await client.disconnect()
@@ -881,7 +889,6 @@ async def process_2fa(message: Message, state: FSMContext):
         return
     
     try:
-        # ===== ВХОД С 2FA =====
         await client.sign_in(password=password)
         
         final_session = client.session.save()
@@ -1029,7 +1036,6 @@ async def handle(message: Message):
                 except Exception as e: logging.error(f"Ошибка калькулятора: {e}")
                 return
 
-        # Команды
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -1177,7 +1183,6 @@ async def handle(message: Message):
             await bot.send_message(**kwargs)
             return
 
-        # Подмена текста
         final_text = text_raw
         need_modify = False
         parse_mode = None
