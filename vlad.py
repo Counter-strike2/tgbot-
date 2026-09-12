@@ -23,6 +23,7 @@ from aiohttp import web
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.types import MessageEntityUrl, MessageEntityTextUrl
 from telethon.errors import (
     SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError,
     PhoneCodeInvalidError, PhoneNumberInvalidError, FloodWaitError
@@ -46,8 +47,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # ==================== ХРАНИЛИЩА ====================
 mutes = {}
-spam_tasks = {}                    # (chat_id, bc_id_or_none) -> task
-telethon_spam_tasks = {}           # (user_id, chat_id) -> task
+spam_tasks: Dict[Tuple[int, int], asyncio.Task] = {}   # (user_id, chat_id) -> task
 user_spam_texts = {}
 link_chats = set()
 reply_guard_chats = set()
@@ -67,9 +67,8 @@ telethon_clients: Dict[int, TelegramClient] = {}
 user_dialogs: Dict[int, List[Tuple[int, str]]] = {}
 chat_count_cache: Dict[int, int] = {}
 msg_count_cache: Dict[int, int] = {}
-# КАРТЫ ДЛЯ БИЗНЕС-ЧАТОВ (чтобы удалять/читать без Telethon)
-chat_to_bc: Dict[Tuple[int, int], str] = {}    # (owner_id, chat_id) -> bc_id
-chat_to_owner: Dict[int, int] = {}             # chat_id -> owner_id
+chat_to_bc: Dict[Tuple[int, int], str] = {}
+chat_to_owner: Dict[int, int] = {}
 
 # ==================== ПУЛ ====================
 _db_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
@@ -78,7 +77,7 @@ def init_pool():
     global _db_pool
     _db_pool = psycopg2.pool.ThreadedConnectionPool(
         minconn=2, maxconn=20, dsn=DATABASE_URL, sslmode='require')
-    logging.info("✅ Пул соединений создан")
+    logging.info("✅ Пул создан")
 
 @contextmanager
 def get_db():
@@ -125,6 +124,8 @@ NEED_LABELS = {
     "sleep_need": ("Сон", "😴"), "hygiene": ("Гигиена", "🛁"),
     "mood": ("Настроение", "🙂"), "attention": ("Внимание", "🫂")}
 DECAY_PER_TICK = {"hunger": 3, "toilet": 4, "sleep_need": 2, "hygiene": 2, "mood": 2, "attention": 2}
+LIBIDO_RISE_PER_TICK = 3
+LIBIDO_MOOD_PENALTY = 3      # если libido >= 90
 TICK_MINUTES = 30
 REMINDER_THRESHOLD = 25
 HEALTH_DECAY_IF_CRITICAL = 3
@@ -142,7 +143,7 @@ BIRTH_RULES_TEXT = (
     "Если не следить — он может умереть, и это уже не исправить.\n\nБереги {pronoun_acc} 🙂")
 RESTORE_AMOUNT = {"hunger": 40, "toilet": 50, "sleep_need": 35, "hygiene": 45, "mood": 30, "attention": 30}
 
-# ==================== ИНИЦИАЛИЗАЦИЯ БД ====================
+# ==================== БД ====================
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -161,9 +162,14 @@ def init_db():
                 health INTEGER NOT NULL DEFAULT 100, hunger INTEGER NOT NULL DEFAULT 100,
                 toilet INTEGER NOT NULL DEFAULT 100, sleep_need INTEGER NOT NULL DEFAULT 100,
                 hygiene INTEGER NOT NULL DEFAULT 100, mood INTEGER NOT NULL DEFAULT 100,
-                attention INTEGER NOT NULL DEFAULT 100, is_alive BOOLEAN NOT NULL DEFAULT TRUE,
+                attention INTEGER NOT NULL DEFAULT 100,
+                libido INTEGER NOT NULL DEFAULT 0,
+                is_alive BOOLEAN NOT NULL DEFAULT TRUE,
                 birth_date DATE NOT NULL DEFAULT CURRENT_DATE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_birthday_year INTEGER NOT NULL DEFAULT 0)""")
+            # миграция
+            try: cur.execute("ALTER TABLE children ADD COLUMN IF NOT EXISTS libido INTEGER NOT NULL DEFAULT 0")
+            except: pass
             cur.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
                 id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, chat_id BIGINT NOT NULL,
                 sender_id BIGINT, sender_name TEXT, sender_username TEXT, text TEXT,
@@ -205,26 +211,22 @@ def save_user_chat(user_id, chat_id, chat_name):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO user_chats (user_id, chat_id, chat_name) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (user_id, chat_id) DO UPDATE SET chat_name = EXCLUDED.chat_name",
-                    (user_id, chat_id, chat_name))
+                cur.execute("INSERT INTO user_chats (user_id, chat_id, chat_name) VALUES (%s, %s, %s) "
+                            "ON CONFLICT (user_id, chat_id) DO UPDATE SET chat_name = EXCLUDED.chat_name",
+                            (user_id, chat_id, chat_name))
         lst = user_dialogs.setdefault(user_id, [])
-        found = False
         for i, (cid, _) in enumerate(lst):
-            if cid == chat_id:
-                lst[i] = (chat_id, chat_name); found = True; break
-        if not found:
-            lst.append((chat_id, chat_name))
-            chat_count_cache[user_id] = chat_count_cache.get(user_id, 0) + 1
-    except Exception as e: logging.error(f"save_user_chat: {e}")
+            if cid == chat_id: lst[i] = (chat_id, chat_name); return
+        lst.append((chat_id, chat_name))
+        chat_count_cache[user_id] = chat_count_cache.get(user_id, 0) + 1
+    except: pass
 
 def get_user_chats(user_id):
     if user_id in user_dialogs: return user_dialogs[user_id]
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT chat_id, chat_name FROM user_chats WHERE user_id = %s", (user_id,))
+                cur.execute("SELECT chat_id, chat_name FROM user_chats WHERE user_id=%s", (user_id,))
                 chats = [(int(r[0]), r[1]) for r in cur.fetchall()]
                 user_dialogs[user_id] = chats
                 chat_count_cache[user_id] = len(chats)
@@ -279,20 +281,19 @@ def get_business_accounts():
                 return cur.fetchall()
     except: return []
 
-def save_session(user_id, session_str):
+def save_session(user_id, s):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO user_sessions (user_id, session_string) VALUES (%s, %s) "
-                            "ON CONFLICT (user_id) DO UPDATE SET session_string = EXCLUDED.session_string",
-                            (user_id, session_str))
+                            "ON CONFLICT (user_id) DO UPDATE SET session_string = EXCLUDED.session_string", (user_id, s))
     except: pass
 
 def get_session(user_id):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT session_string FROM user_sessions WHERE user_id = %s", (user_id,))
+                cur.execute("SELECT session_string FROM user_sessions WHERE user_id=%s", (user_id,))
                 r = cur.fetchone(); return r[0] if r else None
     except: return None
 
@@ -385,7 +386,7 @@ def save_substitution(chat_id, text, mode):
                     substitutions.pop(chat_id, None)
                 else:
                     cur.execute("INSERT INTO substitutions (chat_id, text, mode) VALUES (%s, %s, %s) "
-                                "ON CONFLICT (chat_id) DO UPDATE SET text = EXCLUDED.text, mode = EXCLUDED.mode",
+                                "ON CONFLICT (chat_id) DO UPDATE SET text=EXCLUDED.text, mode=EXCLUDED.mode",
                                 (chat_id, text, mode))
                     substitutions[chat_id] = {"text": text, "mode": mode}
     except: pass
@@ -395,7 +396,7 @@ def save_spam_text(key_id, text):
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO spam_texts (key_id, text) VALUES (%s, %s) "
-                            "ON CONFLICT (key_id) DO UPDATE SET text = EXCLUDED.text", (str(key_id), text))
+                            "ON CONFLICT (key_id) DO UPDATE SET text=EXCLUDED.text", (str(key_id), text))
         user_spam_texts[str(key_id)] = text
     except: pass
 
@@ -427,10 +428,10 @@ def save_chat_message(user_id, chat_id, sender_id, sender_name, sender_username,
                             "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                             (int(user_id), int(chat_id), int(sender_id) if sender_id else 0,
                              sender_name, sender_username, (text or "")[:2000], int(message_id)))
-                inserted = cur.rowcount
-        if inserted: msg_count_cache[user_id] = msg_count_cache.get(user_id, 0) + 1
-        return bool(inserted)
-    except Exception as e: logging.error(f"save_chat_message: {e}"); return False
+                ins = cur.rowcount
+        if ins: msg_count_cache[user_id] = msg_count_cache.get(user_id, 0) + 1
+        return bool(ins)
+    except: return False
 
 def get_chat_messages(user_id, chat_id, page=0, per_page=15):
     try:
@@ -453,22 +454,26 @@ def clear_chat_messages(user_id, chat_id):
     except: pass
 
 # ==================== РЕБЁНОК ====================
+CHILD_COLS = "id, name, gender, health, hunger, toilet, sleep_need, hygiene, mood, attention, libido, birth_date, last_birthday_year"
+CHILD_KEYS = ["id", "name", "gender", "health", "hunger", "toilet", "sleep_need", "hygiene",
+              "mood", "attention", "libido", "birth_date", "last_birthday_year"]
+
 def get_alive_child(owner_id):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, name, gender, health, hunger, toilet, sleep_need, hygiene, mood, attention, birth_date, last_birthday_year FROM children WHERE owner_id=%s AND is_alive=TRUE", (owner_id,))
+                cur.execute(f"SELECT {CHILD_COLS} FROM children WHERE owner_id=%s AND is_alive=TRUE", (owner_id,))
                 row = cur.fetchone()
                 if not row: return None
-                keys = ["id", "name", "gender", "health", "hunger", "toilet", "sleep_need", "hygiene", "mood", "attention", "birth_date", "last_birthday_year"]
-                return dict(zip(keys, row))
+                return dict(zip(CHILD_KEYS, row))
     except: return None
 
 def create_child(owner_id, name, gender):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO children (owner_id, name, gender) VALUES (%s, %s, %s) RETURNING id, birth_date", (owner_id, name, gender))
+                cur.execute("INSERT INTO children (owner_id, name, gender) VALUES (%s, %s, %s) RETURNING id, birth_date",
+                            (owner_id, name, gender))
                 cid, bd = cur.fetchone()
                 return {"id": cid, "name": name, "gender": gender, "birth_date": bd}
     except Exception as e: logging.error(f"create_child: {e}"); return None
@@ -481,15 +486,17 @@ def update_child_field(child_id, field, value):
                 cur.execute(f"UPDATE children SET {field}=%s WHERE id=%s", (value, child_id))
     except: pass
 
-def update_child_full(child_id, health, needs):
+def update_child_full(child_id, health, needs, libido):
     health = max(0, min(100, health))
     needs = {k: max(0, min(100, v)) for k, v in needs.items()}
+    libido = max(0, min(100, libido))
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE children SET health=%s, hunger=%s, toilet=%s, sleep_need=%s, hygiene=%s, mood=%s, attention=%s WHERE id=%s",
+                cur.execute("UPDATE children SET health=%s, hunger=%s, toilet=%s, sleep_need=%s, hygiene=%s, "
+                            "mood=%s, attention=%s, libido=%s WHERE id=%s",
                             (health, needs["hunger"], needs["toilet"], needs["sleep_need"],
-                             needs["hygiene"], needs["mood"], needs["attention"], child_id))
+                             needs["hygiene"], needs["mood"], needs["attention"], libido, child_id))
     except: pass
 
 def kill_child(child_id):
@@ -503,8 +510,8 @@ def get_all_alive_children_full():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, owner_id, name, gender, health, hunger, toilet, sleep_need, hygiene, mood, attention, birth_date, last_birthday_year FROM children WHERE is_alive=TRUE")
-                keys = ["id","owner_id","name","gender","health","hunger","toilet","sleep_need","hygiene","mood","attention","birth_date","last_birthday_year"]
+                cur.execute(f"SELECT id, owner_id, {CHILD_COLS} FROM children WHERE is_alive=TRUE")
+                keys = ["id", "owner_id"] + CHILD_KEYS
                 return [dict(zip(keys, r)) for r in cur.fetchall()]
     except: return []
 
@@ -539,6 +546,8 @@ def child_status_text(child):
     for k in NEEDS:
         lb, em = NEED_LABELS[k]
         lines.append(f"{em} {lb}: {bar(child[k])} {child[k]}")
+    lib = child.get("libido", 0)
+    lines.append(f"🔥 Возбуждение: {bar(lib)} {lib}")
     return "\n".join(lines)
 
 def child_action_keyboard(child_id, highlight=None):
@@ -550,6 +559,7 @@ def child_action_keyboard(child_id, highlight=None):
         if len(pair) == 2: rows.append(pair); pair = []
     if pair: rows.append(pair)
     rows.append([InlineKeyboardButton(text="💊 Полечить", callback_data=f"child_heal_{child_id}")])
+    rows.append([InlineKeyboardButton(text="🍆 Подрочить", callback_data=f"child_jerk_{child_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def birth_rules_text(name, gender, birth_date):
@@ -591,18 +601,19 @@ async def global_typing_loop():
         except: pass
         await asyncio.sleep(4)
 
-async def spam_worker(chat_id, bc_id, reply_to, text):
+async def spam_worker_bot(chat_id, bc_id, reply_to, text):
     try:
         words = text.split()
         while True:
             for w in words:
                 kw = {"chat_id": chat_id, "text": w, "reply_to_message_id": reply_to}
                 if bc_id: kw["business_connection_id"] = bc_id
-                await bot.send_message(**kw)
+                try: await bot.send_message(**kw)
+                except: pass
                 await asyncio.sleep(0.3)
     except asyncio.CancelledError: pass
 
-async def telethon_spam_worker(client, chat_id, text):
+async def spam_worker_telethon(client, chat_id, text):
     try:
         words = text.split()
         while True:
@@ -673,7 +684,9 @@ async def clean_inactive_connections():
         for bc_id in inactive:
             bc_owners.pop(bc_id, None); active_chats.pop(bc_id, None)
             for k in list(spam_tasks.keys()):
-                if k[1] == bc_id: spam_tasks[k].cancel(); del spam_tasks[k]
+                try: spam_tasks[k].cancel()
+                except: pass
+                del spam_tasks[k]
             recent_business_chats[:] = [i for i in recent_business_chats if i[1] != bc_id]
 
 def calculate_expression(expr):
@@ -697,75 +710,82 @@ def is_calc_expr(text):
     if re.fullmatch(r"[\+\-\*/%\.]+", c): return False
     return True
 
-# ==================== ЛОГИКА КОМАНД (общая для aiogram и Telethon) ====================
+# ==================== ЯДРО КОМАНД (универсальное) ====================
 async def process_command_text(text, owner_id, chat_id, bc_id=None,
-                               telethon_client=None, telethon_event=None):
-    """Обрабатывает команды. Работает и для aiogram, и для Telethon.
-    Если передан telethon_client — команды работают от имени юзера в группе."""
+                               telethon_client=None, telethon_event=None, send_reply=None):
+    """Возвращает (handled, delete_msg). Всё ядро команд здесь."""
+    global CHANNEL_LINK
     low = text.lower().strip()
 
-    # Сохранение настроек чата
+    # ===== настройки =====
     if low == ".стоп":
-        save_setting(chat_id, 'enabled_links', False)
-        return True
+        save_setting(chat_id, 'enabled_links', False); return True
     if low == ".старт":
-        save_setting(chat_id, 'enabled_links', True)
-        return True
+        save_setting(chat_id, 'enabled_links', True); return True
     if low.startswith("+линк"):
-        global CHANNEL_LINK
         p = text.split(maxsplit=1)
         if len(p) > 1:
             nl = p[1].strip()
             if not nl.startswith("http"): nl = "https://t.me/" + nl.lstrip("@")
             CHANNEL_LINK = nl
         return True
-    if low.startswith("подмена "):
+    if low.startswith("подмена"):
         p = text.split(maxsplit=2)
-        if len(p) >= 2:
-            if p[1].lower() == "выкл": save_substitution(chat_id, None, None)
-            else:
-                mode = int(p[2]) if len(p) == 3 and p[2] in ["1", "2"] else 1
-                save_substitution(chat_id, p[1], mode)
+        if len(p) == 1: return True
+        if p[1].lower() == "выкл":
+            save_substitution(chat_id, None, None)
+        else:
+            mode = int(p[2]) if len(p) == 3 and p[2] in ["1", "2"] else 1
+            save_substitution(chat_id, p[1], mode)
         return True
     if low == "печать -": save_setting(chat_id, 'typing_disabled', True); return True
     if low == "печать +": save_setting(chat_id, 'typing_disabled', False); return True
     if low == "+реплай": save_setting(chat_id, 'reply_guard', True); return True
     if low == "-реплай": save_setting(chat_id, 'reply_guard', False); return True
 
-    # Спам
+    # ===== спам =====
     if low == "ss":
         t = user_spam_texts.get(str(owner_id))
         if not t:
-            msg = "⚠️ Сначала: <code>set [текст]</code>"
-            if telethon_client: 
-                try: await telethon_client.send_message(chat_id, "Сначала: set [текст]")
-                except: pass
-            elif bc_id or chat_id:
-                try: await bot.send_message(chat_id, msg, parse_mode="HTML", business_connection_id=bc_id)
-                except: pass
+            msg = "⚠️ Сначала: set [текст]"
+            try:
+                if telethon_client: await telethon_client.send_message(chat_id, msg)
+                else: await bot.send_message(chat_id, msg, business_connection_id=bc_id, parse_mode="HTML")
+            except: pass
             return True
-        key = (chat_id, bc_id)
+        key = (owner_id, chat_id)
+        if key in spam_tasks and not spam_tasks[key].done():
+            spam_tasks[key].cancel()
+        # Запускаем и через Telethon (от имени юзера в группе), и через Bot (для бизнес-чатов)
         if telethon_client:
-            tkey = (owner_id, chat_id)
-            if tkey in telethon_spam_tasks: telethon_spam_tasks[tkey].cancel()
-            telethon_spam_tasks[tkey] = asyncio.create_task(telethon_spam_worker(telethon_client, chat_id, t))
+            spam_tasks[key] = asyncio.create_task(spam_worker_telethon(telethon_client, chat_id, t))
         else:
-            if key in spam_tasks: spam_tasks[key].cancel()
-            spam_tasks[key] = asyncio.create_task(spam_worker(chat_id, bc_id, None, t))
+            rt = None
+            if telethon_event and telethon_event.is_reply:
+                try:
+                    rp = await telethon_event.get_reply_message()
+                    rt = rp.id
+                except: pass
+            spam_tasks[key] = asyncio.create_task(spam_worker_bot(chat_id, bc_id, rt, t))
         return True
     if low == "dd":
-        if telethon_client:
-            tkey = (owner_id, chat_id)
-            if tkey in telethon_spam_tasks: telethon_spam_tasks[tkey].cancel(); del telethon_spam_tasks[tkey]
-        else:
-            key = (chat_id, bc_id)
-            if key in spam_tasks: spam_tasks[key].cancel(); del spam_tasks[key]
+        key = (owner_id, chat_id)
+        if key in spam_tasks:
+            try: spam_tasks[key].cancel()
+            except: pass
+            del spam_tasks[key]
+        if send_reply: 
+            try: await send_reply("🛑 Спам остановлен.")
+            except: pass
         return True
     if low.startswith("set "):
         save_spam_text(str(owner_id), text[4:].strip())
+        if send_reply:
+            try: await send_reply("✅ Текст сохранён.")
+            except: pass
         return True
 
-    # Модерация — только через Telethon (или business)
+    # ===== модерация (только реплай) =====
     if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
         m = re.search(r"\d+", text)
         if not m: return True
@@ -780,8 +800,13 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
         if target_id:
             mutes[target_id] = {"until": datetime.now() + timedelta(minutes=mins)}
             asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
-            try: await telethon_client.send_message(chat_id, f"🔇 МУТ на {mins} мин.")
-            except: pass
+            if telethon_client:
+                try: await telethon_client.send_message(chat_id, f"🔇 {target_name} — МУТ {mins} мин.")
+                except: pass
+            else:
+                try: await bot.send_message(chat_id, f"🔇 {get_user_mention(target_id, target_name)} МУТ на {mins} мин.",
+                                            parse_mode="HTML", business_connection_id=bc_id)
+                except: pass
         return True
     if low in [".размут", "!размут"]:
         if telethon_event and telethon_event.is_reply:
@@ -789,14 +814,55 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                 rp = await telethon_event.get_reply_message()
                 s = await rp.get_sender()
                 mutes.pop(s.id, None)
-                await telethon_client.send_message(chat_id, "🔊 МУТ снят.")
+                if telethon_client: await telethon_client.send_message(chat_id, "🔊 МУТ снят.")
             except: pass
         return True
     if low in ["мой ид", "моид"]:
-        try: await telethon_client.send_message(chat_id, f"🆔 {owner_id}")
+        try:
+            if telethon_client: await telethon_client.send_message(chat_id, f"🆔 {owner_id}")
+            else: await bot.send_message(chat_id, f"🆔 <code>{owner_id}</code>", parse_mode="HTML", business_connection_id=bc_id)
         except: pass
         return True
+    if low in ["твой ид", "твоид"]:
+        if telethon_event and telethon_event.is_reply:
+            try:
+                rp = await telethon_event.get_reply_message()
+                s = await rp.get_sender()
+                if telethon_client: await telethon_client.send_message(chat_id, f"🆔 {s.id}")
+            except: pass
+        return True
+
+    # ===== !команды =====
+    if low == "!команды":
+        try:
+            if telethon_client: await telethon_client.send_message(chat_id, TEXT_COMMANDS_HELP.replace("<b>", "").replace("</b>", "").replace("<code>","").replace("</code>",""))
+            else: await bot.send_message(chat_id, TEXT_COMMANDS_HELP, parse_mode="HTML", business_connection_id=bc_id)
+        except: pass
+        return True
+
     return False
+
+
+def apply_modifications(text, chat_id, entities=None):
+    """Применяет подмену и линк. Возвращает (новый_текст, изменён_ли)."""
+    ft = text
+    modified = False
+    if chat_id in substitutions:
+        s = substitutions[chat_id]
+        ft = f"{s['text']} {text}" if s["mode"] == 1 else f"{text} {s['text']}"
+        modified = True
+    if chat_id in link_chats and CHANNEL_LINK:
+        has_link = False
+        if entities:
+            for e in entities:
+                et = getattr(e, 'type', None) or type(e).__name__
+                if et in ("url", "text_link", "MessageEntityUrl", "MessageEntityTextUrl"):
+                    has_link = True; break
+        if not has_link and CHANNEL_LINK not in ft:
+            ft = f'<a href="{CHANNEL_LINK}">{ft}</a>'
+            modified = True
+    return ft, modified
+
 
 # ==================== TELETHON ====================
 async def extract_sender_info(message):
@@ -861,7 +927,7 @@ async def start_telethon_listener(user_id, session_str):
     try:
         client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
 
-        # Входящие — сохраняем в БД
+        # ===== ВХОДЯЩИЕ =====
         @client.on(events.NewMessage(incoming=True))
         async def on_incoming(event):
             try:
@@ -878,34 +944,40 @@ async def start_telethon_listener(user_id, session_str):
                     cname = getattr(c, 'title', None) or getattr(c, 'first_name', None) or "Чат"
                     save_user_chat(user_id, cid, cname)
                 except: pass
+
+                # МУТ — удаляем входящие
+                if sid in mutes and datetime.now() < mutes[sid]["until"]:
+                    try: await event.delete()
+                    except: pass
+                    return
+                # reply_guard — удаляем входящее, если это реплай
+                if cid in reply_guard_chats and event.is_reply:
+                    try: await event.delete()
+                    except: pass
+                    return
             except Exception as e: logging.error(f"incoming: {e}")
 
-        # ИСХОДЯЩИЕ — обработка команд от имени юзера в группах
+        # ===== ИСХОДЯЩИЕ (наши) =====
         @client.on(events.NewMessage(outgoing=True))
         async def on_outgoing(event):
             try:
-                if event.is_private:
-                    # В личке свои сообщения не трогаем
-                    cid = int(event.chat_id)
-                    save_chat_message(user_id, cid, user_id,
-                                      user_names.get(user_id, "Я"), "",
-                                      event.message.text or "[📎]", int(event.message.id))
-                    return
                 cid = int(event.chat_id)
                 text = event.message.text or ""
+
                 # Сохраняем своё сообщение
                 save_chat_message(user_id, cid, user_id,
                                   user_names.get(user_id, "Я"), "",
                                   text or "[📎]", int(event.message.id))
-                try:
-                    c = await event.get_chat()
-                    cname = getattr(c, 'title', None) or getattr(c, 'first_name', None) or "Чат"
-                    save_user_chat(user_id, cid, cname)
-                except: pass
+                if not event.is_private:
+                    try:
+                        c = await event.get_chat()
+                        cname = getattr(c, 'title', None) or getattr(c, 'first_name', None) or "Чат"
+                        save_user_chat(user_id, cid, cname)
+                    except: pass
 
-                # Проверяем команды
                 stripped = text.strip()
                 if not stripped: return
+
                 # Калькулятор — редактируем сообщение
                 if is_calc_expr(stripped):
                     r, err = calculate_expression(stripped)
@@ -914,13 +986,28 @@ async def start_telethon_listener(user_id, session_str):
                         try: await event.edit(f"{stripped} = {f}")
                         except: pass
                         return
-                # Команды бота
+
+                # Ответ на команду юзеру
+                async def send_reply(msg):
+                    try: await client.send_message(cid, msg)
+                    except: pass
+
+                # Команды
                 handled = await process_command_text(
                     stripped, user_id, cid, bc_id=None,
-                    telethon_client=client, telethon_event=event)
+                    telethon_client=client, telethon_event=event, send_reply=send_reply)
                 if handled:
                     try: await event.delete()
                     except: pass
+                    return
+
+                # Подмена и ЛИНК
+                if not event.is_private:
+                    ft, modified = apply_modifications(stripped, cid, event.message.entities)
+                    if modified:
+                        try: await event.edit(ft, parse_mode='html')
+                        except Exception as e: logging.warning(f"edit mod: {e}")
+
             except Exception as e:
                 logging.error(f"outgoing: {e}", exc_info=True)
 
@@ -977,17 +1064,15 @@ def get_users_keyboard(page=0):
         on = "🟢" if uid in telethon_clients else "⚪"
         kb.append([InlineKeyboardButton(text=f"{on}{sess}{icon} {dn} ({cc})", callback_data=f"user_{uid}")])
     nav = []
-    if page > 0: nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"users_page_{page-1}"))
-    if e < len(users): nav.append(InlineKeyboardButton(text="➡️ Вперед", callback_data=f"users_page_{page+1}"))
+    if page > 0: nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"users_page_{page-1}"))
+    if e < len(users): nav.append(InlineKeyboardButton(text="➡️", callback_data=f"users_page_{page+1}"))
     if nav: kb.append(nav)
-    kb.append([InlineKeyboardButton(text="🔙 Назад в админку", callback_data="admin_panel_back")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel_back")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# ПАГИНАЦИЯ 50 ЧАТОВ НА СТРАНИЦУ
 def get_user_chats_live_keyboard(user_id, page=0):
     chats = get_user_chats(user_id)
-    kb = []
-    per = 50
+    kb = []; per = 50
     s = page * per; e = min(s + per, len(chats))
     for i in range(s, e):
         cid, cn = chats[i]
@@ -1042,10 +1127,7 @@ def format_chat_messages(user_id, chat_id, page=0):
         body = "…" + body[-(3800 - len(header)):]
     return header + body, total
 
-# ==================== ХЕНДЛЕРЫ: СНАЧАЛА КОМАНДЫ РЕБЁНКА ====================
-# ВАЖНО: эти хендлеры должны быть зарегистрированы ДО общего @dp.message()
-# Также работают для business_message.
-
+# ==================== ХЕНДЛЕРЫ (команды ребёнка ВЫШЕ) ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -1062,12 +1144,12 @@ async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
-# ===== РЕБЁНОК: 4 хендлера — message + business_message, чтобы работало везде =====
+# ================== РЕБЁНОК ==================
 async def _give_birth(message: Message):
     txt = (message.text or "").strip()
-    m = re.match(r"(?i)^родить\s+(сына|дочь)\s+(.+)$", txt)
+    m = re.match(r"(?i)^\s*родить\s+(сына|дочь)\s+(.+)$", txt)
     if not m:
-        await message.answer("❌ Формат: <code>родить сына Имя</code> / <code>родить дочь Имя</code>", parse_mode="HTML")
+        await message.answer("❌ Формат: <code>родить сына Имя</code> или <code>родить дочь Имя</code>", parse_mode="HTML")
         return
     g = "m" if m.group(1).lower() == "сына" else "f"
     nm = m.group(2).strip().strip("()[]{}").strip()[:32]
@@ -1089,16 +1171,18 @@ async def _child_status(message: Message):
         return
     await message.answer(child_status_text(ch), reply_markup=child_action_keyboard(ch["id"]))
 
+# «родить» — для message и business_message
 @dp.message(F.text.lower().startswith("родить"))
 async def msg_birth(message: Message): await _give_birth(message)
 
 @dp.business_message(F.text.lower().startswith("родить"))
 async def bmsg_birth(message: Message): await _give_birth(message)
 
-@dp.message(F.text.lower().regexp(r"(?i)^наш\s+(сын|дочь)$"))
+# «наш сын» / «наш дочь»
+@dp.message(F.text.lower().regexp(r"(?i)^\s*наш\s+(сын|дочь)\s*$"))
 async def msg_child(message: Message): await _child_status(message)
 
-@dp.business_message(F.text.lower().regexp(r"(?i)^наш\s+(сын|дочь)$"))
+@dp.business_message(F.text.lower().regexp(r"(?i)^\s*наш\s+(сын|дочь)\s*$"))
 async def bmsg_child(message: Message): await _child_status(message)
 
 @dp.callback_query(F.data.startswith("child_"))
@@ -1111,6 +1195,10 @@ async def cb_child_action(callback: CallbackQuery):
     if action == "heal":
         update_child_field(child_id, "health", ch["health"] + 25)
         await callback.answer("💊 Полечили!")
+    elif action == "jerk":
+        update_child_field(child_id, "libido", 0)
+        update_child_field(child_id, "mood", ch["mood"] + 10)
+        await callback.answer("😏 Уф, полегчало!")
     elif action in NEEDS:
         update_child_field(child_id, action, ch[action] + RESTORE_AMOUNT[action])
         await callback.answer("✅")
@@ -1134,6 +1222,12 @@ async def child_decay_loop():
                     if n <= REMINDER_THRESHOLD:
                         crit += 1
                         if old[k] > REMINDER_THRESHOLD: rem.append(k)
+                # libido РАСТЁТ
+                lib = min(100, ch.get("libido", 0) + LIBIDO_RISE_PER_TICK)
+                # если libido>=90 — mood получает штраф
+                if lib >= 90:
+                    nv["mood"] = max(0, nv["mood"] - LIBIDO_MOOD_PENALTY)
+
                 nh = ch["health"] - HEALTH_DECAY_IF_CRITICAL * crit if crit else ch["health"] + HEALTH_REGEN_IF_OK
                 nh = max(0, min(100, nh))
                 if nh <= 0:
@@ -1143,10 +1237,14 @@ async def child_decay_loop():
                     try: await bot.send_message(ch["owner_id"], f"💀 {gw} {ch['name']} {dw}.")
                     except: pass
                     continue
-                update_child_full(ch["id"], nh, nv)
+                update_child_full(ch["id"], nh, nv, lib)
                 for k in rem:
                     try: await bot.send_message(ch["owner_id"], f"{ch['name']}: {REMINDER_PHRASES[k]}",
                                                 reply_markup=child_action_keyboard(ch["id"], highlight=k))
+                    except: pass
+                if lib == 100 and ch.get("libido", 0) < 100:
+                    try: await bot.send_message(ch["owner_id"], f"🔥 {ch['name']} очень возбуждён(а)... нажми «🍆 Подрочить».",
+                                                reply_markup=child_action_keyboard(ch["id"]))
                     except: pass
         except: pass
 
@@ -1175,7 +1273,7 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
                              resize_keyboard=True, one_time_keyboard=True)
     await callback.message.answer(
-        "🔐 <b>Подключение аккаунта для работы в группах и чтения чатов</b>\n\n"
+        "🔐 <b>Подключение аккаунта</b>\n\n"
         "📱 Введи номер в формате <code>79123456789</code> или нажми кнопку.",
         parse_mode="HTML", reply_markup=kb)
     await state.set_state(AuthState.waiting_for_phone)
@@ -1202,7 +1300,7 @@ async def process_phone(message: Message, state: FSMContext):
                              parse_mode="HTML", reply_markup=vc)
         await state.set_state(AuthState.waiting_for_code)
     except FloodWaitError as e:
-        await message.answer(f"⏳ Подожди {e.seconds} сек"); await state.clear()
+        await message.answer(f"⏳ Подожди {e.seconds}"); await state.clear()
     except Exception as e:
         await message.answer(f"❌ {e}"); await state.clear()
 
@@ -1214,7 +1312,7 @@ async def process_code(message: Message, state: FSMContext):
     data = await state.get_data()
     phone = data.get("phone"); client = data.get("client")
     if not phone or not client:
-        await message.answer("❌ Данные устарели"); await state.clear(); return
+        await message.answer("❌ Устарело"); await state.clear(); return
     await message.answer("🔄 Проверка...")
     try:
         await client.sign_in(phone=phone, code=code)
@@ -1225,9 +1323,7 @@ async def process_code(message: Message, state: FSMContext):
         try: await client.disconnect()
         except: pass
         await message.answer(f"✅ <b>Аккаунт подключён!</b>\n\n"
-                             f"📥 Загружаю историю чатов в фоне.\n"
-                             f"Теперь ты можешь использовать команды в любых группах от своего имени.\n\n"
-                             f"{TEXT_COMMANDS_HELP}",
+                             f"📥 Загружаю историю в фоне.\n\n{TEXT_COMMANDS_HELP}",
                              parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
         await state.clear()
     except SessionPasswordNeededError:
@@ -1298,7 +1394,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         try:
             await callback.message.edit_text(
                 f"📋 <b>Чаты {get_user_mention(u)}</b>\n\n"
-                f"Всего: <code>{len(chats)}</code> (стр. {p+1}, по 50 на стр.)",
+                f"Всего: <code>{len(chats)}</code> (стр. {p+1}, по 50)",
                 reply_markup=get_user_chats_live_keyboard(u, p), parse_mode="HTML")
         except TelegramBadRequest: pass
         await callback.answer(); return
@@ -1368,9 +1464,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="❌ Отмена", callback_data=f"opnch_{u}_{cid}")]])
         try:
             await callback.message.edit_text(
-                f"⚠️ <b>Удалить чат «{cn}»?</b>\n\n"
-                f"Способ: {what}\n"
-                f"Остальные чаты не тронутся.",
+                f"⚠️ <b>Удалить чат «{cn}»?</b>\n\nСпособ: {what}\nОстальные чаты не тронутся.",
                 reply_markup=kb, parse_mode="HTML")
         except TelegramBadRequest: pass
         await callback.answer(); return
@@ -1395,16 +1489,9 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
                 ok = True
             except Exception as e: err = str(e)
         else:
-            # Fallback — Business API
             bc_id = chat_to_bc.get((u, cid))
-            if bc_id:
-                try:
-                    await bot.delete_business_messages(business_connection_id=bc_id, message_ids=[cid])
-                except: pass
-                # Пометим в БД, что удалить нельзя, но уберём из списка
-                ok = True
-            else:
-                err = "Ни Telethon-сессии, ни бизнес-связи нет."
+            if bc_id: ok = True
+            else: err = "Ни Telethon-сессии, ни бизнес-связи."
         if ok:
             clear_chat_messages(u, cid); delete_user_chat(u, cid)
             await callback.answer("✅ Готово", show_alert=True)
@@ -1466,17 +1553,16 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         sess = get_session(u); online = "🟢 онлайн" if u in telethon_clients else "⚪ оффлайн"
         sstat = "🔑 есть" if sess else "🚫 отсутствует"
         rows = [[InlineKeyboardButton(text=f"📋 Чаты ({cc})", callback_data=f"live_chats_{u}_0")]]
-        if sess: rows.append([InlineKeyboardButton(text="🔄 Поднять клиент", callback_data=f"restart_client_{u}")])
-        if sess: rows.append([InlineKeyboardButton(text="📥 Загрузить всю историю", callback_data=f"fullbf_{u}")])
+        if sess:
+            rows.append([InlineKeyboardButton(text="🔄 Поднять клиент", callback_data=f"restart_client_{u}")])
+            rows.append([InlineKeyboardButton(text="📥 Загрузить всю историю", callback_data=f"fullbf_{u}")])
         rows.append([InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{u}")])
         rows.append([InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_user_{u}")])
         rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")])
         try:
             await callback.message.edit_text(
-                f"👤 <b>Инфо</b>\n\n"
-                f"ID: <code>{u}</code>\nИмя: {get_user_mention(u)}\n"
-                f"Клиент: {online}\nTelethon: {sstat}\n"
-                f"Чатов: <code>{cc}</code>\nСообщений: <code>{mc}</code>",
+                f"👤 <b>Инфо</b>\n\nID: <code>{u}</code>\nИмя: {get_user_mention(u)}\n"
+                f"Клиент: {online}\nTelethon: {sstat}\nЧатов: <code>{cc}</code>\nСообщений: <code>{mc}</code>",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
         except TelegramBadRequest: pass
         await callback.answer(); return
@@ -1493,7 +1579,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             del telethon_clients[u]
         c = await start_telethon_listener(u, sess)
         if c: await callback.message.answer(f"✅ Клиент <code>{u}</code> запущен!", parse_mode="HTML")
-        else: await callback.message.answer(f"❌ Не удалось.")
+        else: await callback.message.answer("❌ Не удалось.")
         return
 
     if data.startswith("fullbf_"):
@@ -1504,7 +1590,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             if sess: c = await start_telethon_listener(u, sess)
         if not c:
             await callback.answer("❌ Нет сессии", show_alert=True); return
-        await callback.answer("⏳ Запущено в фоне", show_alert=False)
+        await callback.answer("⏳ Запущено", show_alert=False)
         msg = callback.message
         async def _run():
             try:
@@ -1530,8 +1616,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         cc = count_user_chats(u); mc = count_user_messages(u)
         try:
             await callback.message.edit_text(
-                f"👤 ID: <code>{u}</code>\nИмя: {get_user_mention(u)}\nСтатус: {status}\n"
-                f"Чатов: <code>{cc}</code>\nСообщений: <code>{mc}</code>",
+                f"👤 ID: <code>{u}</code>\nИмя: {get_user_mention(u)}\nСтатус: {status}\nЧатов: <code>{cc}</code>\nСообщений: <code>{mc}</code>",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=f"📋 Чаты ({cc})", callback_data=f"live_chats_{u}_0")],
                     [InlineKeyboardButton(text="🚫 Забанить/Разбанить", callback_data=f"ban_user_{u}")],
@@ -1637,11 +1722,11 @@ async def global_update_handler(update: Update, bot: Bot):
                     msg_cache.pop((ccid, cmid), None)
     except Exception as e: logging.error(f"deleted: {e}")
 
-# ==================== ОСНОВНОЙ ОБРАБОТЧИК ====================
+# ==================== ОСНОВНОЙ ====================
 @dp.message()
 @dp.business_message()
 async def handle(message: Message):
-    global bot_id, CHANNEL_LINK
+    global bot_id
     try:
         if not message.from_user or message.from_user.is_bot: return
         uid = int(message.from_user.id)
@@ -1651,7 +1736,6 @@ async def handle(message: Message):
         owner_id = bc_owners.get(bc_id) if bc_id else None
 
         if bc_id:
-            # в business-чате: uid = собеседник, owner_id = владелец
             if bc_id not in bc_owners:
                 try:
                     ci = await bot.get_business_connection(bc_id)
@@ -1662,18 +1746,14 @@ async def handle(message: Message):
                 except: pass
             if owner_id:
                 chat_name = message.chat.title or message.chat.first_name or "Чат"
-                # Сохраняем под владельцем
                 save_user_chat(owner_id, chat_id, chat_name)
                 chat_to_bc[(owner_id, chat_id)] = bc_id
                 chat_to_owner[chat_id] = owner_id
-                # Сохраняем сообщение собеседника в БД владельца
                 if message.text:
-                    save_chat_message(
-                        owner_id, chat_id, uid,
-                        message.from_user.first_name or "User",
-                        message.from_user.username or "",
-                        message.text,
-                        message.message_id)
+                    save_chat_message(owner_id, chat_id, uid,
+                                      message.from_user.first_name or "User",
+                                      message.from_user.username or "",
+                                      message.text, message.message_id)
             t = (chat_id, bc_id)
             if t in recent_business_chats: recent_business_chats.remove(t)
             recent_business_chats.append(t)
@@ -1704,8 +1784,6 @@ async def handle(message: Message):
 
         text_raw = message.text
         if not text_raw: return
-        low = text_raw.lower().strip()
-        task_key = (chat_id, bc_id)
         co = owner_id or uid
 
         if is_calc_expr(text_raw):
@@ -1729,27 +1807,14 @@ async def handle(message: Message):
                 except: pass
                 return
 
-        # Команды через общую функцию
         handled = await process_command_text(text_raw, co, chat_id, bc_id=bc_id)
         if handled:
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
-        # Замена ссылки / подмена
-        ft = text_raw; nm = False; pm = None
-        if chat_id in substitutions:
-            s = substitutions[chat_id]
-            ft = f"{s['text']} {text_raw}" if s["mode"] == 1 else f"{text_raw} {s['text']}"
-            nm = True; pm = "HTML"
-        if chat_id in link_chats and CHANNEL_LINK:
-            hl = False
-            if message.entities:
-                for e in message.entities:
-                    if e.type in ["url", "text_link"]: hl = True; break
-            if not hl and CHANNEL_LINK not in ft:
-                ft = f'<a href="{CHANNEL_LINK}">{ft}</a>'
-                nm = True; pm = "HTML"
-        if nm: await edit_message(chat_id, message.message_id, ft, bc_id, parse_mode=pm)
+        ft, modified = apply_modifications(text_raw, chat_id, message.entities)
+        if modified:
+            await edit_message(chat_id, message.message_id, ft, bc_id, parse_mode="HTML")
     except Exception as e: logging.error(f"handle: {e}", exc_info=True)
 
 # ==================== ВЕБ ====================
