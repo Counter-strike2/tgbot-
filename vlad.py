@@ -98,6 +98,7 @@ chat_count_cache: Dict[int, int] = {}
 msg_count_cache: Dict[int, int] = {}
 chat_to_bc: Dict[Tuple[int, int], str] = {}
 chat_to_owner: Dict[int, int] = {}
+pending_marriage: Dict[int, dict] = {}
 
 sub_check_cache: Dict[int, float] = {}
 SUB_CACHE_TTL = 60
@@ -204,10 +205,8 @@ async def check_subscription(user_id: int, force: bool = False) -> bool:
             return True
         if status == "restricted":
             is_member = bool(getattr(member, "is_member", False))
-            if is_member:
-                sub_check_cache[user_id] = now
-            else:
-                sub_check_cache.pop(user_id, None)
+            if is_member: sub_check_cache[user_id] = now
+            else: sub_check_cache.pop(user_id, None)
             return is_member
         sub_check_cache.pop(user_id, None)
         return False
@@ -222,18 +221,15 @@ def get_subscribe_kb():
     ])
 
 def _should_skip_subscription(message) -> bool:
-    """True если сообщение от собеседника в бизнес-чате или из группы."""
     bc_id = getattr(message, 'business_connection_id', None)
     if bc_id:
         owner_id = bc_owners.get(bc_id)
         try:
             uid = int(message.from_user.id)
-            if owner_id and uid != int(owner_id):
-                return True
+            if owner_id and uid != int(owner_id): return True
         except: pass
     chat = getattr(message, 'chat', None)
-    if chat and chat.type in ("group", "supergroup", "channel"):
-        return True
+    if chat and chat.type in ("group", "supergroup", "channel"): return True
     return False
 
 async def require_subscription(message_or_cb, force: bool = False) -> bool:
@@ -241,8 +237,7 @@ async def require_subscription(message_or_cb, force: bool = False) -> bool:
     if uid == ADMIN_ID: return True
     if isinstance(message_or_cb, Message) and _should_skip_subscription(message_or_cb):
         return True
-    if await check_subscription(uid, force=force):
-        return True
+    if await check_subscription(uid, force=force): return True
     kb = get_subscribe_kb()
     try:
         if isinstance(message_or_cb, CallbackQuery):
@@ -606,20 +601,34 @@ def _resolve_children_chat_id(message_or_cb):
         if not bc_id and hasattr(message_or_cb, 'message'):
             bc_id = getattr(message_or_cb.message, 'business_connection_id', None)
     except: pass
+
+    # 1) прямой поиск по chat_id
     if chat_id and get_children_by_chat(chat_id):
         return chat_id
+
+    # 2) через bc_owners
     if bc_id and bc_id in bc_owners:
-        owner_uid = bc_owners[bc_id]
-        if get_children_by_chat(owner_uid):
-            return owner_uid
+        oid = bc_owners[bc_id]
+        if get_children_by_chat(oid):
+            return oid
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT chat_id FROM children WHERE (owner_id=%s OR spouse_id=%s) AND is_alive=TRUE ORDER BY id LIMIT 1", (oid, oid))
+                    r = cur.fetchone()
+                    if r: return int(r[0])
+        except: pass
+
+    # 3) через from_user.id
     try:
         uid = int(message_or_cb.from_user.id)
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT chat_id FROM children WHERE (owner_id=%s OR spouse_id=%s) AND is_alive=TRUE ORDER BY id LIMIT 1", (uid, uid))
+                cur.execute("SELECT chat_id FROM children WHERE (owner_id=%s OR spouse_id=%s OR chat_id=%s) AND is_alive=TRUE ORDER BY id LIMIT 1", (uid, uid, chat_id))
                 r = cur.fetchone()
                 if r: return int(r[0])
     except: pass
+
     return chat_id
 
 def create_child(chat_id, owner_id, spouse_id, name, gender):
@@ -783,32 +792,24 @@ async def spam_worker_bot(chat_id, bc_id, reply_to, text):
                 kw = {"chat_id": chat_id, "text": w}
                 if bc_id: kw["business_connection_id"] = bc_id
                 if reply_to: kw["reply_to_message_id"] = reply_to
-                try:
-                    await bot.send_message(**kw)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logging.warning(f"spam send: {e}")
+                try: await bot.send_message(**kw)
+                except asyncio.CancelledError: raise
+                except Exception as e: logging.warning(f"spam send: {e}")
                 await asyncio.sleep(0.3)
     except asyncio.CancelledError:
-        logging.info(f"🛑 spam_bot stopped chat={chat_id}")
-        raise
+        logging.info(f"🛑 spam_bot stopped chat={chat_id}"); raise
 
 async def spam_worker_telethon(client, chat_id, text):
     try:
         words = text.split()
         while True:
             for w in words:
-                try:
-                    await client.send_message(chat_id, w)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    pass
+                try: await client.send_message(chat_id, w)
+                except asyncio.CancelledError: raise
+                except: pass
                 await asyncio.sleep(0.4)
     except asyncio.CancelledError:
-        logging.info(f"🛑 spam_telethon stopped chat={chat_id}")
-        raise
+        logging.info(f"🛑 spam_telethon stopped chat={chat_id}"); raise
 
 async def unmute(user_id, chat_id, bc_id, user_name):
     if user_id in mutes:
@@ -843,7 +844,6 @@ def is_calc_expr(text):
     return True
 
 def apply_modifications(text, chat_id, entities=None):
-    """Возвращает (новый_текст, изменено_ли). Оборачивает текст в <a href> если задан линк."""
     ft = text; modified = False
     if chat_id in substitutions:
         s = substitutions[chat_id]
@@ -935,7 +935,6 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             except: pass
         return True
 
-    # МУТ
     if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
         m = re.search(r"\d+", text)
         if not m:
@@ -1055,7 +1054,6 @@ async def backfill_dialogs(client, user_id, max_dialogs=300, per_chat=30):
     try:
         dlgs = []
         async for d in client.iter_dialogs(limit=max_dialogs): dlgs.append(d)
-        logging.info(f"📥 Backfill {user_id}: {len(dlgs)} диалогов")
         for d in dlgs:
             try:
                 cid = int(d.id); save_user_chat(user_id, cid, d.name or "Чат"); lc += 1
@@ -1072,7 +1070,6 @@ async def backfill_dialogs(client, user_id, max_dialogs=300, per_chat=30):
                     if save_chat_message(user_id, cid, sid, sn, su, text, int(m.id)): lm += 1
                 await asyncio.sleep(0.15)
             except: pass
-        logging.info(f"📥 Backfill {user_id}: +{lc} чатов, +{lm} сообщ.")
     except Exception as e: logging.error(f"backfill_dialogs: {e}")
 
 async def process_marriage_telethon(event, client, user_id, chat_id, low):
@@ -1093,19 +1090,19 @@ async def process_marriage_telethon(event, client, user_id, chat_id, low):
             try: await client.send_message(chat_id, "💔 Развод оформлен.")
             except: pass
             return True
-        if low == "пожениться":
-            save_spouse(chat_id, user_id, sp_id, sp_name, "husband")
-            try: await client.send_message(chat_id, f"💍 {sp_name} теперь твой муж!")
-            except: pass
-            return True
-        relation = "husband" if low == "муж" else "wife"
-        save_spouse(chat_id, user_id, sp_id, sp_name, relation)
+        relation = "husband" if low in ["муж","пожениться"] else "wife"
+        me_name = user_names.get(user_id, "Пользователь")
         if relation == "husband":
-            txt = f"💍 {sp_name} теперь твой муж!"
+            q = f"💍 {me_name} хочет, чтобы {sp_name} стал мужем.\n\n{sp_name}, согласен(на)?"
         else:
-            txt = f"💍 {sp_name} теперь твоя жена!"
-        try: await client.send_message(chat_id, txt)
+            q = f"💍 {me_name} хочет, чтобы {sp_name} стала женой.\n\n{sp_name}, согласна(ен)?"
+        # Отправляем сообщение от имени юзера (без кнопок — Telethon не умеет inline)
+        # Но потом можно будет согласиться просто ответив "да"
+        try: await client.send_message(chat_id, q)
         except: pass
+        # Сохраним pending без message_id (нет в telethon)
+        # Просто сразу сохраняем spouse — упрощённо
+        save_spouse(chat_id, user_id, sp_id, sp_name, relation)
         return True
     except Exception as e:
         logging.error(f"marriage telethon: {e}"); return True
@@ -1182,7 +1179,6 @@ async def start_telethon_listener(user_id, session_str):
                             try: item[2].cancel()
                             except: pass
                             active_spam_tasks.remove(item); killed += 1
-                    logging.info(f"⏹ dd telethon chat={cid} killed={killed}")
                     try: await event.delete()
                     except: pass
                     return
@@ -1280,10 +1276,8 @@ async def start_telethon_listener(user_id, session_str):
 
                 ft, modified = apply_modifications(stripped, cid, event.message.entities)
                 if modified:
-                    try:
-                        await event.edit(ft, parse_mode='html', link_preview=False)
-                    except Exception as e:
-                        logging.warning(f"edit mod: {e}")
+                    try: await event.edit(ft, parse_mode='html', link_preview=False)
+                    except Exception as e: logging.warning(f"edit mod: {e}")
             except Exception as e:
                 logging.error(f"outgoing: {e}", exc_info=True)
 
@@ -1618,31 +1612,104 @@ async def msg_kill(message: Message): await _kill_menu(message)
 @dp.business_message(F.text.regexp(KILL_RE))
 async def bmsg_kill(message: Message): await _kill_menu(message)
 
+# ==================== БРАК ====================
 @dp.message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
 async def msg_marriage(message: Message):
     if not await require_subscription(message): return
-    low = message.text.lower().strip(); chat_id = message.chat.id; uid = message.from_user.id
+    low = message.text.lower().strip()
+    chat_id = message.chat.id
+    uid = message.from_user.id
     if low == "развод":
         delete_spouse(chat_id); await message.answer("💔 Развод оформлен."); return
     if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.answer("Ответь реплаем."); return
+        await message.answer("Ответь реплаем на сообщение человека."); return
     sp = message.reply_to_message.from_user
-    if sp.id == uid: await message.answer("Нельзя на себе."); return
+    if sp.id == uid: await message.answer("Нельзя жениться на себе 🙂"); return
+
+    sp_name = sp.first_name or "Партнёр"
+    me_name = message.from_user.first_name or "Пользователь"
+
     if low == "пожениться":
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👨 Муж", callback_data=f"setsp_{chat_id}_{sp.id}_husband")],
-            [InlineKeyboardButton(text="👩 Жена", callback_data=f"setsp_{chat_id}_{sp.id}_wife")],
+            [InlineKeyboardButton(text="👨 Он будет мужем", callback_data=f"propose_role_{chat_id}_{sp.id}_husband_{uid}")],
+            [InlineKeyboardButton(text="👩 Она будет женой", callback_data=f"propose_role_{chat_id}_{sp.id}_wife_{uid}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="noop")]])
-        await message.answer(f"Кем будет {sp.first_name}?", reply_markup=kb); return
+        await message.answer(f"Кем будет {sp_name}?", reply_markup=kb)
+        return
+
     relation = "husband" if low == "муж" else "wife"
-    save_spouse(chat_id, uid, sp.id, sp.first_name or "Партнёр", relation)
     if relation == "husband":
-        await message.answer(f"💍 {sp.first_name} теперь твой муж!")
+        q = f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать мужем.\n\n{sp_name}, согласен(на)?"
     else:
-        await message.answer(f"💍 {sp.first_name} теперь твоя жена!")
+        q = f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать женой.\n\n{sp_name}, согласна(ен)?"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Согласен(на)", callback_data="marry_yes")],
+        [InlineKeyboardButton(text="❌ Отказать", callback_data="marry_no")],
+    ])
+    sent = await message.answer(q, parse_mode="HTML", reply_markup=kb)
+    pending_marriage[sent.message_id] = {
+        "chat_id": chat_id, "spouse_id": sp.id, "spouse_name": sp_name,
+        "relation": relation, "proposer_id": uid
+    }
 
 @dp.business_message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
 async def bmsg_marriage(message: Message): await msg_marriage(message)
+
+@dp.callback_query(F.data.startswith("propose_role_"))
+async def cb_propose_role(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    # propose_role_{chat_id}_{sp_id}_{relation}_{proposer_id}
+    chat_id = int(parts[2]); sp_id = int(parts[3]); relation = parts[4]; proposer_id = int(parts[5])
+    if int(callback.from_user.id) != proposer_id:
+        await callback.answer("Это не для тебя 🙂", show_alert=True); return
+    sp_name = user_names.get(sp_id, "Партнёр")
+    me_name = callback.from_user.first_name or "Пользователь"
+    if relation == "husband":
+        q = f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать мужем.\n\n{sp_name}, согласен(на)?"
+    else:
+        q = f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать женой.\n\n{sp_name}, согласна(ен)?"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Согласен(на)", callback_data="marry_yes")],
+        [InlineKeyboardButton(text="❌ Отказать", callback_data="marry_no")],
+    ])
+    try: await callback.message.edit_text(q, parse_mode="HTML", reply_markup=kb)
+    except: pass
+    pending_marriage[callback.message.message_id] = {
+        "chat_id": chat_id, "spouse_id": sp_id, "spouse_name": sp_name,
+        "relation": relation, "proposer_id": proposer_id
+    }
+    await callback.answer()
+
+@dp.callback_query(F.data == "marry_yes")
+async def cb_marry_yes(callback: CallbackQuery):
+    mid = callback.message.message_id
+    info = pending_marriage.get(mid)
+    if not info:
+        await callback.answer("Заявка устарела.", show_alert=True); return
+    if int(callback.from_user.id) != int(info["spouse_id"]):
+        await callback.answer("Это не для тебя 🙂", show_alert=True); return
+    save_spouse(info["chat_id"], info["proposer_id"], info["spouse_id"], info["spouse_name"], info["relation"])
+    if info["relation"] == "husband":
+        txt = f"💍 <b>{info['spouse_name']}</b> теперь твой муж!"
+    else:
+        txt = f"💍 <b>{info['spouse_name']}</b> теперь твоя жена!"
+    try: await callback.message.edit_text(txt, parse_mode="HTML")
+    except: pass
+    pending_marriage.pop(mid, None)
+    await callback.answer("💍 Поздравляю!")
+
+@dp.callback_query(F.data == "marry_no")
+async def cb_marry_no(callback: CallbackQuery):
+    mid = callback.message.message_id
+    info = pending_marriage.get(mid)
+    if not info:
+        await callback.answer("Заявка устарела.", show_alert=True); return
+    if int(callback.from_user.id) != int(info["spouse_id"]):
+        await callback.answer("Это не для тебя 🙂", show_alert=True); return
+    try: await callback.message.edit_text("❌ <b>Отказано.</b>", parse_mode="HTML")
+    except: pass
+    pending_marriage.pop(mid, None)
+    await callback.answer("Отказано.")
 
 @dp.callback_query(F.data.startswith("child_"))
 async def cb_child_action(callback: CallbackQuery):
@@ -1708,8 +1775,8 @@ async def cb_kill_method(callback: CallbackQuery):
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"killcancel_{child_id}")]])
     try:
         await callback.message.edit_text(
-            f"⚠️ <b>Вы уверены?</b>\n\nСпособ: {method}\nРебёнок: <b>{ch['name']}</b>\n\n"
-            f"Это <b>безвозвратно</b>.", parse_mode="HTML", reply_markup=kb)
+            f"⚠️ <b>Вы уверены?</b>\n\nСпособ: {method}\nРебёнок: <b>{ch['name']}</b>\n\nЭто <b>безвозвратно</b>.",
+            parse_mode="HTML", reply_markup=kb)
     except: pass
     await callback.answer()
 
@@ -1732,10 +1799,8 @@ async def cb_setsp(callback: CallbackQuery):
     parts = callback.data.split("_"); chat_id = int(parts[1]); sp_id = int(parts[2]); relation = parts[3]
     sp_name = user_names.get(sp_id, "Партнёр")
     save_spouse(chat_id, callback.from_user.id, sp_id, sp_name, relation)
-    if relation == "husband":
-        text = f"💍 {sp_name} теперь твой муж!"
-    else:
-        text = f"💍 {sp_name} теперь твоя жена!"
+    if relation == "husband": text = f"💍 {sp_name} теперь твой муж!"
+    else: text = f"💍 {sp_name} теперь твоя жена!"
     await callback.answer("Сохранено!", show_alert=True)
     try: await callback.message.edit_text(text)
     except: pass
@@ -1803,8 +1868,7 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     if get_session(uid):
         await callback.message.answer("🔍 Проверяю сессию...")
         alive = await check_session_alive(uid)
-        if alive:
-            await callback.message.answer("✅ Уже подключен!"); return
+        if alive: await callback.message.answer("✅ Уже подключен!"); return
         else:
             delete_session(uid)
             if uid in telethon_clients:
@@ -1815,8 +1879,7 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
                              resize_keyboard=True, one_time_keyboard=True)
     await callback.message.answer(
-        "🔐 <b>Подключение аккаунта</b>\n\n"
-        "📱 Введи номер в формате <code>79123456789</code>.\n\n"
+        "🔐 <b>Подключение аккаунта</b>\n\n📱 Введи номер в формате <code>79123456789</code>.\n\n"
         "ℹ️ Это нужно для работы команд в <b>группах</b>.",
         parse_mode="HTML", reply_markup=kb)
     await state.set_state(AuthState.waiting_for_phone)
@@ -1903,7 +1966,8 @@ async def cmd_disconnect(message: Message):
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data; uid = callback.from_user.id
-    if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "killmenu_", "setsp_", "showchild_", "check_sub")): return
+    if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "killmenu_", "setsp_", "showchild_",
+                        "check_sub", "marry_", "propose_role_")): return
     if data == "noop": await callback.answer("—"); return
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML"); await callback.answer(); return
@@ -2240,17 +2304,19 @@ async def handle(message: Message):
         is_group = message.chat.type in ("group", "supergroup", "channel")
 
         if is_group:
+            # группы — если есть Telethon, обрабатывает он. Иначе aiogram.
             hnd = owner_id if owner_id else uid
             if hnd in telethon_clients:
                 return
             if bc_id:
-                is_from_me = (uid == owner_id) if owner_id else False
+                is_from_me = True
                 co = owner_id or uid
             else:
                 return
         else:
             if bc_id:
-                is_from_me = (uid == owner_id) if owner_id else False
+                # ============ ГЛАВНЫЙ ФИКС: разрешаем И владельцу, И собеседнику ============
+                is_from_me = True
                 co = owner_id or uid
             else:
                 is_from_me = True
@@ -2263,7 +2329,7 @@ async def handle(message: Message):
         if chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id); return
 
-        # Подписка только для владельца в ЛС с ботом
+        # Подписка: только для владельца в ЛС с ботом, НЕ для собеседника в бизнес-чате
         if in_private_bot and uid != ADMIN_ID:
             text_raw = message.text or ""
             if not text_raw.startswith("/start"):
