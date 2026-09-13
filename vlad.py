@@ -38,7 +38,6 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 API_ID = 39536916
 API_HASH = "7d8fe2d99b3cb67797f8560016ae69cf"
 
-# ФИКС #5: имя сессии
 DEVICE_MODEL = "norik зайка"
 SYSTEM_VERSION = "1.0"
 APP_VERSION = "1.0"
@@ -60,7 +59,8 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # ==================== ХРАНИЛИЩА ====================
 mutes = {}
-spam_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
+# Список активных спам-задач: (chat_id, owner_id, task)
+active_spam_tasks: List[Tuple[int, int, asyncio.Task]] = []
 user_spam_texts = {}
 link_chats = set()
 reply_guard_chats = set()
@@ -126,9 +126,10 @@ TEXT_COMMANDS_HELP = (
     "• реплаем <code>муж</code> / <code>жена</code> / <code>пожениться</code>\n"
     "• <code>развод</code>\n"
     "• <code>родить сына Имя</code> / <code>родить дочь Имя</code>\n"
-    "• <code>наш сын</code> / <code>наша дочь</code>\n"
-    "• <code>дата регистрации</code> — сколько уже живёт\n"
-    "• <code>убить сына</code> / <code>убить дочь</code>\n\n"
+    "• <code>наш сын</code> / <code>наша дочь</code> (если один)\n"
+    "• <code>наш сын Имя</code> / <code>наша дочь Имя</code> (если много)\n"
+    "• <code>дата регистрации</code>\n"
+    "• <code>убить сына [Имя]</code> / <code>убить дочь [Имя]</code>\n\n"
     "🔹 <b>Калькулятор:</b> <code>1458+2414</code>"
 )
 
@@ -153,7 +154,6 @@ ACTION_LABELS = {
     "hunger": "Покормить", "toilet": "Сводить в туалет", "sleep_need": "Уложить спать",
     "hygiene": "Помыть", "mood": "Поиграть", "attention": "Пообщаться"}
 
-# ФИКС #9: чистый текст без битого HTML
 BIRTH_RULES_TEXT = (
     "У {gender_word_small} есть потребности — за ними правда нужно следить.\n"
     "⚠️ Если любая шкала упадёт до 0 — {who_word} умрёт, и вернуть будет нельзя.\n\n"
@@ -204,7 +204,7 @@ def init_db():
                 chat_id BIGINT PRIMARY KEY, owner_id BIGINT NOT NULL, spouse_id BIGINT NOT NULL,
                 spouse_name TEXT, relation TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS children (
-                id SERIAL PRIMARY KEY, chat_id BIGINT UNIQUE NOT NULL, owner_id BIGINT NOT NULL,
+                id SERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, owner_id BIGINT NOT NULL,
                 spouse_id BIGINT, name TEXT NOT NULL, gender TEXT NOT NULL,
                 health INTEGER NOT NULL DEFAULT 100, hunger INTEGER NOT NULL DEFAULT 100,
                 toilet INTEGER NOT NULL DEFAULT 100, sleep_need INTEGER NOT NULL DEFAULT 100,
@@ -214,10 +214,12 @@ def init_db():
                 birth_date DATE NOT NULL DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_birthday_year INTEGER NOT NULL DEFAULT 0)""")
+            # миграции
             for sql in [
                 "ALTER TABLE children ADD COLUMN IF NOT EXISTS libido INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE children ADD COLUMN IF NOT EXISTS chat_id BIGINT",
                 "ALTER TABLE children ADD COLUMN IF NOT EXISTS spouse_id BIGINT",
+                "ALTER TABLE children DROP CONSTRAINT IF EXISTS children_chat_id_key",
             ]:
                 try: cur.execute(sql)
                 except: pass
@@ -539,26 +541,29 @@ CHILD_COLS = ("id, chat_id, owner_id, spouse_id, name, gender, health, hunger, t
 CHILD_KEYS = ["id", "chat_id", "owner_id", "spouse_id", "name", "gender", "health", "hunger", "toilet",
               "sleep_need", "hygiene", "mood", "attention", "libido", "birth_date", "created_at", "last_birthday_year"]
 
-def get_child_by_chat(chat_id, alive_only=True):
+def get_children_by_chat(chat_id, alive_only=True):
+    """Возвращает СПИСОК детей в чате."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 if alive_only:
-                    cur.execute(f"SELECT {CHILD_COLS} FROM children WHERE chat_id=%s AND is_alive=TRUE", (chat_id,))
+                    cur.execute(f"SELECT {CHILD_COLS} FROM children WHERE chat_id=%s AND is_alive=TRUE ORDER BY id", (chat_id,))
                 else:
-                    cur.execute(f"SELECT {CHILD_COLS} FROM children WHERE chat_id=%s", (chat_id,))
-                row = cur.fetchone()
-                if not row: return None
-                return dict(zip(CHILD_KEYS, row))
+                    cur.execute(f"SELECT {CHILD_COLS} FROM children WHERE chat_id=%s ORDER BY id", (chat_id,))
+                return [dict(zip(CHILD_KEYS, r)) for r in cur.fetchall()]
     except Exception as e:
-        logging.error(f"get_child_by_chat: {e}")
-        return None
+        logging.error(f"get_children_by_chat: {e}")
+        return []
+
+def get_child_by_chat(chat_id, alive_only=True):
+    """Совместимость: если ровно 1 — вернёт его, иначе первый."""
+    kids = get_children_by_chat(chat_id, alive_only=alive_only)
+    return kids[0] if kids else None
 
 def create_child(chat_id, owner_id, spouse_id, name, gender):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM children WHERE chat_id=%s", (chat_id,))
                 cur.execute("""INSERT INTO children (chat_id, owner_id, spouse_id, name, gender)
                     VALUES (%s, %s, %s, %s, %s) RETURNING id, birth_date, created_at""",
                     (chat_id, owner_id, spouse_id, name, gender))
@@ -636,11 +641,10 @@ def bar(v, length=10):
     return "▓" * f + "░" * (length - f)
 
 def existed_time_detailed(created_at):
-    """ФИКС #8: подробная дата регистрации."""
-    if not created_at: return "?"
+    if not created_at: return "?", "?"
     if isinstance(created_at, str):
         try: created_at = datetime.fromisoformat(created_at)
-        except: return "?"
+        except: return "?", "?"
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
@@ -813,10 +817,6 @@ async def clean_inactive_connections():
             except: inactive.append(bc_id)
         for bc_id in inactive:
             bc_owners.pop(bc_id, None); active_chats.pop(bc_id, None)
-            for k in list(spam_tasks.keys()):
-                try: spam_tasks[k].cancel()
-                except: pass
-                del spam_tasks[k]
             recent_business_chats[:] = [i for i in recent_business_chats if i[1] != bc_id]
 
 def calculate_expression(expr):
@@ -890,17 +890,20 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
     if low == "ss":
         t = user_spam_texts.get(str(owner_id))
         if not t:
-            msg = "⚠️ Сначала: set [текст]"
-            try:
-                if telethon_client: await telethon_client.send_message(chat_id, msg)
-                else: await bot.send_message(chat_id, msg, business_connection_id=bc_id)
-            except: pass
+            # в группе молчим, в лс отвечаем
+            if chat_id > 0:
+                try:
+                    if telethon_client: await telethon_client.send_message(chat_id, "Сначала: set [текст]")
+                    else: await bot.send_message(chat_id, "⚠️ Сначала: <code>set [текст]</code>",
+                                                 parse_mode="HTML", business_connection_id=bc_id)
+                except: pass
             return True
-        key = (owner_id, chat_id)
-        if key in spam_tasks:
-            try: spam_tasks[key].cancel()
-            except: pass
-            del spam_tasks[key]
+        # снести любые прошлые задачи для этого чата
+        for item in list(active_spam_tasks):
+            if item[0] == chat_id:
+                try: item[2].cancel()
+                except: pass
+                active_spam_tasks.remove(item)
         if telethon_client:
             task = asyncio.create_task(spam_worker_telethon(telethon_client, chat_id, t))
         else:
@@ -911,32 +914,25 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                     rt = rp.id
                 except: pass
             task = asyncio.create_task(spam_worker_bot(chat_id, bc_id, rt, t))
-        spam_tasks[key] = task
-        logging.info(f"▶️ spam started key={key}")
+        active_spam_tasks.append((chat_id, owner_id, task))
+        logging.info(f"▶️ spam started chat={chat_id} owner={owner_id} total={len(active_spam_tasks)}")
         return True
 
-    # ФИКС #4: dd убивает ВСЕ таски для chat_id, без проверки owner
+    # dd — МОЛЧА, БЕЗ СООБЩЕНИЙ
     if low == "dd":
-        stopped = 0
-        keys_to_kill = [k for k in spam_tasks.keys() if k[1] == chat_id]
-        for k in keys_to_kill:
-            try: spam_tasks[k].cancel()
-            except: pass
-            del spam_tasks[k]
-            stopped += 1
-        # доп: если owner_id другой — всё равно чистим по чату
-        logging.info(f"⏹ dd: chat={chat_id} stopped={stopped}")
-        if send_reply:
-            try: await send_reply(f"🛑 Спам остановлен ({stopped})." if stopped else "Нечего останавливать.")
-            except: pass
-        elif telethon_client:
-            try: await telethon_client.send_message(chat_id, "🛑 Спам остановлен." if stopped else "Нечего останавливать.")
-            except: pass
+        killed = 0
+        for item in list(active_spam_tasks):
+            if item[0] == chat_id:
+                try: item[2].cancel()
+                except: pass
+                active_spam_tasks.remove(item)
+                killed += 1
+        logging.info(f"⏹ dd: chat={chat_id} killed={killed} left={len(active_spam_tasks)}")
         return True
 
     if low.startswith("set "):
         save_spam_text(str(owner_id), text[4:].strip())
-        if send_reply:
+        if chat_id > 0 and send_reply:
             try: await send_reply("✅ Текст сохранён.")
             except: pass
         return True
@@ -1057,8 +1053,7 @@ async def backfill_dialogs(client, user_id, max_dialogs=300, per_chat=30):
     except Exception as e: logging.error(f"backfill_dialogs: {e}")
 
 async def process_marriage_telethon(event, client, user_id, chat_id, low):
-    """ФИКС #2: обработка муж/жена/пожениться/развод через Telethon (реплай)."""
-    if not event.is_reply: 
+    if not event.is_reply:
         if low in ["муж","жена","пожениться"]:
             try: await client.send_message(chat_id, "Ответь (реплаем) на сообщение человека.")
             except: pass
@@ -1078,9 +1073,8 @@ async def process_marriage_telethon(event, client, user_id, chat_id, low):
             except: pass
             return True
         if low == "пожениться":
-            # Спрашиваем кем будет — но из Telethon inline кнопки не сделать, поэтому задаём "муж" по умолчанию
             save_spouse(chat_id, user_id, sp_id, sp_name, "husband")
-            try: await client.send_message(chat_id, f"💍 {sp_name} теперь твой муж в этом чате! Если надо женой — напиши 'жена'")
+            try: await client.send_message(chat_id, f"💍 {sp_name} теперь твой муж. Если надо женой — напиши 'жена'")
             except: pass
             return True
         relation = "husband" if low == "муж" else "wife"
@@ -1152,21 +1146,35 @@ async def start_telethon_listener(user_id, session_str):
                         except: pass
                         return
 
-                # ФИКС #2: муж/жена/пожениться/развод через Telethon
+                # Муж/жена/пожениться/развод
                 if low in ["муж", "жена", "пожениться", "развод"]:
                     await process_marriage_telethon(event, client, user_id, cid, low)
                     try: await event.delete()
                     except: pass
                     return
 
-                # ФИКС #1, #7, #8: команды ребёнка в группе через Telethon
+                # dd — молча, до других команд
+                if low == "dd":
+                    killed = 0
+                    for item in list(active_spam_tasks):
+                        if item[0] == cid:
+                            try: item[2].cancel()
+                            except: pass
+                            active_spam_tasks.remove(item)
+                            killed += 1
+                    logging.info(f"⏹ dd telethon: chat={cid} killed={killed}")
+                    try: await event.delete()
+                    except: pass
+                    return
+
+                # Рождение
                 m_birth = re.match(r"(?i)^\s*родить\s+(сына|дочь)\s+(.+)$", stripped)
                 if m_birth:
                     g = "m" if m_birth.group(1).lower() == "сына" else "f"
                     nm = m_birth.group(2).strip().strip("()[]{}").strip()[:32]
-                    ex = get_child_by_chat(cid)
-                    if ex:
-                        try: await client.send_message(cid, f"В этом чате уже есть ребёнок — {ex['name']}.")
+                    kids = get_children_by_chat(cid)
+                    if any(k["name"].lower() == nm.lower() for k in kids):
+                        try: await client.send_message(cid, f"⚠️ Ребёнок {nm} уже есть.")
                         except: pass
                     else:
                         sp = get_spouse(cid)
@@ -1184,40 +1192,66 @@ async def start_telethon_listener(user_id, session_str):
                     except: pass
                     return
 
-                m_status = re.match(r"(?i)^\s*(?:наш|наша|наше)\s+(сын|сына|дочь|дочку|дочери|ребёнок|ребенок|ребёнка)\s*$", stripped)
+                # Наш сын / наша дочь [Имя]
+                CHILD_STATUS_RE = re.compile(
+                    r"(?i)^\s*(?:наш|наша|наше|мо[йяё])\s+(сын|сына|дочь|дочку|дочери|ребёнок|ребенок|ребёнка)"
+                    r"(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$")
+                m_status = CHILD_STATUS_RE.match(stripped)
                 if m_status:
-                    ch = get_child_by_chat(cid)
-                    if not ch:
-                        try: await client.send_message(cid, "В этом чате нет ребёнка.")
+                    name_arg = m_status.group(2).strip() if m_status.group(2) else None
+                    gender_arg = None
+                    w = m_status.group(1).lower()
+                    if w in ("сын","сына"): gender_arg = "m"
+                    elif w in ("дочь","дочку","дочери"): gender_arg = "f"
+                    kids = get_children_by_chat(cid)
+                    if not kids:
+                        try: await client.send_message(cid, "В этом чате нет детей.")
                         except: pass
                     else:
-                        try:
-                            st = child_status_text(ch).replace("<b>","").replace("</b>","")
-                            await client.send_message(cid, st)
+                        filtered = kids
+                        if gender_arg: filtered = [k for k in filtered if k["gender"] == gender_arg]
+                        if name_arg:
+                            filtered = [k for k in filtered if k["name"].lower() == name_arg.lower()]
+                        if not filtered:
+                            try: await client.send_message(cid, "❌ Не нашёл такого ребёнка.")
+                            except: pass
+                        elif len(filtered) == 1:
+                            try:
+                                st = child_status_text(filtered[0]).replace("<b>","").replace("</b>","")
+                                await client.send_message(cid, st)
+                            except: pass
+                        else:
+                            names = ", ".join(k["name"] for k in filtered[:20])
+                            try:
+                                await client.send_message(cid, f"Несколько: {names}\nПиши: наш сын Имя / наша дочь Имя")
+                            except: pass
+                    try: await event.delete()
+                    except: pass
+                    return
+
+                # Дата регистрации
+                if low.startswith("дата регистрации"):
+                    kids = get_children_by_chat(cid)
+                    if not kids:
+                        try: await client.send_message(cid, "В этом чате нет детей.")
+                        except: pass
+                    else:
+                        lines = []
+                        for k in kids[:20]:
+                            detailed, ds = existed_time_detailed(k.get("created_at"))
+                            gw = "Сын" if k["gender"] == "m" else "Дочь"
+                            lines.append(f"{gw} {k['name']}: {detailed} (с {ds})")
+                        try: await client.send_message(cid, "📅 " + "\n".join(lines))
                         except: pass
                     try: await event.delete()
                     except: pass
                     return
 
-                # дата регистрации
-                if low in ["дата регистрации", "дата регистрации сына", "дата регистрации дочери"]:
-                    ch = get_child_by_chat(cid)
-                    if not ch:
-                        try: await client.send_message(cid, "В этом чате нет ребёнка.")
-                        except: pass
-                    else:
-                        detailed, ds = existed_time_detailed(ch.get("created_at"))
-                        try:
-                            await client.send_message(cid, f"📅 {ch['name']} живёт уже: {detailed}\nСоздан: {ds}")
-                        except: pass
-                    try: await event.delete()
-                    except: pass
-                    return
-
-                # убить
-                m_kill = re.match(r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+(сына|дочь|дочери|ребёнка|ребенка)\s*$", stripped)
+                # Убить
+                m_kill = re.match(r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+"
+                                  r"(сына|дочь|дочери|ребёнка|ребенка)(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$", stripped)
                 if m_kill:
-                    try: await client.send_message(cid, "Команду убийства используй через кнопку или в личке с ботом — там нужно подтверждение.")
+                    try: await client.send_message(cid, "Убийство — в личке с ботом, там подтверждение.")
                     except: pass
                     try: await event.delete()
                     except: pass
@@ -1235,7 +1269,6 @@ async def start_telethon_listener(user_id, session_str):
                     except: pass
                     return
 
-                # подмена/линк — только в группах
                 if not event.is_private:
                     ft, modified = apply_modifications(stripped, cid, event.message.entities)
                     if modified:
@@ -1269,7 +1302,6 @@ async def restore_all_sessions():
         await asyncio.sleep(0.5)
     logging.info(f"✅ Активных клиентов: {len(telethon_clients)}")
 
-# ФИКС #3: проверка живая ли сессия
 async def check_session_alive(user_id):
     sess = get_session(user_id)
     if not sess: return False
@@ -1393,7 +1425,7 @@ async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
-# ===== РОЖДЕНИЕ =====
+# ===== РОЖДЕНИЕ (можно много) =====
 async def _give_birth(message: Message):
     txt = (message.text or "").strip()
     m = re.match(r"(?i)^\s*родить\s+(сына|дочь)\s+(.+)$", txt)
@@ -1406,11 +1438,12 @@ async def _give_birth(message: Message):
         await message.answer("❌ Имя не указано."); return
     uid = message.from_user.id
     chat_id = message.chat.id
-    ex = get_child_by_chat(chat_id)
-    if ex:
-        gw = "Сын" if ex["gender"] == "m" else "Дочь"
-        await message.answer(f"В этом чате уже есть ребёнок — {gw} {ex['name']}. Сначала избавься от него.")
+
+    kids = get_children_by_chat(chat_id)
+    if any(k["name"].lower() == nm.lower() for k in kids):
+        await message.answer(f"⚠️ Ребёнок с именем <b>{nm}</b> уже есть в этом чате.", parse_mode="HTML")
         return
+
     sp = get_spouse(chat_id)
     spouse_id = None
     if sp:
@@ -1420,16 +1453,65 @@ async def _give_birth(message: Message):
         await message.answer("❌ Не получилось."); return
     await message.answer(birth_rules_text(ch["name"], ch["gender"], ch["birth_date"]))
 
-async def _child_status(message: Message):
-    chat_id = message.chat.id
-    ch = get_child_by_chat(chat_id)
-    if not ch:
-        await message.answer("В этом чате пока нет ребёнка.\nНапиши: <code>родить сына Имя</code>", parse_mode="HTML")
-        return
-    await message.answer(child_status_text(ch), reply_markup=child_action_keyboard(ch["id"]))
+CHILD_STATUS_RE = re.compile(
+    r"(?i)^\s*(?:наш|наша|наше|мо[йяё])\s+(сын|сына|дочь|дочку|дочери|ребёнок|ребенок|ребёнка)"
+    r"(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$"
+)
 
-# ФИКС #7: "наш сын" / "наша дочь" и все варианты
-CHILD_STATUS_RE = re.compile(r"(?i)^\s*(?:наш|наша|наше)\s+(сын|сына|дочь|дочку|дочери|ребёнок|ребенок|ребёнка)\s*$")
+async def _child_status(message: Message):
+    txt = (message.text or "").strip()
+    m = CHILD_STATUS_RE.match(txt)
+    name_arg = None; gender_arg = None
+    if m:
+        w = m.group(1).lower()
+        if w in ("сын", "сына"): gender_arg = "m"
+        elif w in ("дочь", "дочку", "дочери"): gender_arg = "f"
+        if m.group(2): name_arg = m.group(2).strip()
+
+    kids = get_children_by_chat(message.chat.id)
+    if not kids:
+        await message.answer("В этом чате пока нет детей.\nНапиши: <code>родить сына Имя</code> или <code>родить дочь Имя</code>",
+                             parse_mode="HTML")
+        return
+
+    filtered = kids
+    if gender_arg: filtered = [k for k in filtered if k["gender"] == gender_arg]
+    if name_arg:
+        nl = name_arg.lower()
+        filtered = [k for k in filtered if k["name"].lower() == nl]
+
+    if not filtered:
+        if name_arg:
+            await message.answer(f"❌ Не нашёл ребёнка с именем <b>{name_arg}</b>.", parse_mode="HTML")
+        else:
+            await message.answer("❌ Не нашёл такого ребёнка.", parse_mode="HTML")
+        return
+
+    if len(filtered) == 1:
+        ch = filtered[0]
+        await message.answer(child_status_text(ch), reply_markup=child_action_keyboard(ch["id"]))
+        return
+
+    rows = []
+    for k in filtered[:20]:
+        gw = "👦" if k["gender"] == "m" else "👧"
+        rows.append([InlineKeyboardButton(text=f"{gw} {k['name']}", callback_data=f"showchild_{k['id']}")])
+    await message.answer(
+        f"У тебя несколько — выбери:\n(или пиши: <code>наш сын Имя</code> / <code>наша дочь Имя</code>)",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.callback_query(F.data.startswith("showchild_"))
+async def cb_showchild(callback: CallbackQuery):
+    child_id = int(callback.data.split("_")[1])
+    kids = get_children_by_chat(callback.message.chat.id)
+    ch = next((k for k in kids if k["id"] == child_id), None)
+    if not ch:
+        await callback.answer("Не найден", show_alert=True); return
+    try:
+        await callback.message.edit_text(child_status_text(ch), reply_markup=child_action_keyboard(ch["id"]))
+    except: pass
+    await callback.answer()
 
 @dp.message(F.text.lower().startswith("родить"))
 async def msg_birth(message: Message): await _give_birth(message)
@@ -1445,10 +1527,18 @@ async def bmsg_child(message: Message): await _child_status(message)
 
 # ===== ДАТА РЕГИСТРАЦИИ =====
 async def _registration_date(message: Message):
-    ch = get_child_by_chat(message.chat.id)
-    if not ch:
-        await message.answer("В этом чате нет ребёнка.")
+    kids = get_children_by_chat(message.chat.id)
+    if not kids:
+        await message.answer("В этом чате нет детей."); return
+    if len(kids) > 1:
+        lines = ["📅 <b>Даты регистрации:</b>\n"]
+        for k in kids[:20]:
+            detailed, ds = existed_time_detailed(k.get("created_at"))
+            gw = "Сын" if k["gender"] == "m" else "Дочь"
+            lines.append(f"{gw} <b>{k['name']}</b>: {detailed} (создан {ds})")
+        await message.answer("\n".join(lines), parse_mode="HTML")
         return
+    ch = kids[0]
     detailed, ds = existed_time_detailed(ch.get("created_at"))
     gw = "Сын" if ch["gender"] == "m" else "Дочь"
     await message.answer(
@@ -1458,33 +1548,79 @@ async def _registration_date(message: Message):
         f"Живёт уже: <b>{detailed}</b>",
         parse_mode="HTML")
 
-@dp.message(F.text.lower().in_(["дата регистрации", "дата регистрации сына", "дата регистрации дочери"]))
+@dp.message(F.text.lower().startswith("дата регистрации"))
 async def msg_regdate(message: Message): await _registration_date(message)
 
-@dp.business_message(F.text.lower().in_(["дата регистрации", "дата регистрации сына", "дата регистрации дочери"]))
+@dp.business_message(F.text.lower().startswith("дата регистрации"))
 async def bmsg_regdate(message: Message): await _registration_date(message)
 
 # ===== УБИЙСТВО =====
-KILL_RE = re.compile(r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+(сына|дочь|дочери|ребёнка|ребенка)\s*$")
+KILL_RE = re.compile(
+    r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+"
+    r"(сына|дочь|дочери|ребёнка|ребенка)"
+    r"(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$"
+)
 
 async def _kill_menu(message: Message):
-    chat_id = message.chat.id
-    ch = get_child_by_chat(chat_id)
-    if not ch:
-        await message.answer("В этом чате нет ребёнка."); return
-    rows = []
-    pair = []
-    for idx, m in enumerate(KILL_METHODS):
-        pair.append(InlineKeyboardButton(text=m, callback_data=f"killm_{ch['id']}_{idx}"))
+    txt = (message.text or "").strip()
+    m = KILL_RE.match(txt)
+    name_arg = m.group(2).strip() if m and m.group(2) else None
+    gender_arg = None
+    if m:
+        w = m.group(1).lower()
+        if w == "сына": gender_arg = "m"
+        elif w in ("дочь","дочери"): gender_arg = "f"
+
+    kids = get_children_by_chat(message.chat.id)
+    if not kids:
+        await message.answer("В этом чате нет детей."); return
+    filtered = kids
+    if gender_arg: filtered = [k for k in filtered if k["gender"] == gender_arg]
+    if name_arg:
+        filtered = [k for k in filtered if k["name"].lower() == name_arg.lower()]
+    if not filtered:
+        await message.answer("❌ Не нашёл такого ребёнка."); return
+    if len(filtered) > 1:
+        rows = []
+        for k in filtered[:20]:
+            gw = "👦" if k["gender"] == "m" else "👧"
+            rows.append([InlineKeyboardButton(text=f"{gw} {k['name']}", callback_data=f"killmenu_{k['id']}")])
+        await message.answer("Кого убить?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return
+    ch = filtered[0]
+    rows = []; pair = []
+    for idx, method in enumerate(KILL_METHODS):
+        pair.append(InlineKeyboardButton(text=method, callback_data=f"killm_{ch['id']}_{idx}"))
         if len(pair) == 2: rows.append(pair); pair = []
     if pair: rows.append(pair)
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=f"killcancel_{ch['id']}")])
-    gw = "Сына" if ch["gender"] == "m" else "Дочь"
+    gw = "сына" if ch["gender"] == "m" else "дочь"
     await message.answer(
-        f"⚠️ <b>Убить {gw.lower()}а — {ch['name']}?</b>\n\n"
-        f"Выбери способ убийства. Это <b>безвозвратно</b>:",
+        f"⚠️ <b>Убить {gw} — {ch['name']}?</b>\n\nВыбери способ убийства. Это <b>безвозвратно</b>:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.callback_query(F.data.startswith("killmenu_"))
+async def cb_killmenu(callback: CallbackQuery):
+    child_id = int(callback.data.split("_")[1])
+    kids = get_children_by_chat(callback.message.chat.id)
+    ch = next((k for k in kids if k["id"] == child_id), None)
+    if not ch:
+        await callback.answer("Не найден"); return
+    rows = []; pair = []
+    for idx, method in enumerate(KILL_METHODS):
+        pair.append(InlineKeyboardButton(text=method, callback_data=f"killm_{ch['id']}_{idx}"))
+        if len(pair) == 2: rows.append(pair); pair = []
+    if pair: rows.append(pair)
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=f"killcancel_{ch['id']}")])
+    gw = "сына" if ch["gender"] == "m" else "дочь"
+    try:
+        await callback.message.edit_text(
+            f"⚠️ <b>Убить {gw} — {ch['name']}?</b>\n\nВыбери способ:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except: pass
+    await callback.answer()
 
 @dp.message(F.text.regexp(KILL_RE))
 async def msg_kill(message: Message): await _kill_menu(message)
@@ -1530,8 +1666,9 @@ async def cb_child_action(callback: CallbackQuery):
     parts = callback.data.split("_")
     action = parts[1]; child_id = int(parts[2])
     chat_id = callback.message.chat.id
-    ch = get_child_by_chat(chat_id)
-    if not ch or ch["id"] != child_id:
+    kids = get_children_by_chat(chat_id)
+    ch = next((k for k in kids if k["id"] == child_id), None)
+    if not ch:
         await callback.answer("Ребёнок не найден 💀", show_alert=True); return
     if action == "heal":
         update_child_field(child_id, "health", ch["health"] + 25)
@@ -1545,18 +1682,20 @@ async def cb_child_action(callback: CallbackQuery):
         await callback.answer("✅")
     else:
         await callback.answer(); return
-    ch = get_child_by_chat(chat_id)
-    try: await callback.message.edit_text(child_status_text(ch), reply_markup=child_action_keyboard(ch["id"]))
-    except: pass
+    kids = get_children_by_chat(chat_id)
+    ch = next((k for k in kids if k["id"] == child_id), None)
+    if ch:
+        try: await callback.message.edit_text(child_status_text(ch), reply_markup=child_action_keyboard(ch["id"]))
+        except: pass
 
-# ФИКС #1: кнопка kill_ → меню способов
 @dp.callback_query(F.data.startswith("kill_"))
 async def cb_kill_btn(callback: CallbackQuery):
     parts = callback.data.split("_")
     child_id = int(parts[1])
     chat_id = callback.message.chat.id
-    ch = get_child_by_chat(chat_id)
-    if not ch or ch["id"] != child_id:
+    kids = get_children_by_chat(chat_id)
+    ch = next((k for k in kids if k["id"] == child_id), None)
+    if not ch:
         await callback.answer("Ребёнок не найден 💀", show_alert=True); return
     rows = []; pair = []
     for idx, m in enumerate(KILL_METHODS):
@@ -1564,11 +1703,10 @@ async def cb_kill_btn(callback: CallbackQuery):
         if len(pair) == 2: rows.append(pair); pair = []
     if pair: rows.append(pair)
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=f"killcancel_{ch['id']}")])
-    gw = "Сына" if ch["gender"] == "m" else "Дочь"
+    gw = "сына" if ch["gender"] == "m" else "дочь"
     try:
         await callback.message.edit_text(
-            f"⚠️ <b>Убить {gw.lower()}а — {ch['name']}?</b>\n\n"
-            f"Выбери способ убийства. Это <b>безвозвратно</b>:",
+            f"⚠️ <b>Убить {gw} — {ch['name']}?</b>\n\nВыбери способ убийства. Это <b>безвозвратно</b>:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     except TelegramBadRequest: pass
@@ -1578,22 +1716,23 @@ async def cb_kill_btn(callback: CallbackQuery):
 async def cb_kill_cancel(callback: CallbackQuery):
     await callback.answer("Отменено.")
     chat_id = callback.message.chat.id
-    ch = get_child_by_chat(chat_id)
-    if ch:
+    kids = get_children_by_chat(chat_id)
+    if kids:
+        ch = kids[0]
         try: await callback.message.edit_text(child_status_text(ch), reply_markup=child_action_keyboard(ch["id"]))
         except: pass
     else:
         try: await callback.message.delete()
         except: pass
 
-# ФИКС #6: после выбора способа — подтверждение "вы уверены?"
 @dp.callback_query(F.data.startswith("killm_"))
 async def cb_kill_method(callback: CallbackQuery):
     parts = callback.data.split("_")
     child_id = int(parts[1]); method_idx = int(parts[2])
     chat_id = callback.message.chat.id
-    ch = get_child_by_chat(chat_id)
-    if not ch or ch["id"] != child_id:
+    kids = get_children_by_chat(chat_id)
+    ch = next((k for k in kids if k["id"] == child_id), None)
+    if not ch:
         await callback.answer("Уже нет.", show_alert=True); return
     method = KILL_METHODS[method_idx]
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1617,8 +1756,9 @@ async def cb_kill_confirm(callback: CallbackQuery):
     parts = callback.data.split("_")
     child_id = int(parts[1]); method_idx = int(parts[2])
     chat_id = callback.message.chat.id
-    ch = get_child_by_chat(chat_id)
-    if not ch or ch["id"] != child_id:
+    kids = get_children_by_chat(chat_id)
+    ch = next((k for k in kids if k["id"] == child_id), None)
+    if not ch:
         await callback.answer("Уже нет.", show_alert=True); return
     method = KILL_METHODS[method_idx]
     phrase = KILL_PHRASES.get(method, "{name} убит(а).").format(name=ch["name"])
@@ -1711,7 +1851,6 @@ async def child_birthday_loop():
 async def group_auth(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     uid = callback.from_user.id
-    # ФИКС #3: реально проверяем живая ли сессия
     if get_session(uid):
         await callback.message.answer("🔍 Проверяю прошлую сессию...")
         alive = await check_session_alive(uid)
@@ -1719,7 +1858,6 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
             await callback.message.answer("✅ Аккаунт уже подключен и работает!")
             return
         else:
-            # мертвая — удаляем
             delete_session(uid)
             if uid in telethon_clients:
                 try: await telethon_clients[uid].disconnect()
@@ -1753,7 +1891,7 @@ async def process_phone(message: Message, state: FSMContext):
             [InlineKeyboardButton(text="🔄 Заново", callback_data="btn_group_auth")]])
         await message.answer(
             f"📱 <b>Код отправлен!</b>\nНомер: <code>{phone}</code>\n\n"
-            f"⚠️ Открой приложение (кнопка ниже). В чате «Telegram» (служебные уведомления) — код.\n"
+            f"⚠️ Открой приложение (кнопка ниже). В чате «Telegram» — код.\n"
             f"Введи с точкой. Например: <code>56.785</code>",
             parse_mode="HTML", reply_markup=vc)
         await state.set_state(AuthState.waiting_for_code)
@@ -1831,7 +1969,7 @@ async def cmd_disconnect(message: Message):
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data
     uid = callback.from_user.id
-    if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "setsp_")): return
+    if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "killmenu_", "setsp_", "showchild_")): return
     if data == "noop": await callback.answer("—"); return
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML"); await callback.answer(); return
@@ -1981,7 +2119,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
                 f"• Активных клиентов: <code>{len(telethon_clients)}</code>\n"
                 f"• Чатов: <code>{tc}</code>\n"
                 f"• Сообщений: <code>{tmsg}</code>\n"
-                f"• Спам-тасков: <code>{len(spam_tasks)}</code>\n"
+                f"• Спам-тасков: <code>{len(active_spam_tasks)}</code>\n"
                 f"• Забанено: <code>{len(banned_users)}</code>",
                 reply_markup=get_admin_keyboard(), parse_mode="HTML")
         except TelegramBadRequest: pass
@@ -2133,7 +2271,7 @@ async def cmd_debug_user(message: Message):
         t = await resolve_user_id(a)
         if not t: await message.answer("❌"); return
         sess = get_session(t); c = telethon_clients.get(t)
-        tasks = [k for k in spam_tasks if k[0] == t or k[1] == t]
+        tasks = [x for x in active_spam_tasks if x[0] == t or x[1] == t]
         lines = [f"🔎 <b>User {t}</b>\n",
                  f"• Сессия: {'✅' if sess else '❌'}",
                  f"• Клиент: {'✅' if c else '❌'}",
