@@ -43,26 +43,32 @@ APP_VERSION = "1.0"
 
 OWNER_TG_LINK = "https://t.me/NorikAmiri"
 CHANNEL_URL = "https://t.me/norikX"
+CHANNEL_USERNAME = "@norikX"
 
 MANUAL_INSTRUCTION = (
-    "🚀 <b>Инструкция по подключению бота:</b>\n\n"
-    "1️⃣ Перейдите в <b>Настройки</b> Telegram.\n"
-    "2️⃣ Откройте раздел <b>Мой профиль</b>.\n"
-    "3️⃣ Выберите пункт <b>Автоматизация чатов</b>.\n"
-    "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
-    "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте полный доступ к сообщениям <b>5/5</b>!\n\n"
-    "📢 <b>Условия использования:</b>\n"
-    "• Бот публикует рекламу 1 раз в 8 часов\n"
-    "• Удаление рекламного сообщения = блокировка\n"
-    "• Вы соглашаетесь с этим, подключая бота\n\n"
-    "🤖 <b>Что делает бот:</b>\n"
+    "📢 <b>Подключение бота для публичных чатов</b>\n\n"
+    "🤖 <b>Официальное подключение через Telegram Business</b>\n\n"
+    "Данный бот работает <b>исключительно в рамках официального API Telegram</b>. "
+    "Никаких сторонних библиотек для взлома, никакого чтения ваших личных данных.\n\n"
+    "✅ <b>Что делает бот:</b>\n"
     "• Работает в публичных чатах от вашего имени\n"
-    "• Все действия выполняются официально через Telegram Business\n"
-    "• Ваш аккаунт не получает ограничений — всё в рамках правил Telegram\n"
+    "• Все действия выполняются официально через <b>Telegram Business</b>\n"
+    "• Ваш аккаунт <b>не получает ограничений</b> — всё в рамках правил Telegram\n"
     "• Спам, модерация, авто-ссылка, семья и ребёнок — всё работает прямо в чатах\n\n"
-    "📌 <b>Где что работает:</b>\n"
-    "• <b>ЛС с ботом</b> и <b>бизнес-чаты</b> — через бизнес-бота\n"
-    "• <b>Группы</b> — через Telethon (кнопка 🤖 Подключить аккаунт)"
+    "🔐 <b>Что бот НЕ делает:</b>\n"
+    "• Не читает ваши личные сообщения\n"
+    "• Не передаёт данные третьим лицам\n"
+    "• Не имеет доступа к вашим паролям\n\n"
+    "⚠️ <b>ВАЖНО:</b>\n"
+    "Без этого подключения бот сможет работать <b>только в личных сообщениях с ним</b>. "
+    "Для работы <b>в группах и публичных чатах</b> нужно подключить бота к вашему аккаунту.\n\n"
+    "👇 Нажми «✅ Подтверждаю подключение» ниже."
+)
+
+SUBSCRIBE_TEXT = (
+    "🔒 <b>Для использования бота необходима подписка на канал</b>\n\n"
+    f"Подпишись на {CHANNEL_USERNAME} и нажми «✅ Я подписался».\n\n"
+    "Без подписки бот не работает."
 )
 
 def make_client(session_str=None):
@@ -82,8 +88,6 @@ typing_disabled_chats = set()
 substitutions = {}
 msg_cache = {}
 active_chats = {}
-promo_messages = {}
-recent_business_chats = []
 bc_owners = {}
 user_usernames = {}
 user_names = {}
@@ -97,6 +101,7 @@ chat_count_cache: Dict[int, int] = {}
 msg_count_cache: Dict[int, int] = {}
 chat_to_bc: Dict[Tuple[int, int], str] = {}
 chat_to_owner: Dict[int, int] = {}
+verified_users: Set[int] = set()
 
 _db_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 
@@ -185,6 +190,50 @@ KILL_PHRASES = {
     "🐍 Укус змеи": "Яд растекается по венам. {name} умирает в муках.",
     "💊 Отравить": "{name} задыхается от яда, глаза закатились."}
 
+# ==================== ПРОВЕРКА ПОДПИСКИ ====================
+async def check_subscription(user_id: int) -> bool:
+    """True если подписан, иначе False."""
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        status = member.status
+        # 'creator', 'administrator', 'member', 'restricted' — подписан
+        # 'left', 'kicked' — не подписан
+        if status in ("creator", "administrator", "member"):
+            return True
+        if status == "restricted":
+            # restricted может быть подписан, если is_member=True
+            return bool(getattr(member, "is_member", False))
+        return False
+    except Exception as e:
+        logging.warning(f"check_subscription {user_id}: {e}")
+        # Если бот не может проверить — считаем что подписан (фейл-сейф)
+        return True
+
+def get_subscribe_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться на канал", url=CHANNEL_URL)],
+        [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")],
+    ])
+
+async def require_subscription(message_or_cb) -> bool:
+    """Проверяет подписку. Если нет — отправляет запрос и возвращает False."""
+    uid = message_or_cb.from_user.id
+    if uid == ADMIN_ID: return True
+    if uid in verified_users: return True
+    if await check_subscription(uid):
+        verified_users.add(uid)
+        return True
+    kb = get_subscribe_kb()
+    text = SUBSCRIBE_TEXT
+    try:
+        if isinstance(message_or_cb, CallbackQuery):
+            await message_or_cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await message_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
+    except: pass
+    return False
+
+# ==================== БД ====================
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -193,7 +242,6 @@ def init_db():
             cur.execute("""CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS delivered_promo (chat_id BIGINT PRIMARY KEY)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS business_accounts (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS manual_users (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
@@ -447,21 +495,6 @@ def get_user_mention(user_id, fallback_name=None):
     fn = user_names.get(user_id) or fallback_name or "Пользователь"
     return f'<a href="tg://user?id={user_id}">{fn}</a>'
 
-def mark_chat_promo_delivered(chat_id):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO delivered_promo (chat_id) VALUES (%s) ON CONFLICT DO NOTHING", (chat_id,))
-    except: pass
-
-def is_chat_promo_delivered(chat_id):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM delivered_promo WHERE chat_id=%s", (chat_id,))
-                return cur.fetchone() is not None
-    except: return False
-
 def save_chat_message(user_id, chat_id, sender_id, sender_name, sender_username, text, message_id):
     try:
         with get_db() as conn:
@@ -693,7 +726,6 @@ async def global_typing_loop():
         except: pass
         await asyncio.sleep(4)
 
-# ================= ФИКС: НЕ ГЛОТАЕМ CancelledError =================
 async def spam_worker_bot(chat_id, bc_id, reply_to, text):
     try:
         words = text.split()
@@ -728,7 +760,6 @@ async def spam_worker_telethon(client, chat_id, text):
     except asyncio.CancelledError:
         logging.info(f"🛑 spam_telethon stopped chat={chat_id}")
         raise
-# ====================================================================
 
 async def unmute(user_id, chat_id, bc_id, user_name):
     if user_id in mutes:
@@ -740,56 +771,6 @@ async def unmute(user_id, chat_id, bc_id, user_name):
             if bc_id: kw["business_connection_id"] = bc_id
             try: await bot.send_message(**kw)
             except: pass
-
-async def promo_broadcaster():
-    promo_text = "Можешь, пожалуйста, на наш канал подписаться? Если не трудно ❤️"
-    promo_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❤️ Подписаться", url=CHANNEL_URL)]])
-    while True:
-        await asyncio.sleep(28800)
-        selected = []
-        for ci in reversed(recent_business_chats[-100:]):
-            if len(selected) >= 20: break
-            cid, bc_id = ci
-            oid = bc_owners.get(bc_id)
-            if oid == ADMIN_ID or (oid and oid in banned_users): continue
-            if is_chat_promo_delivered(cid): continue
-            selected.append(ci)
-        for cid, bc_id in selected:
-            try:
-                m = await bot.send_message(chat_id=cid, text=promo_text, parse_mode="HTML", reply_markup=promo_kb, business_connection_id=bc_id)
-                promo_messages[(cid, bc_id)] = m.message_id; mark_chat_promo_delivered(cid)
-            except: pass
-            await asyncio.sleep(3)
-
-async def check_promo_deletions():
-    unban_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать владельцу", url=OWNER_TG_LINK)]])
-    promo_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❤️ Подписаться", url=CHANNEL_URL)]])
-    while True:
-        await asyncio.sleep(15)
-        for (cid, bc_id), mid in list(promo_messages.items()):
-            oid = bc_owners.get(bc_id)
-            if oid and oid in banned_users: continue
-            try: await bot.edit_message_reply_markup(chat_id=cid, message_id=mid, reply_markup=promo_kb, business_connection_id=bc_id)
-            except TelegramBadRequest as e:
-                err = str(e).lower()
-                if "message to edit not found" in err or "message can't be edited" in err:
-                    if oid:
-                        set_user_ban(oid, True)
-                        try: await bot.send_message(chat_id=oid, text="🚫 Забанен за удаление рекламы!", parse_mode="HTML", reply_markup=unban_kb)
-                        except: pass
-                    promo_messages.pop((cid, bc_id), None)
-            except: pass
-
-async def clean_inactive_connections():
-    while True:
-        await asyncio.sleep(300)
-        inactive = []
-        for bc_id in list(bc_owners.keys()):
-            try: await bot.get_business_connection(bc_id)
-            except: inactive.append(bc_id)
-        for bc_id in inactive:
-            bc_owners.pop(bc_id, None); active_chats.pop(bc_id, None)
-            recent_business_chats[:] = [i for i in recent_business_chats if i[1] != bc_id]
 
 def calculate_expression(expr):
     try:
@@ -813,6 +794,7 @@ def is_calc_expr(text):
     return True
 
 def apply_modifications(text, chat_id, entities=None):
+    """Возвращает (новый_текст, изменено_ли)."""
     ft = text; modified = False
     if chat_id in substitutions:
         s = substitutions[chat_id]
@@ -826,7 +808,8 @@ def apply_modifications(text, chat_id, entities=None):
                 if et in ("url", "text_link", "MessageEntityUrl", "MessageEntityTextUrl"):
                     has_link = True; break
         if not has_link and CHANNEL_LINK not in ft:
-            ft = f'<a href="{CHANNEL_LINK}">{ft}</a>'; modified = True
+            ft = f'{ft}\n\n{CHANNEL_LINK}'
+            modified = True
     return ft, modified
 
 async def process_command_text(text, owner_id, chat_id, bc_id=None,
@@ -903,7 +886,7 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             except: pass
         return True
 
-    # ================= МУТ (ФИКС для бизнес-чата) =================
+    # МУТ
     if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
         m = re.search(r"\d+", text)
         if not m:
@@ -912,7 +895,6 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                 except: pass
             return True
         mins = int(m.group()); target_id, target_name = None, None
-        # 1) reply (Telethon или aiogram)
         if telethon_event and telethon_event.is_reply:
             try:
                 rp = await telethon_event.get_reply_message(); s = await rp.get_sender()
@@ -921,10 +903,11 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
         elif aiogram_message and aiogram_message.reply_to_message and aiogram_message.reply_to_message.from_user:
             tu = aiogram_message.reply_to_message.from_user
             target_id = tu.id; target_name = tu.first_name or "Юзер"
-        # 2) бизнес-чат 1-на-1 → мьютим собеседника (chat_id = его user_id)
+        # В бизнес-чате (1-на-1) chat_id == id собеседника
         if not target_id and bc_id and aiogram_message and aiogram_message.chat.type == "private":
             target_id = chat_id
-            target_name = user_names.get(chat_id) or "Собеседник"
+            # first_name собеседника — из user_names
+            target_name = user_names.get(chat_id, "Собеседник")
         if not target_id:
             if send_reply:
                 try: await send_reply("Ответь реплаем на сообщение человека.")
@@ -950,7 +933,7 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             target_id = tu.id; target_name = tu.first_name or "Юзер"
         if not target_id and bc_id and aiogram_message and aiogram_message.chat.type == "private":
             target_id = chat_id
-            target_name = user_names.get(chat_id) or "Собеседник"
+            target_name = user_names.get(chat_id, "Собеседник")
         if not target_id:
             if send_reply:
                 try: await send_reply("Ответь реплаем.")
@@ -961,7 +944,6 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             try: await send_reply(f"🔊 {target_name} — МУТ снят.")
             except: pass
         return True
-    # ==============================================================
 
     if low in ["мой ид", "моид"]:
         try:
@@ -1117,6 +1099,7 @@ async def start_telethon_listener(user_id, session_str):
                 save_chat_message(user_id, cid, user_id, user_names.get(user_id, "Я"), "",
                                   text or "[📎]", int(event.message.id))
 
+                # ЛС не трогаем — только группы
                 if event.is_private:
                     return
 
@@ -1240,6 +1223,7 @@ async def start_telethon_listener(user_id, session_str):
                     try: await client.send_message(cid, msg)
                     except: pass
 
+                # Команды
                 handled = await process_command_text(stripped, user_id, cid, bc_id=None,
                                                      telethon_client=client, telethon_event=event, send_reply=send_reply)
                 if handled:
@@ -1247,10 +1231,13 @@ async def start_telethon_listener(user_id, session_str):
                     except: pass
                     return
 
+                # Подмена / Линк — редактируем сообщение
                 ft, modified = apply_modifications(stripped, cid, event.message.entities)
                 if modified:
-                    try: await event.edit(ft, parse_mode='html')
-                    except Exception as e: logging.warning(f"edit mod: {e}")
+                    try:
+                        await event.edit(ft, parse_mode=None, link_preview=False)
+                    except Exception as e:
+                        logging.warning(f"edit mod: {e}")
             except Exception as e:
                 logging.error(f"outgoing: {e}", exc_info=True)
 
@@ -1294,7 +1281,7 @@ def get_start_keyboard(user_id):
     if user_id == ADMIN_ID:
         btns.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="btn_admin_panel")])
     btns.append([InlineKeyboardButton(text="📖 Функционал", callback_data="btn_features")])
-    btns.append([InlineKeyboardButton(text="⚡ Как подключить бота", callback_data="btn_how_to_connect")])
+    btns.append([InlineKeyboardButton(text="🌐 Подключить для публичных чатов", callback_data="btn_how_to_connect")])
     btns.append([InlineKeyboardButton(text="🤖 Подключить аккаунт (номер телефона)", callback_data="btn_group_auth")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
@@ -1401,20 +1388,36 @@ async def on_business_connection(conn: BusinessConnection):
             bc_owners.pop(conn.id, None); active_chats.pop(conn.id, None)
             for key in list(chat_to_bc.keys()):
                 if chat_to_bc[key] == conn.id: chat_to_bc.pop(key, None)
-            recent_business_chats[:] = [i for i in recent_business_chats if i[1] != conn.id]
     except Exception as e:
         logging.error(f"business_connection: {e}", exc_info=True)
 
+# ==================== ХЕНДЛЕРЫ ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     if message.chat.type != "private": return
     uid = message.from_user.id
     save_user_info(uid, message.from_user.username, message.from_user.first_name)
+    if not await require_subscription(message): return
     await message.answer(
         f"👋 Добро пожаловать, {get_user_mention(uid, message.from_user.first_name)}!\n\n"
         f"💬 Бот управляет функциями вашего аккаунта.\n\nВыберите раздел:",
         parse_mode="HTML", reply_markup=get_start_keyboard(uid))
+
+@dp.callback_query(F.data == "check_sub")
+async def cb_check_sub(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    if await check_subscription(uid):
+        verified_users.add(uid)
+        await callback.answer("✅ Спасибо за подписку!", show_alert=True)
+        try: await callback.message.delete()
+        except: pass
+        await callback.message.answer(
+            f"👋 Добро пожаловать, {get_user_mention(uid, callback.from_user.first_name)}!\n\n"
+            f"Выберите раздел:",
+            parse_mode="HTML", reply_markup=get_start_keyboard(uid))
+    else:
+        await callback.answer("❌ Ты ещё не подписан на канал!", show_alert=True)
 
 @dp.message(F.text.in_(["/admin", ".админ", "админ"]))
 async def admin_panel(message: Message):
@@ -1422,6 +1425,7 @@ async def admin_panel(message: Message):
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
 async def _give_birth(message: Message):
+    if not await require_subscription(message): return
     txt = (message.text or "").strip()
     m = re.match(r"(?i)^\s*родить\s+(сына|дочь)\s+(.+)$", txt)
     if not m:
@@ -1443,6 +1447,7 @@ async def _give_birth(message: Message):
 CHILD_STATUS_RE = re.compile(r"(?i)^\s*(?:наш|наша|наше|мо[йяё])\s+(сын|сына|дочь|дочку|дочери|ребёнок|ребенок|ребёнка)(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$")
 
 async def _child_status(message: Message):
+    if not await require_subscription(message): return
     txt = (message.text or "").strip()
     m = CHILD_STATUS_RE.match(txt)
     name_arg = None; gender_arg = None
@@ -1486,6 +1491,7 @@ async def msg_child(message: Message): await _child_status(message)
 async def bmsg_child(message: Message): await _child_status(message)
 
 async def _registration_date(message: Message):
+    if not await require_subscription(message): return
     kids = get_children_by_chat(message.chat.id)
     if not kids: await message.answer("Нет детей."); return
     if len(kids) > 1:
@@ -1508,6 +1514,7 @@ async def bmsg_regdate(message: Message): await _registration_date(message)
 KILL_RE = re.compile(r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+(сына|дочь|дочери|ребёнка|ребенка)(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$")
 
 async def _kill_menu(message: Message):
+    if not await require_subscription(message): return
     txt = (message.text or "").strip()
     m = KILL_RE.match(txt)
     name_arg = m.group(2).strip() if m and m.group(2) else None
@@ -1562,6 +1569,7 @@ async def bmsg_kill(message: Message): await _kill_menu(message)
 
 @dp.message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
 async def msg_marriage(message: Message):
+    if not await require_subscription(message): return
     low = message.text.lower().strip(); chat_id = message.chat.id; uid = message.from_user.id
     if low == "развод":
         delete_spouse(chat_id); await message.answer("💔 Развод оформлен."); return
@@ -1728,12 +1736,24 @@ async def child_birthday_loop():
 @dp.callback_query(F.data == "btn_how_to_connect")
 async def how_to_connect(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтверждаю подключение", callback_data="confirm_public_connect")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="noop")],
+    ])
+    await callback.message.answer(MANUAL_INSTRUCTION, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
+
+@dp.callback_query(F.data == "confirm_public_connect")
+async def cb_confirm_public(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Открываю подключение...")
+    try: await callback.message.delete()
+    except: pass
+    await group_auth(callback, state)
 
 @dp.callback_query(F.data == "btn_group_auth")
 async def group_auth(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     uid = callback.from_user.id
+    if not await require_subscription(callback): return
     if get_session(uid):
         await callback.message.answer("🔍 Проверяю сессию...")
         alive = await check_session_alive(uid)
@@ -1837,7 +1857,7 @@ async def cmd_disconnect(message: Message):
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data; uid = callback.from_user.id
-    if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "killmenu_", "setsp_", "showchild_")): return
+    if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "killmenu_", "setsp_", "showchild_", "check_sub", "confirm_public_connect")): return
     if data == "noop": await callback.answer("—"); return
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML"); await callback.answer(); return
@@ -2154,10 +2174,6 @@ async def handle(message: Message):
                 if message.text:
                     save_chat_message(owner_id, chat_id, uid, message.from_user.first_name or "User",
                                       message.from_user.username or "", message.text, message.message_id)
-            t = (chat_id, bc_id)
-            if t in recent_business_chats: recent_business_chats.remove(t)
-            recent_business_chats.append(t)
-            if len(recent_business_chats) > 100: recent_business_chats.pop(0)
 
         if uid in banned_users or (owner_id and owner_id in banned_users): return
 
@@ -2171,16 +2187,12 @@ async def handle(message: Message):
                              "user_id": uid, "chat_id": chat_id, "bc_id": bc_id}
             if len(msg_cache) > 5000: msg_cache.pop(next(iter(msg_cache)))
 
-        # ===== МАРШРУТИЗАЦИЯ =====
-        # Группа → Telethon (если есть) обрабатывает. Если нет Telethon, но есть bc_id — aiogram.
-        # ЛС с ботом / бизнес-чат ЛС → aiogram.
         in_private_bot = False
         is_group = message.chat.type in ("group", "supergroup", "channel")
 
         if is_group:
             hnd = owner_id if owner_id else uid
             if hnd in telethon_clients:
-                logging.debug(f"group: skip aiogram, telethon handles {hnd}")
                 return
             if bc_id:
                 is_from_me = (uid == owner_id) if owner_id else False
@@ -2196,12 +2208,25 @@ async def handle(message: Message):
                 co = uid
                 in_private_bot = True
 
-        # Проверка мута (юзер в муте) — удаляем его сообщение
+        # Проверка мута
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id); return
         if not is_from_me: return
         if chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id); return
+
+        # Проверка подписки (только для ЛС с ботом)
+        if in_private_bot and uid != ADMIN_ID:
+            if uid not in verified_users:
+                if not await check_subscription(uid):
+                    text_raw = message.text or ""
+                    # Разрешаем /start и check_sub
+                    if not text_raw.startswith("/start"):
+                        # Отправляем запрос подписки раз в 5 минут
+                        await require_subscription(message)
+                        return
+                else:
+                    verified_users.add(uid)
 
         text_raw = message.text
         if not text_raw: return
@@ -2245,7 +2270,7 @@ async def handle(message: Message):
 
         ft, modified = apply_modifications(text_raw, chat_id, message.entities)
         if modified:
-            await edit_message(chat_id, message.message_id, ft, bc_id, parse_mode="HTML")
+            await edit_message(chat_id, message.message_id, ft, bc_id, parse_mode=None)
     except Exception as e: logging.error(f"handle: {e}", exc_info=True)
 
 async def handle_ping(request): return web.Response(text="OK")
@@ -2267,9 +2292,6 @@ async def main():
     logging.info(f"🤖 bot_user_id = {bot_user_id}")
     await restore_all_sessions()
     asyncio.create_task(global_typing_loop())
-    asyncio.create_task(promo_broadcaster())
-    asyncio.create_task(check_promo_deletions())
-    asyncio.create_task(clean_inactive_connections())
     asyncio.create_task(child_decay_loop())
     asyncio.create_task(child_birthday_loop())
     logging.info("🚀 БОТ ЗАПУЩЕН!")
