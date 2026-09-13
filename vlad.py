@@ -1135,15 +1135,14 @@ async def start_telethon_listener(user_id, session_str):
                 save_chat_message(user_id, cid, user_id,
                                   user_names.get(user_id, "Я"), "",
                                   text or "[📎]", int(event.message.id))
-                if not event.is_private:
-                    try:
-                        c = await event.get_chat()
-                        cname = getattr(c, 'title', None) or getattr(c, 'first_name', None) or "Чат"
-                        save_user_chat(user_id, cid, cname)
-                    except: pass
-
+                # ЛС в Telethon не трогаем — там команды обрабатывает aiogram
                 if event.is_private:
                     return
+                try:
+                    c = await event.get_chat()
+                    cname = getattr(c, 'title', None) or getattr(c, 'first_name', None) or "Чат"
+                    save_user_chat(user_id, cid, cname)
+                except: pass
 
                 stripped = text.strip()
                 if not stripped: return
@@ -1411,10 +1410,9 @@ def format_chat_messages(user_id, chat_id, page=0):
         body = "…" + body[-(3800 - len(header)):]
     return header + body, total
 
-# ==================== BUSINESS CONNECTION (НОВОЕ!) ====================
+# ==================== BUSINESS CONNECTION ====================
 @dp.business_connection()
 async def on_business_connection(conn: BusinessConnection):
-    """Срабатывает сразу, когда юзер подключил бизнес-бота в настройках Telegram."""
     try:
         uid = int(conn.user.id)
         un = conn.user.username or None
@@ -1422,12 +1420,10 @@ async def on_business_connection(conn: BusinessConnection):
         logging.info(f"🔌 business_connection: user={uid} @{un} enabled={conn.is_enabled} id={conn.id}")
 
         if conn.is_enabled:
-            # сохраняем юзера как бизнес-аккаунт
             save_user_info(uid, un, fn)
             save_business_account(uid, un, fn)
             bc_owners[conn.id] = uid
             active_chats.setdefault(conn.id, set())
-            # уведомляем юзера
             try:
                 await bot.send_message(
                     uid,
@@ -1438,7 +1434,6 @@ async def on_business_connection(conn: BusinessConnection):
                     "<code>родить сына Имя</code>, <code>муж</code>/<code>жена</code> реплаем и т.д.",
                     parse_mode="HTML")
             except: pass
-            # уведомляем админа
             try:
                 if uid != ADMIN_ID:
                     await bot.send_message(
@@ -1450,10 +1445,8 @@ async def on_business_connection(conn: BusinessConnection):
                         parse_mode="HTML")
             except: pass
         else:
-            # отключён
             bc_owners.pop(conn.id, None)
             active_chats.pop(conn.id, None)
-            # чистим чаты этого bc
             for key in list(chat_to_bc.keys()):
                 if chat_to_bc[key] == conn.id:
                     chat_to_bc.pop(key, None)
@@ -1566,8 +1559,14 @@ async def cb_showchild(callback: CallbackQuery):
 @dp.message(F.text.lower().startswith("родить"))
 async def msg_birth(message: Message): await _give_birth(message)
 
+@dp.business_message(F.text.lower().startswith("родить"))
+async def bmsg_birth(message: Message): await _give_birth(message)
+
 @dp.message(F.text.regexp(CHILD_STATUS_RE))
 async def msg_child(message: Message): await _child_status(message)
+
+@dp.business_message(F.text.regexp(CHILD_STATUS_RE))
+async def bmsg_child(message: Message): await _child_status(message)
 
 async def _registration_date(message: Message):
     kids = get_children_by_chat(message.chat.id)
@@ -1593,6 +1592,9 @@ async def _registration_date(message: Message):
 
 @dp.message(F.text.lower().startswith("дата регистрации"))
 async def msg_regdate(message: Message): await _registration_date(message)
+
+@dp.business_message(F.text.lower().startswith("дата регистрации"))
+async def bmsg_regdate(message: Message): await _registration_date(message)
 
 KILL_RE = re.compile(
     r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+"
@@ -1664,6 +1666,9 @@ async def cb_killmenu(callback: CallbackQuery):
 @dp.message(F.text.regexp(KILL_RE))
 async def msg_kill(message: Message): await _kill_menu(message)
 
+@dp.business_message(F.text.regexp(KILL_RE))
+async def bmsg_kill(message: Message): await _kill_menu(message)
+
 @dp.message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
 async def msg_marriage(message: Message):
     low = message.text.lower().strip()
@@ -1690,6 +1695,10 @@ async def msg_marriage(message: Message):
     save_spouse(chat_id, uid, sp.id, sp.first_name or "Партнёр", relation)
     rw = "мужем" if relation == "husband" else "женой"
     await message.answer(f"💍 {sp.first_name} теперь твой {rw} в этом чате!")
+
+@dp.business_message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
+async def bmsg_marriage(message: Message):
+    await msg_marriage(message)
 
 # ==================== КОЛБЭКИ РЕБЁНКА ====================
 @dp.callback_query(F.data.startswith("child_"))
@@ -2116,7 +2125,6 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         else:
             bc_id = chat_to_bc.get((u, cid))
             if bc_id:
-                # Убираем из БД (удалить полностью через бизнес нельзя, но у юзера диалог не тронуть)
                 ok = True
             else: err = "Ни Telethon-сессии, ни бизнес-связи."
         if ok:
@@ -2161,7 +2169,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     if data == "admin_users":
         try:
             await callback.message.edit_text(
-                "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n🟢 онлайн / ⚪ оффлайн\n🔑 сессия / 🚫 нет\n📱 бизнес / 👤 ручной",
+                "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n🟢 онлайн / ⚪ оффлайн\n🔑 сессия / 🚫 нет",
                 reply_markup=get_users_keyboard(0), parse_mode="HTML")
         except TelegramBadRequest: pass
         await callback.answer(); return
@@ -2354,6 +2362,7 @@ async def global_update_handler(update: Update, bot: Bot):
 
 # ==================== ОСНОВНОЙ ====================
 @dp.message()
+@dp.business_message()
 async def handle(message: Message):
     global bot_id
     try:
@@ -2372,7 +2381,6 @@ async def handle(message: Message):
                     owner_id = int(ci.user.id)
                     save_user_info(ci.user.id, ci.user.username, ci.user.first_name)
                     save_business_account(ci.user.id, ci.user.username, ci.user.first_name)
-                    # сразу регистрируем юзера в админке
                 except: pass
             if owner_id:
                 chat_name = message.chat.title or message.chat.first_name or "Чат"
@@ -2391,10 +2399,17 @@ async def handle(message: Message):
 
         if uid in banned_users or (owner_id and owner_id in banned_users): return
 
+        # =============== ГЛАВНЫЙ ФИКС ===============
+        # В ЛС с ботом chat_id == id бота, а uid == id юзера, поэтому is_from_me
+        # через (uid == chat_id) не работает. Определяем по типу чата:
         if bc_id:
             is_from_me = (uid == owner_id) if owner_id else False
+        elif message.chat.type == "private":
+            # ЛС — сообщение от юзера боту (или от юзера через Telethon не приходит в aiogram)
+            is_from_me = True
         else:
             is_from_me = (uid == chat_id) or (message.chat.type in ["group", "supergroup"])
+        # ============================================
 
         if bot_id is None:
             me = await bot.get_me(); bot_id = me.id
@@ -2406,11 +2421,12 @@ async def handle(message: Message):
                              "user_id": uid, "chat_id": chat_id, "bc_id": bc_id}
             if len(msg_cache) > 5000: msg_cache.pop(next(iter(msg_cache)))
 
-        # Если у хозяина бизнес-чата есть Telethon — он и обрабатывает. Бизнес не дублирует.
+        # В группах/бизнес-чатах: если у владельца есть Telethon — он и обрабатывает
         handler_user = owner_id if bc_id else uid
-        if handler_user in telethon_clients and not message.chat.type == "private":
-            logging.debug(f"skip bot-handle: telethon active for {handler_user}")
-            return
+        if not message.chat.type == "private":
+            if handler_user in telethon_clients:
+                logging.debug(f"skip bot-handle: telethon active for {handler_user}")
+                return
 
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id); return
