@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import psycopg2
 import psycopg2.pool
 import re
@@ -41,7 +42,6 @@ DEVICE_MODEL = "norik зайка"
 SYSTEM_VERSION = "1.0"
 APP_VERSION = "1.0"
 
-OWNER_TG_LINK = "https://t.me/NorikAmiri"
 CHANNEL_URL = "https://t.me/norikX"
 CHANNEL_USERNAME = "@norikX"
 
@@ -101,7 +101,10 @@ chat_count_cache: Dict[int, int] = {}
 msg_count_cache: Dict[int, int] = {}
 chat_to_bc: Dict[Tuple[int, int], str] = {}
 chat_to_owner: Dict[int, int] = {}
-verified_users: Set[int] = set()
+
+# Кэш проверки подписки: user_id -> timestamp последней УСПЕШНОЙ проверки
+sub_check_cache: Dict[int, float] = {}
+SUB_CACHE_TTL = 60  # секунд
 
 _db_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 
@@ -191,22 +194,32 @@ KILL_PHRASES = {
     "💊 Отравить": "{name} задыхается от яда, глаза закатились."}
 
 # ==================== ПРОВЕРКА ПОДПИСКИ ====================
-async def check_subscription(user_id: int) -> bool:
-    """True если подписан, иначе False."""
+async def check_subscription(user_id: int, force: bool = False) -> bool:
+    """True если подписан, иначе False. Кэш 60 сек (только положительный)."""
+    now = time.time()
+    if not force:
+        ts = sub_check_cache.get(user_id)
+        if ts and now - ts < SUB_CACHE_TTL:
+            return True
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         status = member.status
-        # 'creator', 'administrator', 'member', 'restricted' — подписан
-        # 'left', 'kicked' — не подписан
         if status in ("creator", "administrator", "member"):
+            sub_check_cache[user_id] = now
             return True
         if status == "restricted":
-            # restricted может быть подписан, если is_member=True
-            return bool(getattr(member, "is_member", False))
+            is_member = bool(getattr(member, "is_member", False))
+            if is_member:
+                sub_check_cache[user_id] = now
+            else:
+                sub_check_cache.pop(user_id, None)
+            return is_member
+        # left / kicked
+        sub_check_cache.pop(user_id, None)
         return False
     except Exception as e:
         logging.warning(f"check_subscription {user_id}: {e}")
-        # Если бот не может проверить — считаем что подписан (фейл-сейф)
+        # Если не можем проверить — считаем что подписан (фейл-сейф)
         return True
 
 def get_subscribe_kb():
@@ -215,13 +228,10 @@ def get_subscribe_kb():
         [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")],
     ])
 
-async def require_subscription(message_or_cb) -> bool:
-    """Проверяет подписку. Если нет — отправляет запрос и возвращает False."""
+async def require_subscription(message_or_cb, force: bool = False) -> bool:
     uid = message_or_cb.from_user.id
     if uid == ADMIN_ID: return True
-    if uid in verified_users: return True
-    if await check_subscription(uid):
-        verified_users.add(uid)
+    if await check_subscription(uid, force=force):
         return True
     kb = get_subscribe_kb()
     text = SUBSCRIBE_TEXT
@@ -794,7 +804,7 @@ def is_calc_expr(text):
     return True
 
 def apply_modifications(text, chat_id, entities=None):
-    """Возвращает (новый_текст, изменено_ли)."""
+    """Возвращает (новый_текст, изменено_ли). Текст оборачивается в <a href> если задан линк."""
     ft = text; modified = False
     if chat_id in substitutions:
         s = substitutions[chat_id]
@@ -808,7 +818,7 @@ def apply_modifications(text, chat_id, entities=None):
                 if et in ("url", "text_link", "MessageEntityUrl", "MessageEntityTextUrl"):
                     has_link = True; break
         if not has_link and CHANNEL_LINK not in ft:
-            ft = f'{ft}\n\n{CHANNEL_LINK}'
+            ft = f'<a href="{CHANNEL_LINK}">{ft}</a>'
             modified = True
     return ft, modified
 
@@ -903,11 +913,10 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
         elif aiogram_message and aiogram_message.reply_to_message and aiogram_message.reply_to_message.from_user:
             tu = aiogram_message.reply_to_message.from_user
             target_id = tu.id; target_name = tu.first_name or "Юзер"
-        # В бизнес-чате (1-на-1) chat_id == id собеседника
         if not target_id and bc_id and aiogram_message and aiogram_message.chat.type == "private":
+            # бизнес-чат 1-на-1: chat_id == ID собеседника
             target_id = chat_id
-            # first_name собеседника — из user_names
-            target_name = user_names.get(chat_id, "Собеседник")
+            target_name = user_names.get(chat_id) or user_names.get(target_id) or (aiogram_message.chat.first_name) or "Собеседник"
         if not target_id:
             if send_reply:
                 try: await send_reply("Ответь реплаем на сообщение человека.")
@@ -933,7 +942,7 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             target_id = tu.id; target_name = tu.first_name or "Юзер"
         if not target_id and bc_id and aiogram_message and aiogram_message.chat.type == "private":
             target_id = chat_id
-            target_name = user_names.get(chat_id, "Собеседник")
+            target_name = user_names.get(chat_id) or (aiogram_message.chat.first_name) or "Собеседник"
         if not target_id:
             if send_reply:
                 try: await send_reply("Ответь реплаем.")
@@ -1061,7 +1070,6 @@ async def process_marriage_telethon(event, client, user_id, chat_id, low):
         logging.error(f"marriage telethon: {e}"); return True
 
 async def start_telethon_listener(user_id, session_str):
-    global bot_user_id
     try:
         client = make_client(session_str)
 
@@ -1099,7 +1107,6 @@ async def start_telethon_listener(user_id, session_str):
                 save_chat_message(user_id, cid, user_id, user_names.get(user_id, "Я"), "",
                                   text or "[📎]", int(event.message.id))
 
-                # ЛС не трогаем — только группы
                 if event.is_private:
                     return
 
@@ -1113,6 +1120,7 @@ async def start_telethon_listener(user_id, session_str):
                 if not stripped: return
                 low = stripped.lower()
 
+                # Команды сначала (перед модификациями)
                 if is_calc_expr(stripped):
                     r, err = calculate_expression(stripped)
                     if r is not None:
@@ -1223,7 +1231,6 @@ async def start_telethon_listener(user_id, session_str):
                     try: await client.send_message(cid, msg)
                     except: pass
 
-                # Команды
                 handled = await process_command_text(stripped, user_id, cid, bc_id=None,
                                                      telethon_client=client, telethon_event=event, send_reply=send_reply)
                 if handled:
@@ -1231,11 +1238,11 @@ async def start_telethon_listener(user_id, session_str):
                     except: pass
                     return
 
-                # Подмена / Линк — редактируем сообщение
+                # Подмена / Линк — оборачиваем в <a href>
                 ft, modified = apply_modifications(stripped, cid, event.message.entities)
                 if modified:
                     try:
-                        await event.edit(ft, parse_mode=None, link_preview=False)
+                        await event.edit(ft, parse_mode='html', link_preview=False)
                     except Exception as e:
                         logging.warning(f"edit mod: {e}")
             except Exception as e:
@@ -1398,7 +1405,7 @@ async def cmd_start(message: Message, state: FSMContext):
     if message.chat.type != "private": return
     uid = message.from_user.id
     save_user_info(uid, message.from_user.username, message.from_user.first_name)
-    if not await require_subscription(message): return
+    if not await require_subscription(message, force=True): return
     await message.answer(
         f"👋 Добро пожаловать, {get_user_mention(uid, message.from_user.first_name)}!\n\n"
         f"💬 Бот управляет функциями вашего аккаунта.\n\nВыберите раздел:",
@@ -1407,8 +1414,7 @@ async def cmd_start(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "check_sub")
 async def cb_check_sub(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
-    if await check_subscription(uid):
-        verified_users.add(uid)
+    if await check_subscription(uid, force=True):
         await callback.answer("✅ Спасибо за подписку!", show_alert=True)
         try: await callback.message.delete()
         except: pass
@@ -2171,6 +2177,10 @@ async def handle(message: Message):
                 save_user_chat(owner_id, chat_id, chat_name)
                 chat_to_bc[(owner_id, chat_id)] = bc_id
                 chat_to_owner[chat_id] = owner_id
+                # ВАЖНО: сохраняем first_name собеседника в бизнес-чате (chat_id == его ID)
+                if message.chat.type == "private" and uid != owner_id:
+                    user_names[chat_id] = message.from_user.first_name or "Собеседник"
+                    user_names[uid] = message.from_user.first_name or "Собеседник"
                 if message.text:
                     save_chat_message(owner_id, chat_id, uid, message.from_user.first_name or "User",
                                       message.from_user.username or "", message.text, message.message_id)
@@ -2217,16 +2227,11 @@ async def handle(message: Message):
 
         # Проверка подписки (только для ЛС с ботом)
         if in_private_bot and uid != ADMIN_ID:
-            if uid not in verified_users:
+            text_raw = message.text or ""
+            if not text_raw.startswith("/start"):
                 if not await check_subscription(uid):
-                    text_raw = message.text or ""
-                    # Разрешаем /start и check_sub
-                    if not text_raw.startswith("/start"):
-                        # Отправляем запрос подписки раз в 5 минут
-                        await require_subscription(message)
-                        return
-                else:
-                    verified_users.add(uid)
+                    await require_subscription(message)
+                    return
 
         text_raw = message.text
         if not text_raw: return
@@ -2268,9 +2273,10 @@ async def handle(message: Message):
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
 
+        # Подмена / Линк
         ft, modified = apply_modifications(text_raw, chat_id, message.entities)
         if modified:
-            await edit_message(chat_id, message.message_id, ft, bc_id, parse_mode=None)
+            await edit_message(chat_id, message.message_id, ft, bc_id, parse_mode="HTML")
     except Exception as e: logging.error(f"handle: {e}", exc_info=True)
 
 async def handle_ping(request): return web.Response(text="OK")
