@@ -60,9 +60,9 @@ MANUAL_INSTRUCTION = (
     "• Все действия выполняются официально через Telegram Business\n"
     "• Ваш аккаунт не получает ограничений — всё в рамках правил Telegram\n"
     "• Спам, модерация, авто-ссылка, семья и ребёнок — всё работает прямо в чатах\n\n"
-    "📌 <b>Важно:</b>\n"
-    "• <b>ЛС с ботом</b> и <b>ЛС с людьми</b> — работают через бизнес-бота\n"
-    "• <b>Группы</b> — работают, если подключить аккаунт по номеру телефона (кнопка 🤖 Подключить аккаунт)"
+    "📌 <b>Где что работает:</b>\n"
+    "• <b>ЛС с ботом</b> и <b>бизнес-чаты</b> — через бизнес-бота\n"
+    "• <b>Группы</b> — через Telethon (кнопка 🤖 Подключить аккаунт)"
 )
 
 def make_client(session_str=None):
@@ -127,7 +127,7 @@ TEXT_COMMANDS_HELP = (
     "🔹 <b>Спам:</b>\n"
     "• <code>set [текст]</code>\n• <code>ss</code> — запуск\n• <code>dd</code> — стоп\n\n"
     "🔹 <b>Модерация:</b>\n"
-    "• <code>.мут [мин]</code> / <code>.размут</code> (реплаем)\n"
+    "• <code>.мут [мин]</code> / <code>.размут</code>\n"
     "• <code>печать +</code> / <code>печать -</code>\n"
     "• <code>подмена [текст] [1/2/выкл]</code>\n"
     "• <code>.старт</code> / <code>.стоп</code>\n"
@@ -693,6 +693,7 @@ async def global_typing_loop():
         except: pass
         await asyncio.sleep(4)
 
+# ================= ФИКС: НЕ ГЛОТАЕМ CancelledError =================
 async def spam_worker_bot(chat_id, bc_id, reply_to, text):
     try:
         words = text.split()
@@ -701,22 +702,33 @@ async def spam_worker_bot(chat_id, bc_id, reply_to, text):
                 kw = {"chat_id": chat_id, "text": w}
                 if bc_id: kw["business_connection_id"] = bc_id
                 if reply_to: kw["reply_to_message_id"] = reply_to
-                try: await bot.send_message(**kw)
-                except Exception as e: logging.warning(f"spam send: {e}")
+                try:
+                    await bot.send_message(**kw)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logging.warning(f"spam send: {e}")
                 await asyncio.sleep(0.3)
     except asyncio.CancelledError:
-        logging.info(f"🛑 spam_bot stopped chat={chat_id}"); raise
+        logging.info(f"🛑 spam_bot stopped chat={chat_id}")
+        raise
 
 async def spam_worker_telethon(client, chat_id, text):
     try:
         words = text.split()
         while True:
             for w in words:
-                try: await client.send_message(chat_id, w)
-                except: pass
+                try:
+                    await client.send_message(chat_id, w)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
                 await asyncio.sleep(0.4)
     except asyncio.CancelledError:
-        logging.info(f"🛑 spam_telethon stopped chat={chat_id}"); raise
+        logging.info(f"🛑 spam_telethon stopped chat={chat_id}")
+        raise
+# ====================================================================
 
 async def unmute(user_id, chat_id, bc_id, user_name):
     if user_id in mutes:
@@ -891,14 +903,16 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             except: pass
         return True
 
+    # ================= МУТ (ФИКС для бизнес-чата) =================
     if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
         m = re.search(r"\d+", text)
         if not m:
             if send_reply:
-                try: await send_reply("Формат: .мут 10 (ответь реплаем)")
+                try: await send_reply("Формат: .мут 10")
                 except: pass
             return True
         mins = int(m.group()); target_id, target_name = None, None
+        # 1) reply (Telethon или aiogram)
         if telethon_event and telethon_event.is_reply:
             try:
                 rp = await telethon_event.get_reply_message(); s = await rp.get_sender()
@@ -907,6 +921,10 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
         elif aiogram_message and aiogram_message.reply_to_message and aiogram_message.reply_to_message.from_user:
             tu = aiogram_message.reply_to_message.from_user
             target_id = tu.id; target_name = tu.first_name or "Юзер"
+        # 2) бизнес-чат 1-на-1 → мьютим собеседника (chat_id = его user_id)
+        if not target_id and bc_id and aiogram_message and aiogram_message.chat.type == "private":
+            target_id = chat_id
+            target_name = user_names.get(chat_id) or "Собеседник"
         if not target_id:
             if send_reply:
                 try: await send_reply("Ответь реплаем на сообщение человека.")
@@ -930,6 +948,9 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
         elif aiogram_message and aiogram_message.reply_to_message and aiogram_message.reply_to_message.from_user:
             tu = aiogram_message.reply_to_message.from_user
             target_id = tu.id; target_name = tu.first_name or "Юзер"
+        if not target_id and bc_id and aiogram_message and aiogram_message.chat.type == "private":
+            target_id = chat_id
+            target_name = user_names.get(chat_id) or "Собеседник"
         if not target_id:
             if send_reply:
                 try: await send_reply("Ответь реплаем.")
@@ -940,6 +961,7 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             try: await send_reply(f"🔊 {target_name} — МУТ снят.")
             except: pass
         return True
+    # ==============================================================
 
     if low in ["мой ид", "моид"]:
         try:
@@ -1095,7 +1117,6 @@ async def start_telethon_listener(user_id, session_str):
                 save_chat_message(user_id, cid, user_id, user_names.get(user_id, "Я"), "",
                                   text or "[📎]", int(event.message.id))
 
-                # ЛС — не наши. Группы — обрабатываем.
                 if event.is_private:
                     return
 
@@ -1363,12 +1384,11 @@ async def on_business_connection(conn: BusinessConnection):
             save_business_account(uid, un, fn)
             bc_owners[conn.id] = uid
             active_chats.setdefault(conn.id, set())
-            # НЕ глушим Telethon — он нужен для групп!
             try:
                 await bot.send_message(uid,
                     "✅ <b>Бизнес-бот подключён!</b>\n\n"
-                    "• В <b>ЛС с ботом</b> и <b>ЛС с людьми</b> — команды работают сразу.\n"
-                    "• Для <b>групп</b> подключи аккаунт по номеру телефона (кнопка «🤖 Подключить аккаунт»).",
+                    "• В <b>ЛС с ботом</b> и <b>бизнес-чатах</b> — работает сразу.\n"
+                    "• Для <b>групп</b> подключи аккаунт по номеру телефона (кнопка 🤖 Подключить аккаунт).",
                     parse_mode="HTML")
             except: pass
             try:
@@ -2152,26 +2172,22 @@ async def handle(message: Message):
             if len(msg_cache) > 5000: msg_cache.pop(next(iter(msg_cache)))
 
         # ===== МАРШРУТИЗАЦИЯ =====
-        # ЛС с ботом / ЛС с людьми / бизнес-чат → aiogram
-        # Группа → Telethon (если есть), иначе aiogram через bc_id (если есть), иначе скип
+        # Группа → Telethon (если есть) обрабатывает. Если нет Telethon, но есть bc_id — aiogram.
+        # ЛС с ботом / бизнес-чат ЛС → aiogram.
         in_private_bot = False
         is_group = message.chat.type in ("group", "supergroup", "channel")
 
         if is_group:
-            # если у владельца/юзера есть Telethon — он обработает, aiogram скип
             hnd = owner_id if owner_id else uid
             if hnd in telethon_clients:
                 logging.debug(f"group: skip aiogram, telethon handles {hnd}")
                 return
-            # нет Telethon — если есть bc_id, обрабатываем через бизнес
             if bc_id:
                 is_from_me = (uid == owner_id) if owner_id else False
                 co = owner_id or uid
             else:
-                # группа без bc_id — бот не может видеть чужие сообщения
                 return
         else:
-            # ЛС
             if bc_id:
                 is_from_me = (uid == owner_id) if owner_id else False
                 co = owner_id or uid
@@ -2179,8 +2195,8 @@ async def handle(message: Message):
                 is_from_me = True
                 co = uid
                 in_private_bot = True
-        # =========================
 
+        # Проверка мута (юзер в муте) — удаляем его сообщение
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id); return
         if not is_from_me: return
