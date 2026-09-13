@@ -59,7 +59,6 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # ==================== ХРАНИЛИЩА ====================
 mutes = {}
-# Список активных спам-задач: (chat_id, owner_id, task)
 active_spam_tasks: List[Tuple[int, int, asyncio.Task]] = []
 user_spam_texts = {}
 link_chats = set()
@@ -214,7 +213,6 @@ def init_db():
                 birth_date DATE NOT NULL DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_birthday_year INTEGER NOT NULL DEFAULT 0)""")
-            # миграции
             for sql in [
                 "ALTER TABLE children ADD COLUMN IF NOT EXISTS libido INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE children ADD COLUMN IF NOT EXISTS chat_id BIGINT",
@@ -542,7 +540,6 @@ CHILD_KEYS = ["id", "chat_id", "owner_id", "spouse_id", "name", "gender", "healt
               "sleep_need", "hygiene", "mood", "attention", "libido", "birth_date", "created_at", "last_birthday_year"]
 
 def get_children_by_chat(chat_id, alive_only=True):
-    """Возвращает СПИСОК детей в чате."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -556,7 +553,6 @@ def get_children_by_chat(chat_id, alive_only=True):
         return []
 
 def get_child_by_chat(chat_id, alive_only=True):
-    """Совместимость: если ровно 1 — вернёт его, иначе первый."""
     kids = get_children_by_chat(chat_id, alive_only=alive_only)
     return kids[0] if kids else None
 
@@ -742,7 +738,7 @@ async def spam_worker_bot(chat_id, bc_id, reply_to, text):
                 except: pass
                 await asyncio.sleep(0.3)
     except asyncio.CancelledError:
-        logging.info(f"🛑 spam_worker_bot stopped chat={chat_id}")
+        logging.info(f"🛑 spam_bot stopped chat={chat_id}")
         raise
 
 async def spam_worker_telethon(client, chat_id, text):
@@ -754,7 +750,7 @@ async def spam_worker_telethon(client, chat_id, text):
                 except: pass
                 await asyncio.sleep(0.4)
     except asyncio.CancelledError:
-        logging.info(f"🛑 spam_worker_telethon stopped chat={chat_id}")
+        logging.info(f"🛑 spam_telethon stopped chat={chat_id}")
         raise
 
 async def unmute(user_id, chat_id, bc_id, user_name):
@@ -890,7 +886,6 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
     if low == "ss":
         t = user_spam_texts.get(str(owner_id))
         if not t:
-            # в группе молчим, в лс отвечаем
             if chat_id > 0:
                 try:
                     if telethon_client: await telethon_client.send_message(chat_id, "Сначала: set [текст]")
@@ -898,7 +893,6 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                                                  parse_mode="HTML", business_connection_id=bc_id)
                 except: pass
             return True
-        # снести любые прошлые задачи для этого чата
         for item in list(active_spam_tasks):
             if item[0] == chat_id:
                 try: item[2].cancel()
@@ -915,10 +909,9 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                 except: pass
             task = asyncio.create_task(spam_worker_bot(chat_id, bc_id, rt, t))
         active_spam_tasks.append((chat_id, owner_id, task))
-        logging.info(f"▶️ spam started chat={chat_id} owner={owner_id} total={len(active_spam_tasks)}")
+        logging.info(f"▶️ ss chat={chat_id} owner={owner_id} total={len(active_spam_tasks)}")
         return True
 
-    # dd — МОЛЧА, БЕЗ СООБЩЕНИЙ
     if low == "dd":
         killed = 0
         for item in list(active_spam_tasks):
@@ -927,7 +920,7 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                 except: pass
                 active_spam_tasks.remove(item)
                 killed += 1
-        logging.info(f"⏹ dd: chat={chat_id} killed={killed} left={len(active_spam_tasks)}")
+        logging.info(f"⏹ dd chat={chat_id} killed={killed}")
         return True
 
     if low.startswith("set "):
@@ -937,7 +930,6 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             except: pass
         return True
 
-    # ===== МУТ =====
     if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
         m = re.search(r"\d+", text)
         if not m: return True
@@ -1107,7 +1099,6 @@ async def start_telethon_listener(user_id, session_str):
                     cname = getattr(c, 'title', None) or getattr(c, 'first_name', None) or "Чат"
                     save_user_chat(user_id, cid, cname)
                 except: pass
-
                 if sid in mutes and datetime.now() < mutes[sid]["until"]:
                     try: await event.delete()
                     except: pass
@@ -1137,7 +1128,6 @@ async def start_telethon_listener(user_id, session_str):
                 if not stripped: return
                 low = stripped.lower()
 
-                # Калькулятор
                 if is_calc_expr(stripped):
                     r, err = calculate_expression(stripped)
                     if r is not None:
@@ -1146,14 +1136,12 @@ async def start_telethon_listener(user_id, session_str):
                         except: pass
                         return
 
-                # Муж/жена/пожениться/развод
                 if low in ["муж", "жена", "пожениться", "развод"]:
                     await process_marriage_telethon(event, client, user_id, cid, low)
                     try: await event.delete()
                     except: pass
                     return
 
-                # dd — молча, до других команд
                 if low == "dd":
                     killed = 0
                     for item in list(active_spam_tasks):
@@ -1162,12 +1150,11 @@ async def start_telethon_listener(user_id, session_str):
                             except: pass
                             active_spam_tasks.remove(item)
                             killed += 1
-                    logging.info(f"⏹ dd telethon: chat={cid} killed={killed}")
+                    logging.info(f"⏹ dd telethon chat={cid} killed={killed}")
                     try: await event.delete()
                     except: pass
                     return
 
-                # Рождение
                 m_birth = re.match(r"(?i)^\s*родить\s+(сына|дочь)\s+(.+)$", stripped)
                 if m_birth:
                     g = "m" if m_birth.group(1).lower() == "сына" else "f"
@@ -1192,7 +1179,6 @@ async def start_telethon_listener(user_id, session_str):
                     except: pass
                     return
 
-                # Наш сын / наша дочь [Имя]
                 CHILD_STATUS_RE = re.compile(
                     r"(?i)^\s*(?:наш|наша|наше|мо[йяё])\s+(сын|сына|дочь|дочку|дочери|ребёнок|ребенок|ребёнка)"
                     r"(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$")
@@ -1229,7 +1215,6 @@ async def start_telethon_listener(user_id, session_str):
                     except: pass
                     return
 
-                # Дата регистрации
                 if low.startswith("дата регистрации"):
                     kids = get_children_by_chat(cid)
                     if not kids:
@@ -1247,7 +1232,6 @@ async def start_telethon_listener(user_id, session_str):
                     except: pass
                     return
 
-                # Убить
                 m_kill = re.match(r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+"
                                   r"(сына|дочь|дочери|ребёнка|ребенка)(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$", stripped)
                 if m_kill:
@@ -1425,7 +1409,6 @@ async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
-# ===== РОЖДЕНИЕ (можно много) =====
 async def _give_birth(message: Message):
     txt = (message.text or "").strip()
     m = re.match(r"(?i)^\s*родить\s+(сына|дочь)\s+(.+)$", txt)
@@ -1438,12 +1421,10 @@ async def _give_birth(message: Message):
         await message.answer("❌ Имя не указано."); return
     uid = message.from_user.id
     chat_id = message.chat.id
-
     kids = get_children_by_chat(chat_id)
     if any(k["name"].lower() == nm.lower() for k in kids):
         await message.answer(f"⚠️ Ребёнок с именем <b>{nm}</b> уже есть в этом чате.", parse_mode="HTML")
         return
-
     sp = get_spouse(chat_id)
     spouse_id = None
     if sp:
@@ -1525,7 +1506,6 @@ async def msg_child(message: Message): await _child_status(message)
 @dp.business_message(F.text.regexp(CHILD_STATUS_RE))
 async def bmsg_child(message: Message): await _child_status(message)
 
-# ===== ДАТА РЕГИСТРАЦИИ =====
 async def _registration_date(message: Message):
     kids = get_children_by_chat(message.chat.id)
     if not kids:
@@ -1554,7 +1534,6 @@ async def msg_regdate(message: Message): await _registration_date(message)
 @dp.business_message(F.text.lower().startswith("дата регистрации"))
 async def bmsg_regdate(message: Message): await _registration_date(message)
 
-# ===== УБИЙСТВО =====
 KILL_RE = re.compile(
     r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+"
     r"(сына|дочь|дочери|ребёнка|ребенка)"
@@ -1628,7 +1607,6 @@ async def msg_kill(message: Message): await _kill_menu(message)
 @dp.business_message(F.text.regexp(KILL_RE))
 async def bmsg_kill(message: Message): await _kill_menu(message)
 
-# ===== СВАДЬБА =====
 @dp.message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
 async def msg_marriage(message: Message):
     low = message.text.lower().strip()
@@ -2372,6 +2350,15 @@ async def handle(message: Message):
             msg_cache[ck] = {"text": message.text, "user": message.from_user.first_name or "Пользователь",
                              "user_id": uid, "chat_id": chat_id, "bc_id": bc_id}
             if len(msg_cache) > 5000: msg_cache.pop(next(iter(msg_cache)))
+
+        # ============= ФИКС =============
+        # Если у ХОЗЯИНА (в бизнес-чате) или у ОТПРАВИТЕЛЯ (в группе/лс) есть Telethon —
+        # всю обработку команд выполняет Telethon (on_outgoing). Бизнес-бот не дублирует.
+        handler_user = owner_id if bc_id else uid
+        if handler_user in telethon_clients:
+            logging.debug(f"skip bot-handle: telethon active for {handler_user}")
+            return
+        # ================================
 
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id); return
