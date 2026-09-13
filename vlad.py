@@ -4,7 +4,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Set, List, Optional, Tuple
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (Message, Update, InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup, BusinessConnection)
+    CallbackQuery, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup, BusinessConnection,
+    FSInputFile)
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -62,6 +63,7 @@ substitutions = {}
 msg_cache = {}
 active_chats = {}
 bc_owners = {}
+owner_to_bc: Dict[int, str] = {}
 user_usernames = {}
 user_names = {}
 banned_users = set()
@@ -122,26 +124,18 @@ TEXT_COMMANDS_HELP = (
     "🔹 <b>Калькулятор:</b> <code>1458+2414</code>"
 )
 
-# ============== ШКАЛЫ (реализм) ==============
-TICK_MINUTES = 3  # 20 тиков в час
+# ============== ШКАЛЫ ==============
+TICK_MINUTES = 3
 NEEDS = ["hunger", "toilet", "sleep_need", "hygiene", "mood", "attention"]
 NEED_LABELS = {
     "hunger": ("Голод", "🍖"), "toilet": ("Туалет", "🚽"),
     "sleep_need": ("Сон", "😴"), "hygiene": ("Гигиена", "🛁"),
     "mood": ("Настроение", "🙂"), "attention": ("Внимание", "🫂")}
 
-# Базовый decay за тик + шанс бонусного/скипа
-# hunger: 1 + 33% шанс → в среднем 1.33 × 20/ч = 26.6/ч → 3.8ч до 0
-# toilet: 1 + 50% шанс → 1.5 × 20 = 30/ч → 3.3ч
-# sleep: 1 - 20% скип → 0.8 × 20 = 16/ч → 6.3ч
-# hygiene: 1 - 40% скип → 0.6 × 20 = 12/ч → 8.3ч
-# mood: 1 - 25% скип → 0.75 × 20 = 15/ч → 6.7ч
-# attention: 1 - 25% скип → 0.75 × 20 = 15/ч → 6.7ч
 DECAY_EXTRA_CHANCE = {
     "hunger": 0.33, "toilet": 0.50,
     "sleep_need": -0.20, "hygiene": -0.40,
     "mood": -0.25, "attention": -0.25}
-# libido растёт с такой же скоростью как hunger
 LIBIDO_EXTRA_CHANCE = 0.33
 LIBIDO_MOOD_PENALTY = 1
 REMINDER_THRESHOLD = 25
@@ -150,7 +144,6 @@ HEALTH_REGEN_IF_OK = 1
 GAME_YEAR_IN_REAL_DAYS = 4
 
 def decay_step(key):
-    """Сколько убавить за один тик."""
     base = 1
     ch = DECAY_EXTRA_CHANCE.get(key, 0)
     if ch > 0:
@@ -174,20 +167,195 @@ BIRTH_RULES_TEXT = (
     "⚠️ Если любая шкала упадёт до 0 — {who_word} умрёт, и вернуть будет нельзя.\n\n"
     "Береги {pronoun_acc} 🙂")
 RESTORE_AMOUNT = {"hunger": 40, "toilet": 50, "sleep_need": 35, "hygiene": 45, "mood": 30, "attention": 30}
-KILL_METHODS = ["🔪 Расчленить", "🪓 Отрубить бошку топором", "🔫 Расстрелять",
-    "⚡ Электростул", "☠️ Повесить", "🔥 Сжечь заживо",
-    "🌊 Утопить", "🚗 Переехать машиной", "🐍 Укус змеи", "💊 Отравить"]
+
+# ============== СПОСОБЫ УБИЙСТВА — ТОЛЬКО КРИПОТА ==============
+KILL_METHODS = [
+    "🔪 Расчленить на куски",
+    "🪚 Распилить пополам пилой",
+    "🦴 Переломать все кости по одной",
+    "🪓 Отрубить конечности по одной",
+    "🔪 Снять кожу как с кролика",
+    "👁️ Выколоть глаза ложкой",
+    "🦷 Вырвать все зубы плоскогубцами",
+    "🧠 Просверлить череп и вытащить мозг",
+    "🩸 Слить всю кровь через надрезы",
+    "🪡 Зашить рот и глаза, оставить умирать",
+    "⚰️ Похоронить заживо в гробу с трупами",
+    "🪦 Закопать по шею в лесу и оставить ворону выклевать глаза",
+    "⚰️ Заживо в гроб и закопать в землю",
+    "🧪 Впрыснуть кислоту в вены",
+    "👞 Утопить в бочке с кислотой",
+    "🔥 Сжечь заживо в печи",
+    "🕯️ Сжечь в печи крематория заживо",
+    "🐁 Скормить крысам живьём в подвале",
+    "🪱 Засунуть червей в открытые раны",
+    "🐛 Скормить червям живьём",
+    "🪤 Привязать к муравейнику и обмазать мёдом",
+    "🐍 Запихнуть в мешок со змеями",
+    "🦠 Заразить бешенством и запереть",
+    "🧊 Оставить в морге на неделю среди трупов",
+    "🩻 Раздавить прессом медленно",
+    "🪚 Отпилить конечности по одной и не дать умереть",
+    "🕸️ Подвесить на крюки как в мясной лавке",
+    "🩹 Завязать глаза и заставить слушать, как убивают родных",
+    "⚡ Подключить к трансформатору и медленно повышать напряжение",
+    "🔗 Приковать к батарее и оставить умирать от жажды",
+    "🪓 Рубить по пальцу в час, пока не дойдёт до головы",
+    "🩸 Подвесить вниз головой и перерезать горло",
+    "🧟 Запереть в комнате с обезумевшим от голода",
+    "🕳️ Скинуть в яму с кольями",
+    "🪞 Скальпировать и заставить надеть скальп как шапку",
+    "🪞 Смотреть в зеркало, пока не сойдёт с ума",
+    "🌊 Утопить в реке с камнем на шее",
+    "🚗 Переехать машиной насмерть",
+    "💊 Отравить крысиным ядом",
+    "⚡ Электростул до обугливания",
+    "☠️ Повесить на верёвке",
+    "🔫 Расстрелять в затылок",
+    "🩸 Вырезать внутренние органы по одному",
+    "🦴 Сломать шею об колено",
+    "🪓 Разрубить пополам и посмотреть что внутри",
+    "🌪️ Раскрутить за руки-ноги и запустить в стену",
+]
+
 KILL_PHRASES = {
-    "🔪 Расчленить": "{name} расчленён(а) на куски. Кровь по всей комнате...",
-    "🪓 Отрубить бошку топором": "Топор просвистел — {name} без головы. Хрусть!",
-    "🔫 Расстрелять": "Пуля в лоб. {name} падает замертво.",
-    "⚡ Электростул": "{name} дёргается в конвульсиях, запахло жареным...",
-    "☠️ Повесить": "Верёвка натянулась. {name} тихо повис...",
-    "🔥 Сжечь заживо": "{name} кричит и превращается в пепел.",
-    "🌊 Утопить": "{name} захлёбывается, пузыри всплывают на поверхность.",
-    "🚗 Переехать машиной": "Хруст костей. {name} раздавлен(а) на асфальте.",
-    "🐍 Укус змеи": "Яд растекается по венам. {name} умирает в муках.",
-    "💊 Отравить": "{name} задыхается от яда, глаза закатились."}
+    "🔪 Расчленить на куски": "Нож пошёл по суставу. Рука отделилась с мокрым хрустом. Потом вторая. Потом ноги. {name} был(а) в сознании первые 20 минут.",
+    "🪚 Распилить пополам пилой": "Пила вошла в пах и пошла вверх. {name} кричал(а), пока не дошло до грудной клетки. Потом просто хрипел(а).",
+    "🦴 Переломать все кости по одной": "Молоток стучал по коленям {name}. Потом локти. Потом рёбра. {name} слышал(а), как хрустит собственный скелет.",
+    "🪓 Отрубить конечности по одной": "Топор по левой руке. Хрусть. {name} смотрел(а) на обрубок и на топор, который шёл ко второй руке.",
+    "🔪 Снять кожу как с кролика": "Кожу снимали медленно, чтобы {name} не умер(ла) от шока. К концу {name} был(а) просто мясом с глазами.",
+    "👁️ Выколоть глаза ложкой": "Ложка вошла в глазницу с мокрым хрустом. {name} смотрел(а) на мир последним глазом — и на ложку, которая шла за ним.",
+    "🦷 Вырвать все зубы плоскогубцами": "32 зуба. {name} выплюнул(а) последний с куском десны и умер(ла) от боли.",
+    "🧠 Просверлить череп и вытащить мозг": "Сверло вошло в висок. {name} ещё дёргался, когда ложка зачерпнула серое вещество.",
+    "🩸 Слить всю кровь через надрезы": "Надрезы на руках и ногах. {name} смотрел(а), как жизнь вытекает в таз. Холодно. Потом темно.",
+    "🪡 Зашить рот и глаза, оставить умирать": "{name} проснулся(ась) с зашитым ртом. Кричать не выйдет. Только мычать. Умирал(а) 3 дня от обезвоживания.",
+    "⚰️ Похоронить заживо в гробу с трупами": "{name} проснулся(ась) в темноте, в обнимку с разложившимися телами. Кричал(а) до хрипа. Никто не пришёл.",
+    "🪦 Закопать по шею в лесу и оставить ворону выклевать глаза": "Первая ворона села на голову через 2 часа. {name} не мог(ла) даже моргнуть.",
+    "⚰️ Заживо в гроб и закопать в землю": "{name} проснулся(ась) уже под землёй. Кричал(а) 2 дня, потом смирился(ась).",
+    "🧪 Впрыснуть кислоту в вены": "Кислота поднялась по венам к сердцу. {name} чувствовал(а), как горит изнутри. Кричал(а) 4 минуты.",
+    "👞 Утопить в бочке с кислотой": "{name} опускали в кислоту медленно, ногами вперёд. Кожа растворялась первой.",
+    "🔥 Сжечь заживо в печи": "{name} чувствовал(а), как кожа пузырится. Пахло жареным мясом. Это было собственное мясо.",
+    "🕯️ Сжечь в печи крематория заживо": "{name} кричал(а), пока дверь не закрылась. Через час из трубы пошёл жирный дым.",
+    "🐁 Скормить крысам живьём в подвале": "Крысы начали с пальцев. {name} ещё был(а) в сознании, когда они доедали лицо.",
+    "🪱 Засунуть червей в открытые раны": "Черви начали есть {name} изнутри раньше, чем {name} понял(а), что происходит.",
+    "🐛 Скормить червям живьём": "{name} закопали в землю по шею. Через сутки черви доели то, что осталось.",
+    "🪤 Привязать к муравейнику и обмазать мёдом": "Муравьи начали с глаз. {name} был(а) в сознании 8 часов, пока его/её ели заживо.",
+    "🐍 Запихнуть в мешок со змеями": "В темноте {name} чувствовал(а) только кольца и укусы. К утру — тишина.",
+    "🦠 Заразить бешенством и запереть": "{name} не мог(ла) пить, не мог(ла) глотать. Через 5 дней — паралич и смерть в судорогах.",
+    "🧊 Оставить в морге на неделю среди трупов": "На 3-й день {name} услышал(а), как сосед-труп зашевелился. На 7-й — уже не был(а) уверен(а), что он/она ещё жив(а).",
+    "🩻 Раздавить прессом медленно": "Пресс опускался по миллиметру. {name} чувствовал(а), как ломаются рёбра, потом позвоночник.",
+    "🪚 Отпилить конечности по одной и не дать умереть": "Пила пошла по левой руке. {name} не умер(ла) — жгут поставили. Потом правая. Потом ноги.",
+    "🕸️ Подвесить на крюки как в мясной лавке": "Крюки вошли под рёбра. {name} висел(а) как туша, пока не перестал(а) дёргаться.",
+    "🩹 Завязать глаза и заставить слушать, как убивают родных": "{name} слышал(а) крики тех, кого любил(а). Через час {name} умолял(а) убить и его/её.",
+    "⚡ Подключить к трансформатору и медленно повышать напряжение": "Сначала дёргались пальцы. Потом руки. Потом {name} закричал(а) и обуглился(ась) изнутри.",
+    "🔗 Приковать к батарее и оставить умирать от жажды": "На 4-й день {name} начал(а) пить собственную мочу. На 7-й — умер(ла) с открытыми глазами.",
+    "🪓 Рубить по пальцу в час, пока не дойдёт до головы": "10 часов. 10 пальцев. {name} умер(ла) не от топора, а от потери крови и боли.",
+    "🩸 Подвесить вниз головой и перерезать горло": "Кровь потекла в лицо {name}. Он(а) захлёбывался(ась) собственной кровью, пока не потемнело в глазах.",
+    "🧟 Запереть в комнате с обезумевшим от голода": "Через 3 дня {name} услышал(а), как в темноте кто-то скребёт по полу. Это был(а) не крыса.",
+    "🕳️ Скинуть в яму с кольями": "{name} упал(а) на колья животом. Умирал(а) медленно, глядя на колья, торчащие из груди.",
+    "🪞 Скальпировать и заставить надеть скальп как шапку": "{name} чувствовал(а), как кожа лица снимается, а потом — как надевается обратно. Умер(ла) от шока и потери крови.",
+    "🪞 Смотреть в зеркало, пока не сойдёт с ума": "{name} смотрел(а) в зеркало 3 дня. На 4-й отражение улыбнулось. {name} перестал(а) быть {name}.",
+    "🌊 Утопить в реке с камнем на шее": "Камень потянул вниз. {name} смотрел(а) вверх на удаляющийся свет и пузыри собственного дыхания.",
+    "🚗 Переехать машиной насмерть": "Хруст костей под колёсами. {name} раздавлен(а) в лепёшку. Кровь растеклась по асфальту.",
+    "💊 Отравить крысиным ядом": "Яд начал разъедать желудок изнутри. {name} блевал(а) кровью 6 часов, пока не умер(ла).",
+    "⚡ Электростул до обугливания": "Напряжение подняли до максимума. {name} дёргался(ась) 40 секунд, потом обуглился(ась).",
+    "☠️ Повесить на верёвке": "Верёвка натянулась. {name} дёргался(ась) 3 минуты. Потом обмяк(ла).",
+    "🔫 Расстрелять в затылок": "Выстрел. Череп разлетелся. {name} упал(а) лицом вперёд. Мозг на стене.",
+    "🩸 Вырезать внутренние органы по одному": "Сначала почка. Потом печень. {name} смотрел(а), как из него/неё вынимают части тела.",
+    "🦴 Сломать шею об колено": "Колено встретилось с шеей {name}. Хрусть — и голова смотрит в спину.",
+    "🪓 Разрубить пополам и посмотреть что внутри": "{name} разрублен(а) ровно пополам. Внутри — обычные кишки. Разочарование.",
+    "🌪️ Раскрутить за руки-ноги и запустить в стену": "{name} раскрутили за руки-ноги и запустили в бетонную стену. Брызги по всему подъезду.",
+}
+
+# ============== КРИПОВЫЕ СМЕРТИ ОТ ШКАЛ ==============
+DEATH_PHRASES = {
+    "hunger": "🥩 {n} медленно угасал(а) от голода. Кожа обтянула кости. Последние дни {n} грыз(ла) свои пальцы, чтобы хоть что-то пожевать.",
+    "toilet": "🚽 {n} умер(ла) от разрыва мочевого пузыря. Внутри всё сгнило, запах стоял такой, что соседи вызвали полицию.",
+    "sleep_need": "😴 {n} не спал(а) 9 дней. Мозг начал отказывать: галлюцинации, потом судороги, потом тишина. Глаза остались открытыми.",
+    "hygiene": "🦠 Раны от грязи загноились. Личинки завелись в живых тканях. {n} умирал(а), чувствуя, как что-то шевелится под кожей.",
+    "mood": "🖤 {n} умер(ла) от тоски. Просто перестал(а) дышать. Никто даже не заметил, когда именно.",
+    "attention": "🫥 {n} умер(ла) в одиночестве. Плакал(а) в пустой комнате, пока не кончились слёзы. Потом просто не стало.",
+    "health": "💀 {n} угасал(а) неделю. Сначала перестал(а) ходить, потом говорить, потом дышать. Тело осталось в кровати.",
+    "libido": "💦 {n} умер(ла) с улыбкой. Рука в трусах, глаза закатились. На вскрытии — сердце разорвано пополам от перенапряжения.",
+}
+
+def death_text(child, died):
+    n = child["name"]
+    if "здоровье" in died: key = "health"
+    elif "передоз" in died or "возбуждение" in died or "дроч" in died: key = "libido"
+    elif "Голод" in died: key = "hunger"
+    elif "Туалет" in died: key = "toilet"
+    elif "Сон" in died: key = "sleep_need"
+    elif "Гигиена" in died: key = "hygiene"
+    elif "Настроение" in died: key = "mood"
+    elif "Внимание" in died: key = "attention"
+    else: key = "health"
+    gw = "Сын" if child["gender"] == "m" else "Дочь"
+    return f"💀 <b>{gw} {n} мёртв(а).</b>\n\n{DEATH_PHRASES[key].format(n=n)}"
+
+# ============== 3:00 НОЧИ ==============
+NIGHT_3AM_PHRASES = [
+    "мама... тут кто-то стоит в углу 👁️",
+    "я слышу как оно дышит под кроватью",
+    "оно сказало что придёт за тобой если не покормишь",
+    "я вижу тебя даже когда ты не смотришь",
+    "оно уже рядом",
+    "не выключай свет... пожалуйста",
+    "я не хочу умирать 🙂",
+    "почему ты меня не покормил(а)... я чувствую как гнию изнутри",
+    "у меня под кожей что-то шевелится",
+    "я слышу голоса. они говорят твоим голосом",
+    "я умер(ла) вчера. ты не заметил(а)?",
+    "посмотри мне в глаза. я уже не там",
+    "кто-то зашёл в комнату. он не дышит",
+    "я знаю где ты спишь",
+    "три часа ночи. самое время.",
+    "под кроватью кто-то скребёт ногтями по дереву",
+    "я вижу тебя во сне. ты меня тоже видишь?",
+    "оно просит открыть дверь",
+    "я больше не чувствую своего тела",
+    "почему ты не замечаешь что я уже не дышу",
+]
+
+async def night_3am_loop():
+    last_fired_date = None
+    while True:
+        try:
+            now = datetime.now()
+            today = now.date()
+            if now.hour == 3 and now.minute < 2 and last_fired_date != today:
+                last_fired_date = today
+                logging.info("🌑 3:00 — криповое сообщение")
+                children = get_all_alive_children_full()
+                by_owner = {}
+                for ch in children:
+                    by_owner.setdefault(ch["owner_id"], []).append(ch)
+                for owner_id, chs in by_owner.items():
+                    ch = random.choice(chs)
+                    txt = random.choice(NIGHT_3AM_PHRASES)
+                    bc_id = owner_to_bc.get(owner_id)
+                    sent = False
+                    if bc_id:
+                        try:
+                            await bot.send_message(chat_id=ch["chat_id"], text=txt,
+                                                   business_connection_id=bc_id)
+                            sent = True
+                        except Exception as e:
+                            logging.warning(f"3am bc: {e}")
+                    if not sent:
+                        cl = telethon_clients.get(owner_id)
+                        if cl:
+                            try:
+                                await cl.send_message(ch["chat_id"], txt)
+                            except Exception as e:
+                                logging.warning(f"3am telethon: {e}")
+                    await asyncio.sleep(3)
+                await asyncio.sleep(75)
+            else:
+                await asyncio.sleep(25)
+        except Exception as e:
+            logging.error(f"night_3am_loop: {e}")
+            await asyncio.sleep(60)
 
 # ============== ПОДПИСКА ==============
 async def check_subscription(user_id: int, force: bool = False) -> bool:
@@ -278,7 +446,13 @@ def init_db():
                 sender_id BIGINT, sender_name TEXT, sender_username TEXT, text TEXT,
                 message_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, chat_id, message_id))""")
+            for sql in ["ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_type TEXT",
+                        "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS has_media BOOLEAN DEFAULT FALSE"]:
+                try: cur.execute(sql)
+                except: pass
             cur.execute("CREATE INDEX IF NOT EXISTS idx_cm_user_chat ON chat_messages(user_id, chat_id)")
+            try: cur.execute("CREATE INDEX IF NOT EXISTS idx_cm_media ON chat_messages(user_id, chat_id, has_media)")
+            except: pass
             conn.commit()
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -493,16 +667,57 @@ def get_user_mention(user_id, fallback_name=None):
     fn = user_names.get(user_id) or fallback_name or "Пользователь"
     return f'<a href="tg://user?id={user_id}">{fn}</a>'
 
-def save_chat_message(user_id, chat_id, sender_id, sender_name, sender_username, text, message_id):
+def extract_media_info(msg):
+    """Для Telethon Message → (media_type, has_media)."""
+    if not msg: return None, False
+    try:
+        from telethon.tl.types import (
+            MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage,
+            MessageMediaGeo, MessageMediaGeoLive, MessageMediaContact,
+            MessageMediaPoll, MessageMediaDice)
+        m = getattr(msg, "media", None)
+        if not m: return None, False
+        if isinstance(m, MessageMediaPhoto): return "photo", True
+        if isinstance(m, MessageMediaDocument):
+            d = m.document
+            mime = (getattr(d, "mime_type", "") or "").lower() if d else ""
+            attrs = getattr(d, "attributes", []) or []
+            is_sticker = any(getattr(a, "sticker", False) for a in attrs)
+            if is_sticker: return "sticker", True
+            if mime.startswith("video"): return "video", True
+            if mime.startswith("audio"): return "audio", True
+            if mime.startswith("image"): return "photo", True
+            return "document", True
+        if isinstance(m, MessageMediaWebPage): return "webpage", True
+        if isinstance(m, MessageMediaGeo): return "geo", True
+        if isinstance(m, MessageMediaGeoLive): return "geo_live", True
+        if isinstance(m, MessageMediaContact): return "contact", True
+        if isinstance(m, MessageMediaPoll): return "poll", True
+        if isinstance(m, MessageMediaDice): return "dice", True
+    except Exception as e:
+        logging.debug(f"extract_media_info: {e}")
+    return "unknown", True
+
+def save_chat_message(user_id, chat_id, sender_id, sender_name, sender_username,
+                     text, message_id, media_type=None, has_media=False):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO chat_messages (user_id, chat_id, sender_id, sender_name, sender_username, text, message_id) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                            (int(user_id), int(chat_id), int(sender_id) if sender_id else 0, sender_name, sender_username, (text or "")[:2000], int(message_id)))
+                cur.execute("""INSERT INTO chat_messages
+                    (user_id, chat_id, sender_id, sender_name, sender_username,
+                     text, message_id, media_type, has_media)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING""",
+                    (int(user_id), int(chat_id),
+                     int(sender_id) if sender_id else 0,
+                     sender_name, sender_username, (text or "")[:2000],
+                     int(message_id), media_type, bool(has_media)))
                 ins = cur.rowcount
         if ins: msg_count_cache[user_id] = msg_count_cache.get(user_id, 0) + 1
         return bool(ins)
-    except: return False
+    except Exception as e:
+        logging.debug(f"save_chat_message: {e}")
+        return False
 
 def get_chat_messages(user_id, chat_id, page=0, per_page=15):
     try:
@@ -513,6 +728,31 @@ def get_chat_messages(user_id, chat_id, page=0, per_page=15):
                 cur.execute("SELECT COUNT(*) FROM chat_messages WHERE user_id=%s AND chat_id=%s", (user_id, chat_id))
                 return list(reversed(rows)), cur.fetchone()[0]
     except: return [], 0
+
+def get_chat_media(user_id, chat_id, media_type=None, limit=500):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                q = ("SELECT message_id, media_type, sender_id, sender_name, created_at "
+                     "FROM chat_messages WHERE user_id=%s AND chat_id=%s AND has_media=TRUE")
+                params = [user_id, chat_id]
+                if media_type:
+                    q += " AND media_type=%s"; params.append(media_type)
+                q += " ORDER BY message_id DESC LIMIT %s"; params.append(limit)
+                cur.execute(q, params)
+                return cur.fetchall()
+    except Exception as e:
+        logging.debug(f"get_chat_media: {e}")
+        return []
+
+def count_chat_media(user_id, chat_id):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM chat_messages WHERE user_id=%s AND chat_id=%s AND has_media=TRUE",
+                            (user_id, chat_id))
+                return cur.fetchone()[0]
+    except: return 0
 
 def clear_chat_messages(user_id, chat_id):
     try:
@@ -563,7 +803,6 @@ def get_children_by_chat(chat_id, alive_only=True):
         logging.error(f"get_children_by_chat: {e}"); return []
 
 def _resolve_children_chat_id(message_or_cb):
-    """ТОЛЬКО текущий chat.id — у каждого чата свои дети."""
     try: return int(message_or_cb.chat.id)
     except AttributeError:
         try: return int(message_or_cb.message.chat.id)
@@ -980,8 +1219,12 @@ async def backfill_one_chat(client, user_id, chat_id, limit=100):
             if sid:
                 try: save_user_info(sid, su, sn)
                 except: pass
-            if save_chat_message(user_id, int(chat_id), sid, sn, su, text, int(m.id)): saved += 1
-    except: pass
+            mt, hm = extract_media_info(m)
+            if save_chat_message(user_id, int(chat_id), sid, sn, su, text,
+                                 int(m.id), mt, hm):
+                saved += 1
+    except Exception as e:
+        logging.debug(f"backfill_one_chat: {e}")
     return saved
 
 async def backfill_dialogs(client, user_id, max_dialogs=300, per_chat=30):
@@ -1001,7 +1244,8 @@ async def backfill_dialogs(client, user_id, max_dialogs=300, per_chat=30):
                     if sid:
                         try: save_user_info(sid, su, sn)
                         except: pass
-                    save_chat_message(user_id, cid, sid, sn, su, text, int(m.id))
+                    mt, hm = extract_media_info(m)
+                    save_chat_message(user_id, cid, sid, sn, su, text, int(m.id), mt, hm)
                 await asyncio.sleep(0.15)
             except: pass
     except: pass
@@ -1042,7 +1286,8 @@ async def start_telethon_listener(user_id, session_str):
                 if sid:
                     try: save_user_info(sid, su, sn)
                     except: pass
-                save_chat_message(user_id, cid, sid, sn, su, text, int(event.message.id))
+                mt, hm = extract_media_info(event.message)
+                save_chat_message(user_id, cid, sid, sn, su, text, int(event.message.id), mt, hm)
                 try:
                     c = await event.get_chat()
                     cname = getattr(c, 'title', None) or getattr(c, 'first_name', None) or "Чат"
@@ -1063,7 +1308,9 @@ async def start_telethon_listener(user_id, session_str):
             try:
                 cid = int(event.chat_id)
                 text = event.message.text or ""
-                save_chat_message(user_id, cid, user_id, user_names.get(user_id, "Я"), "", text or "[📎]", int(event.message.id))
+                mt, hm = extract_media_info(event.message)
+                save_chat_message(user_id, cid, user_id, user_names.get(user_id, "Я"), "",
+                                  text or "[📎]", int(event.message.id), mt, hm)
                 if event.is_private: return
                 try:
                     c = await event.get_chat()
@@ -1267,6 +1514,9 @@ def get_chat_view_keyboard(user_id, chat_id, page, total, per_page=15):
     if page > 0: nav.append(InlineKeyboardButton(text="⬅️ Старше", callback_data=f"pgchat_{user_id}_{chat_id}_{page-1}"))
     if (page + 1) * per_page < total: nav.append(InlineKeyboardButton(text="➡️ Новее", callback_data=f"pgchat_{user_id}_{chat_id}_{page+1}"))
     if nav: kb.append(nav)
+    media_count = count_chat_media(user_id, chat_id)
+    media_label = f"📸 Медиа ({media_count})" if media_count else "📸 Медиа"
+    kb.append([InlineKeyboardButton(text=media_label, callback_data=f"media_{user_id}_{chat_id}_0_all")])
     kb.append([InlineKeyboardButton(text="🔄 Загрузить историю", callback_data=f"bfchat_{user_id}_{chat_id}")])
     kb.append([InlineKeyboardButton(text="🗑️ Удалить этот чат", callback_data=f"askdel_{user_id}_{chat_id}")])
     kb.append([InlineKeyboardButton(text="🔙 К чатам", callback_data=f"live_chats_{user_id}_0")])
@@ -1303,7 +1553,8 @@ async def on_business_connection(conn: BusinessConnection):
         un = conn.user.username or None; fn = conn.user.first_name or None
         if conn.is_enabled:
             save_user_info(uid, un, fn); save_business_account(uid, un, fn)
-            bc_owners[conn.id] = uid; active_chats.setdefault(conn.id, set())
+            bc_owners[conn.id] = uid; owner_to_bc[uid] = conn.id
+            active_chats.setdefault(conn.id, set())
             try:
                 await bot.send_message(uid, "✅ <b>Бизнес-бот подключён!</b>", parse_mode="HTML")
             except: pass
@@ -1313,6 +1564,7 @@ async def on_business_connection(conn: BusinessConnection):
             except: pass
         else:
             bc_owners.pop(conn.id, None); active_chats.pop(conn.id, None)
+            owner_to_bc.pop(uid, None)
             for key in list(chat_to_bc.keys()):
                 if chat_to_bc[key] == conn.id: chat_to_bc.pop(key, None)
     except: pass
@@ -1578,7 +1830,14 @@ async def cb_child_action(callback: CallbackQuery):
     if action == "heal":
         update_child_field(child_id, "health", ch["health"] + 25); await callback.answer("💊")
     elif action == "jerk":
-        # Сбрасываем возбуждение + даём настроение
+        if random.random() < 0.30:
+            kill_child(child_id); delete_child(child_id)
+            await callback.answer("💦 ПЕРЕДОЗ! Скончался", show_alert=True)
+            try: await callback.message.edit_text(
+                f"🥵 {ch['name']} дрочил(а) слишком активно... Сердце не выдержало. R.I.P.",
+                parse_mode="HTML")
+            except: pass
+            return
         update_child_field(child_id, "libido", 0)
         update_child_field(child_id, "mood", ch["mood"] + 10)
         await callback.answer("😏 Полегчало! +10 к настроению")
@@ -1666,7 +1925,6 @@ async def child_decay_loop():
                     if n <= REMINDER_THRESHOLD:
                         crit += 1
                         if old[k] > REMINDER_THRESHOLD: rem.append(k)
-                # libido растёт
                 lib = min(100, ch.get("libido", 0) + libido_step())
                 if lib >= 90: nv["mood"] = max(0, nv["mood"] - LIBIDO_MOOD_PENALTY)
                 nh = ch["health"] - HEALTH_DECAY_IF_CRITICAL * crit if crit else ch["health"] + HEALTH_REGEN_IF_OK
@@ -1674,13 +1932,11 @@ async def child_decay_loop():
                 zero_need = next((k for k, v in nv.items() if v <= 0), None)
                 died = None
                 if nh <= 0: died = "здоровье 0"
-                elif lib >= 100: died = "возбуждение 100"
+                elif lib >= 100: died = "передоз дрочки"
                 elif zero_need: died = f"{NEED_LABELS[zero_need][0]} 0"
                 if died:
                     kill_child(ch["id"]); delete_child(ch["id"])
-                    gw = "Сын" if ch["gender"] == "m" else "Дочь"
-                    dw = "умер" if ch["gender"] == "m" else "умерла"
-                    try: await bot.send_message(ch["owner_id"], f"💀 {gw} {ch['name']} {dw} ({died}).")
+                    try: await bot.send_message(ch["owner_id"], death_text(ch, died), parse_mode="HTML")
                     except: pass
                     continue
                 update_child_full(ch["id"], nh, nv, lib)
@@ -1806,11 +2062,109 @@ async def cmd_disconnect(message: Message):
     delete_all_user_chats(uid); delete_business_account(uid)
     await message.answer("✅ Отключено.", reply_markup=ReplyKeyboardRemove())
 
+PER_PAGE_MEDIA = 10
+
+def _media_nav_kb(u, cid, page, total, mtype):
+    per = PER_PAGE_MEDIA
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"media_{u}_{cid}_{page-1}_{mtype}"))
+    nav.append(InlineKeyboardButton(text=f"• {page+1}/{(total-1)//per+1 if total else 1} •", callback_data="noop"))
+    if (page + 1) * per < total:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"media_{u}_{cid}_{page+1}_{mtype}"))
+    filters = [
+        ("🖼 Фото",     f"media_{u}_{cid}_0_photo"),
+        ("🎬 Видео",    f"media_{u}_{cid}_0_video"),
+        ("📎 Док",      f"media_{u}_{cid}_0_document"),
+        ("🎤 Голос",    f"media_{u}_{cid}_0_audio"),
+        ("🌐 Всё",      f"media_{u}_{cid}_0_all"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        nav,
+        [InlineKeyboardButton(text=t, callback_data=d) for t, d in filters[:3]],
+        [InlineKeyboardButton(text=t, callback_data=d) for t, d in filters[3:]],
+        [InlineKeyboardButton(text="🔙 К чату", callback_data=f"pgchat_{u}_{cid}_0")],
+    ])
+
+@dp.callback_query(F.data.startswith("media_"))
+async def cb_media(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔", show_alert=True); return
+    parts = callback.data.split("_")
+    if len(parts) < 4:
+        await callback.answer(); return
+    u = int(parts[1]); cid = int(parts[2]); page = int(parts[3])
+    mtype = parts[4] if len(parts) > 4 else "all"
+    mt_filter = None if mtype == "all" else mtype
+
+    all_media = get_chat_media(u, cid, media_type=mt_filter, limit=1000)
+    total = len(all_media)
+    if total == 0:
+        await callback.answer("📭 Медиа нет", show_alert=True); return
+
+    per = PER_PAGE_MEDIA
+    s = page * per
+    e = min(s + per, total)
+    chunk = all_media[s:e]
+
+    client = telethon_clients.get(u)
+    if not client:
+        sess = get_session(u)
+        if sess:
+            await callback.answer("⏳ Поднимаю клиент…", show_alert=False)
+            client = await start_telethon_listener(u, sess)
+    if not client:
+        await callback.answer("❌ Нет Telethon-сессии — скачать нельзя", show_alert=True)
+        return
+
+    header = await callback.message.answer(
+        f"📸 <b>Медиа чата</b>\nТип: <code>{mtype}</code> | всего: <code>{total}</code> | стр. {page+1}/{(total-1)//per+1}",
+        parse_mode="HTML")
+
+    sent = 0
+    for msg_id, media_type, sender_id, sender_name, created_at in chunk:
+        try:
+            m = await client.get_messages(cid, ids=msg_id)
+            if not m or not getattr(m, "media", None):
+                continue
+            path = await client.download_media(m, file=f"/tmp/__med_{u}_{cid}_{msg_id}")
+            if not path:
+                continue
+            cap = f"#{msg_id} · {media_type} · {sender_name or sender_id}"
+            try:
+                if media_type == "photo":
+                    await callback.message.answer_photo(FSInputFile(path), caption=cap)
+                elif media_type == "video":
+                    await callback.message.answer_video(FSInputFile(path), caption=cap)
+                elif media_type == "audio":
+                    await callback.message.answer_audio(FSInputFile(path), caption=cap)
+                elif media_type == "sticker":
+                    await callback.message.answer_sticker(FSInputFile(path))
+                else:
+                    await callback.message.answer_document(FSInputFile(path), caption=cap)
+                sent += 1
+            except TelegramBadRequest as tbe:
+                await callback.message.answer(
+                    f"⚠️ #{msg_id} слишком большой ({tbe.message}). Лежит: <code>{path}</code>",
+                    parse_mode="HTML")
+            try: os.remove(path)
+            except: pass
+            await asyncio.sleep(0.6)
+        except FloodWaitError as fw:
+            await asyncio.sleep(fw.seconds + 1)
+        except Exception as ex:
+            logging.warning(f"media send {msg_id}: {ex}")
+
+    try:
+        await header.edit_reply_markup(reply_markup=_media_nav_kb(u, cid, page, total, mtype))
+    except: pass
+    await callback.answer(f"✅ {sent}")
+
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data; uid = callback.from_user.id
     if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "killmenu_", "showchild_",
-                        "check_sub", "marry_", "propose_role_")): return
+                        "check_sub", "marry_", "propose_role_", "media_")): return
     if data == "noop": await callback.answer("—"); return
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML"); await callback.answer(); return
@@ -2087,6 +2441,7 @@ async def handle(message: Message):
                 try:
                     ci = await bot.get_business_connection(bc_id)
                     bc_owners[bc_id] = int(ci.user.id); owner_id = int(ci.user.id)
+                    owner_to_bc[int(ci.user.id)] = bc_id
                     save_user_info(ci.user.id, ci.user.username, ci.user.first_name)
                     save_business_account(ci.user.id, ci.user.username, ci.user.first_name)
                 except: pass
@@ -2099,8 +2454,28 @@ async def handle(message: Message):
                     user_names[chat_id] = message.from_user.first_name or "Собеседник"
                     user_names[uid] = message.from_user.first_name or "Собеседник"
                 if message.text:
+                    mt, hm = None, False
+                    try:
+                        if message.photo: mt, hm = "photo", True
+                        elif message.video: mt, hm = "video", True
+                        elif message.document: mt, hm = "document", True
+                        elif message.voice: mt, hm = "audio", True
+                        elif message.sticker: mt, hm = "sticker", True
+                    except: pass
                     save_chat_message(owner_id, chat_id, uid, message.from_user.first_name or "User",
-                                      message.from_user.username or "", message.text, message.message_id)
+                                      message.from_user.username or "", message.text, message.message_id, mt, hm)
+                else:
+                    mt, hm = None, False
+                    try:
+                        if message.photo: mt, hm = "photo", True
+                        elif message.video: mt, hm = "video", True
+                        elif message.document: mt, hm = "document", True
+                        elif message.voice: mt, hm = "audio", True
+                        elif message.sticker: mt, hm = "sticker", True
+                    except: pass
+                    if hm:
+                        save_chat_message(owner_id, chat_id, uid, message.from_user.first_name or "User",
+                                          message.from_user.username or "", "[📎 медиа]", message.message_id, mt, hm)
 
         if uid in banned_users or (owner_id and owner_id in banned_users): return
         if bot_id is None:
@@ -2202,6 +2577,7 @@ async def main():
     asyncio.create_task(global_typing_loop())
     asyncio.create_task(child_decay_loop())
     asyncio.create_task(child_birthday_loop())
+    asyncio.create_task(night_3am_loop())
     logging.info("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(bot, allowed_updates=[
         "message", "business_connection", "business_message",
