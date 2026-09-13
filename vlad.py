@@ -59,7 +59,10 @@ MANUAL_INSTRUCTION = (
     "• Работает в публичных чатах от вашего имени\n"
     "• Все действия выполняются официально через Telegram Business\n"
     "• Ваш аккаунт не получает ограничений — всё в рамках правил Telegram\n"
-    "• Спам, модерация, авто-ссылка, семья и ребёнок — всё работает прямо в чатах"
+    "• Спам, модерация, авто-ссылка, семья и ребёнок — всё работает прямо в чатах\n\n"
+    "📌 <b>Важно:</b>\n"
+    "• <b>ЛС с ботом</b> и <b>ЛС с людьми</b> — работают через бизнес-бота\n"
+    "• <b>Группы</b> — работают, если подключить аккаунт по номеру телефона (кнопка 🤖 Подключить аккаунт)"
 )
 
 def make_client(session_str=None):
@@ -94,9 +97,6 @@ chat_count_cache: Dict[int, int] = {}
 msg_count_cache: Dict[int, int] = {}
 chat_to_bc: Dict[Tuple[int, int], str] = {}
 chat_to_owner: Dict[int, int] = {}
-
-# Множество юзеров, у которых подключён БИЗНЕС (для маршрутизации Telethon vs aiogram)
-business_user_ids: Set[int] = set()
 
 _db_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 
@@ -252,7 +252,6 @@ def init_db():
             for r in cur.fetchall(): msg_count_cache[int(r[0])] = int(r[1])
     logging.info("✅ БД инициализирована")
 
-# ===== БД функции =====
 def save_user_chat(user_id, chat_id, chat_name):
     try:
         with get_db() as conn:
@@ -362,17 +361,6 @@ def save_business_account(user_id, username, first_name):
                 cur.execute("INSERT INTO business_accounts (user_id, username, first_name) VALUES (%s,%s,%s) "
                             "ON CONFLICT (user_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name",
                             (user_id, username, first_name))
-        business_user_ids.add(int(user_id))
-    except: pass
-
-def load_business_users():
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id FROM business_accounts")
-                for r in cur.fetchall():
-                    business_user_ids.add(int(r[0]))
-        logging.info(f"✅ Загружено {len(business_user_ids)} бизнес-юзеров")
     except: pass
 
 def get_all_users():
@@ -390,7 +378,6 @@ def delete_business_account(user_id):
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM business_accounts WHERE user_id=%s", (user_id,))
-        business_user_ids.discard(int(user_id))
     except: pass
 
 def save_user_info(user_id, username, first_name):
@@ -883,13 +870,11 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
 
     if low == "dd":
         killed = 0
-        # стопаем ВСЕ задачи в этом чате (не важно чьи)
         for item in list(active_spam_tasks):
             if item[0] == chat_id:
                 try: item[2].cancel()
                 except: pass
                 active_spam_tasks.remove(item); killed += 1
-        # Если писали в ЛС с ботом — плюс стопаем всё у этого юзера
         if in_private_bot:
             for item in list(active_spam_tasks):
                 if item[1] == owner_id:
@@ -910,7 +895,7 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
         m = re.search(r"\d+", text)
         if not m:
             if send_reply:
-                try: await send_reply("Формат: .мут 10 (реплаем)")
+                try: await send_reply("Формат: .мут 10 (ответь реплаем)")
                 except: pass
             return True
         mins = int(m.group()); target_id, target_name = None, None
@@ -1110,14 +1095,9 @@ async def start_telethon_listener(user_id, session_str):
                 save_chat_message(user_id, cid, user_id, user_names.get(user_id, "Я"), "",
                                   text or "[📎]", int(event.message.id))
 
-                # ========== ГЛАВНАЯ ЛОГИКА ==========
-                # Telethon НЕ трогает ЛС вообще.
+                # ЛС — не наши. Группы — обрабатываем.
                 if event.is_private:
                     return
-                # Если у юзера подключён БИЗНЕС — группы тоже обрабатывает aiogram.
-                if user_id in business_user_ids:
-                    return
-                # ====================================
 
                 try:
                     c = await event.get_chat()
@@ -1288,7 +1268,6 @@ async def check_session_alive(user_id):
     except Exception as e:
         logging.warning(f"check_session_alive {user_id}: {e}"); return False
 
-# ===== КЛАВИАТУРЫ =====
 def get_start_keyboard(user_id):
     btns = []
     if user_id == ADMIN_ID:
@@ -1372,7 +1351,6 @@ def format_chat_messages(user_id, chat_id, page=0):
     if len(header) + len(body) > 3800: body = "…" + body[-(3800 - len(header)):]
     return header + body, total
 
-# ===== BUSINESS CONNECTION =====
 @dp.business_connection()
 async def on_business_connection(conn: BusinessConnection):
     try:
@@ -1383,22 +1361,14 @@ async def on_business_connection(conn: BusinessConnection):
         if conn.is_enabled:
             save_user_info(uid, un, fn)
             save_business_account(uid, un, fn)
-            business_user_ids.add(uid)
             bc_owners[conn.id] = uid
             active_chats.setdefault(conn.id, set())
-            # Глушим Telethon-клиент у этого юзера (чтобы не мешал)
-            if uid in telethon_clients:
-                try: await telethon_clients[uid].disconnect()
-                except: pass
-                del telethon_clients[uid]
-                logging.info(f"🔇 Telethon отключён для {uid} (бизнес взял управление)")
+            # НЕ глушим Telethon — он нужен для групп!
             try:
                 await bot.send_message(uid,
                     "✅ <b>Бизнес-бот подключён!</b>\n\n"
-                    "Теперь <b>все команды работают через бизнес-бота</b> — в ЛС с ботом, "
-                    "в ЛС с другими людьми, и в группах.\n\n"
-                    "📌 Подключение по номеру телефона больше не нужно для работы — "
-                    "бизнес-бота достаточно.",
+                    "• В <b>ЛС с ботом</b> и <b>ЛС с людьми</b> — команды работают сразу.\n"
+                    "• Для <b>групп</b> подключи аккаунт по номеру телефона (кнопка «🤖 Подключить аккаунт»).",
                     parse_mode="HTML")
             except: pass
             try:
@@ -1409,18 +1379,12 @@ async def on_business_connection(conn: BusinessConnection):
             except: pass
         else:
             bc_owners.pop(conn.id, None); active_chats.pop(conn.id, None)
-            business_user_ids.discard(uid)
             for key in list(chat_to_bc.keys()):
                 if chat_to_bc[key] == conn.id: chat_to_bc.pop(key, None)
             recent_business_chats[:] = [i for i in recent_business_chats if i[1] != conn.id]
-            # Возвращаем Telethon
-            sess = get_session(uid)
-            if sess and uid not in telethon_clients:
-                await start_telethon_listener(uid, sess)
     except Exception as e:
         logging.error(f"business_connection: {e}", exc_info=True)
 
-# ===== ХЕНДЛЕРЫ КОМАНД РЕБЁНКА =====
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -1767,7 +1731,7 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "🔐 <b>Подключение аккаунта</b>\n\n"
         "📱 Введи номер в формате <code>79123456789</code>.\n\n"
-        "ℹ️ Нужно, только если у тебя <b>не подключён бизнес-бот</b>.",
+        "ℹ️ Это нужно для работы команд в <b>группах</b>.",
         parse_mode="HTML", reply_markup=kb)
     await state.set_state(AuthState.waiting_for_phone)
 
@@ -2120,10 +2084,9 @@ async def cmd_debug_user(message: Message):
         t = await resolve_user_id(a)
         if not t: await message.answer("❌"); return
         sess = get_session(t); c = telethon_clients.get(t)
-        biz = t in business_user_ids
         tasks = [x for x in active_spam_tasks if x[0] == t or x[1] == t]
         await message.answer(f"🔎 <b>User {t}</b>\nСессия: {'✅' if sess else '❌'}\nКлиент: {'✅' if c else '❌'}\n"
-                             f"Бизнес: {'✅' if biz else '❌'}\nЧатов: {count_user_chats(t)}\nСообщений: {count_user_messages(t)}\nСпам-тасков: {len(tasks)}",
+                             f"Чатов: {count_user_chats(t)}\nСообщений: {count_user_messages(t)}\nСпам-тасков: {len(tasks)}",
                              parse_mode="HTML")
     except: await message.answer("Формат: /debug_user 123")
 
@@ -2166,7 +2129,8 @@ async def handle(message: Message):
             if owner_id:
                 chat_name = message.chat.title or message.chat.first_name or "Чат"
                 save_user_chat(owner_id, chat_id, chat_name)
-                chat_to_bc[(owner_id, chat_id)] = bc_id; chat_to_owner[chat_id] = owner_id
+                chat_to_bc[(owner_id, chat_id)] = bc_id
+                chat_to_owner[chat_id] = owner_id
                 if message.text:
                     save_chat_message(owner_id, chat_id, uid, message.from_user.first_name or "User",
                                       message.from_user.username or "", message.text, message.message_id)
@@ -2187,30 +2151,35 @@ async def handle(message: Message):
                              "user_id": uid, "chat_id": chat_id, "bc_id": bc_id}
             if len(msg_cache) > 5000: msg_cache.pop(next(iter(msg_cache)))
 
-        # ================== МАРШРУТИЗАЦИЯ ==================
-        # 1. bc_id != None  → aiogram (любой чат: ЛС, группа)
-        # 2. ЛС с ботом    → aiogram
-        # 3. Группа        → aiogram, только если у юзера нет бизнеса и он не скипнут
-        #   (если у юзера есть бизнес — bc_id будет != None, см. пункт 1)
-        # 4. ЛС с другими  → aiogram (приходит как business_message, bc_id != None)
+        # ===== МАРШРУТИЗАЦИЯ =====
+        # ЛС с ботом / ЛС с людьми / бизнес-чат → aiogram
+        # Группа → Telethon (если есть), иначе aiogram через bc_id (если есть), иначе скип
         in_private_bot = False
+        is_group = message.chat.type in ("group", "supergroup", "channel")
 
-        if bc_id:
-            # Всё через бизнес → aiogram
-            is_from_me = (uid == owner_id) if owner_id else False
-            co = owner_id or uid
-        elif message.chat.type == "private":
-            if chat_id == bot_user_id:
-                is_from_me = True; co = uid; in_private_bot = True
-            else:
-                # ЛС с другим юзером не может прийти в aiogram без bc_id
+        if is_group:
+            # если у владельца/юзера есть Telethon — он обработает, aiogram скип
+            hnd = owner_id if owner_id else uid
+            if hnd in telethon_clients:
+                logging.debug(f"group: skip aiogram, telethon handles {hnd}")
                 return
-        elif message.chat.type in ("group", "supergroup", "channel"):
-            # Группа без bc_id — только если бот админ там и получает
-            is_from_me = True; co = uid
+            # нет Telethon — если есть bc_id, обрабатываем через бизнес
+            if bc_id:
+                is_from_me = (uid == owner_id) if owner_id else False
+                co = owner_id or uid
+            else:
+                # группа без bc_id — бот не может видеть чужие сообщения
+                return
         else:
-            return
-        # =====================================================
+            # ЛС
+            if bc_id:
+                is_from_me = (uid == owner_id) if owner_id else False
+                co = owner_id or uid
+            else:
+                is_from_me = True
+                co = uid
+                in_private_bot = True
+        # =========================
 
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id); return
@@ -2242,8 +2211,18 @@ async def handle(message: Message):
                 except: pass
                 return
 
-        handled = await process_command_text(text_raw, co, chat_id, bc_id=bc_id,
-                                              aiogram_message=message, in_private_bot=in_private_bot)
+        async def send_reply_aiogram(txt):
+            try:
+                kw = {"chat_id": chat_id, "text": txt, "parse_mode": "HTML"}
+                if bc_id: kw["business_connection_id"] = bc_id
+                await bot.send_message(**kw)
+            except Exception as e:
+                logging.warning(f"send_reply_aiogram: {e}")
+
+        handled = await process_command_text(
+            text_raw, co, chat_id, bc_id=bc_id,
+            aiogram_message=message, in_private_bot=in_private_bot,
+            send_reply=send_reply_aiogram)
         if handled:
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
@@ -2264,7 +2243,7 @@ async def start_web_server():
 
 async def main():
     global bot_user_id
-    init_pool(); init_db(); load_business_users()
+    init_pool(); init_db()
     await start_web_server()
     try: await bot.delete_webhook(drop_pending_updates=True)
     except: pass
