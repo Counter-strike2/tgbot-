@@ -12,7 +12,8 @@ from typing import Dict, Set, List, Optional, Tuple
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, Update, InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup
+    CallbackQuery, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup,
+    BusinessConnection
 )
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -125,10 +126,9 @@ TEXT_COMMANDS_HELP = (
     "• реплаем <code>муж</code> / <code>жена</code> / <code>пожениться</code>\n"
     "• <code>развод</code>\n"
     "• <code>родить сына Имя</code> / <code>родить дочь Имя</code>\n"
-    "• <code>наш сын</code> / <code>наша дочь</code> (если один)\n"
-    "• <code>наш сын Имя</code> / <code>наша дочь Имя</code> (если много)\n"
+    "• <code>наш сын</code> / <code>наша дочь</code>\n"
     "• <code>дата регистрации</code>\n"
-    "• <code>убить сына [Имя]</code> / <code>убить дочь [Имя]</code>\n\n"
+    "• <code>убить сына [Имя]</code>\n\n"
     "🔹 <b>Калькулятор:</b> <code>1458+2414</code>"
 )
 
@@ -161,16 +161,9 @@ BIRTH_RULES_TEXT = (
 RESTORE_AMOUNT = {"hunger": 40, "toilet": 50, "sleep_need": 35, "hygiene": 45, "mood": 30, "attention": 30}
 
 KILL_METHODS = [
-    "🔪 Расчленить",
-    "🪓 Отрубить бошку топором",
-    "🔫 Расстрелять",
-    "⚡ Электростул",
-    "☠️ Повесить",
-    "🔥 Сжечь заживо",
-    "🌊 Утопить",
-    "🚗 Переехать машиной",
-    "🐍 Укус змеи",
-    "💊 Отравить",
+    "🔪 Расчленить", "🪓 Отрубить бошку топором", "🔫 Расстрелять",
+    "⚡ Электростул", "☠️ Повесить", "🔥 Сжечь заживо",
+    "🌊 Утопить", "🚗 Переехать машиной", "🐍 Укус змеи", "💊 Отравить",
 ]
 KILL_PHRASES = {
     "🔪 Расчленить": "{name} расчленён(а) на куски. Кровь по всей комнате...",
@@ -732,8 +725,9 @@ async def spam_worker_bot(chat_id, bc_id, reply_to, text):
         words = text.split()
         while True:
             for w in words:
-                kw = {"chat_id": chat_id, "text": w, "reply_to_message_id": reply_to}
+                kw = {"chat_id": chat_id, "text": w}
                 if bc_id: kw["business_connection_id"] = bc_id
+                if reply_to: kw["reply_to_message_id"] = reply_to
                 try: await bot.send_message(**kw)
                 except: pass
                 await asyncio.sleep(0.3)
@@ -856,7 +850,8 @@ def apply_modifications(text, chat_id, entities=None):
 
 # ==================== ЯДРО КОМАНД ====================
 async def process_command_text(text, owner_id, chat_id, bc_id=None,
-                               telethon_client=None, telethon_event=None, send_reply=None):
+                               telethon_client=None, telethon_event=None,
+                               send_reply=None, aiogram_message=None):
     global CHANNEL_LINK
     low = text.lower().strip()
 
@@ -882,15 +877,12 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
     if low == "+реплай": save_setting(chat_id, 'reply_guard', True); return True
     if low == "-реплай": save_setting(chat_id, 'reply_guard', False); return True
 
-    # ===== СПАМ =====
+    # СПАМ
     if low == "ss":
         t = user_spam_texts.get(str(owner_id))
         if not t:
-            if chat_id > 0:
-                try:
-                    if telethon_client: await telethon_client.send_message(chat_id, "Сначала: set [текст]")
-                    else: await bot.send_message(chat_id, "⚠️ Сначала: <code>set [текст]</code>",
-                                                 parse_mode="HTML", business_connection_id=bc_id)
+            if send_reply:
+                try: await send_reply("⚠️ Сначала: set [текст]")
                 except: pass
             return True
         for item in list(active_spam_tasks):
@@ -902,14 +894,11 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             task = asyncio.create_task(spam_worker_telethon(telethon_client, chat_id, t))
         else:
             rt = None
-            if telethon_event and telethon_event.is_reply:
-                try:
-                    rp = await telethon_event.get_reply_message()
-                    rt = rp.id
-                except: pass
+            if aiogram_message and aiogram_message.reply_to_message:
+                rt = aiogram_message.reply_to_message.message_id
             task = asyncio.create_task(spam_worker_bot(chat_id, bc_id, rt, t))
         active_spam_tasks.append((chat_id, owner_id, task))
-        logging.info(f"▶️ ss chat={chat_id} owner={owner_id} total={len(active_spam_tasks)}")
+        logging.info(f"▶️ ss chat={chat_id} owner={owner_id}")
         return True
 
     if low == "dd":
@@ -925,14 +914,19 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
 
     if low.startswith("set "):
         save_spam_text(str(owner_id), text[4:].strip())
-        if chat_id > 0 and send_reply:
+        if send_reply:
             try: await send_reply("✅ Текст сохранён.")
             except: pass
         return True
 
+    # МУТ
     if low.startswith(".мут") or low.startswith("!мут") or low.startswith(".ут"):
         m = re.search(r"\d+", text)
-        if not m: return True
+        if not m:
+            if send_reply:
+                try: await send_reply("Формат: .мут 10 (ответь реплаем)")
+                except: pass
+            return True
         mins = int(m.group())
         target_id, target_name = None, None
         if telethon_event and telethon_event.is_reply:
@@ -941,45 +935,69 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                 s = await rp.get_sender()
                 target_id = s.id; target_name = getattr(s, "first_name", None) or "Юзер"
             except: pass
-        if target_id:
-            mutes[target_id] = {"until": datetime.now() + timedelta(minutes=mins)}
-            asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
-            msg = f"🔇 {target_name} — МУТ {mins} мин."
-            try:
-                if telethon_client: await telethon_client.send_message(chat_id, msg)
-                else: await bot.send_message(chat_id, msg, business_connection_id=bc_id)
+        elif aiogram_message and aiogram_message.reply_to_message and aiogram_message.reply_to_message.from_user:
+            tu = aiogram_message.reply_to_message.from_user
+            target_id = tu.id; target_name = tu.first_name or "Юзер"
+        if not target_id:
+            if send_reply:
+                try: await send_reply("Ответь реплаем на сообщение человека.")
+                except: pass
+            return True
+        mutes[target_id] = {"until": datetime.now() + timedelta(minutes=mins)}
+        asyncio.create_task(unmute(target_id, chat_id, bc_id, target_name))
+        msg = f"🔇 {target_name} — МУТ {mins} мин."
+        if send_reply:
+            try: await send_reply(msg)
             except: pass
         return True
+
     if low in [".размут", "!размут"]:
+        target_id = None; target_name = None
         if telethon_event and telethon_event.is_reply:
             try:
                 rp = await telethon_event.get_reply_message()
                 s = await rp.get_sender()
-                mutes.pop(s.id, None)
-                if telethon_client: await telethon_client.send_message(chat_id, "🔊 МУТ снят.")
+                target_id = s.id; target_name = getattr(s, "first_name", None) or "Юзер"
+            except: pass
+        elif aiogram_message and aiogram_message.reply_to_message and aiogram_message.reply_to_message.from_user:
+            tu = aiogram_message.reply_to_message.from_user
+            target_id = tu.id; target_name = tu.first_name or "Юзер"
+        if not target_id:
+            if send_reply:
+                try: await send_reply("Ответь реплаем.")
+                except: pass
+            return True
+        mutes.pop(target_id, None)
+        if send_reply:
+            try: await send_reply(f"🔊 {target_name} — МУТ снят.")
             except: pass
         return True
+
     if low in ["мой ид", "моид"]:
         try:
-            if telethon_client: await telethon_client.send_message(chat_id, f"🆔 {owner_id}")
+            if send_reply: await send_reply(f"🆔 {owner_id}")
             else: await bot.send_message(chat_id, f"🆔 <code>{owner_id}</code>", parse_mode="HTML", business_connection_id=bc_id)
         except: pass
         return True
     if low in ["твой ид", "твоид"]:
+        target_id = None
         if telethon_event and telethon_event.is_reply:
             try:
                 rp = await telethon_event.get_reply_message()
                 s = await rp.get_sender()
-                if telethon_client: await telethon_client.send_message(chat_id, f"🆔 {s.id}")
+                target_id = s.id
+            except: pass
+        elif aiogram_message and aiogram_message.reply_to_message and aiogram_message.reply_to_message.from_user:
+            target_id = aiogram_message.reply_to_message.from_user.id
+        if target_id and send_reply:
+            try: await send_reply(f"🆔 {target_id}")
             except: pass
         return True
     if low == "!команды":
+        plain = TEXT_COMMANDS_HELP.replace("<b>","").replace("</b>","").replace("<code>","").replace("</code>","")
         try:
-            if telethon_client:
-                plain = TEXT_COMMANDS_HELP.replace("<b>","").replace("</b>","").replace("<code>","").replace("</code>","")
-                await telethon_client.send_message(chat_id, plain)
-            else:
-                await bot.send_message(chat_id, TEXT_COMMANDS_HELP, parse_mode="HTML", business_connection_id=bc_id)
+            if send_reply: await send_reply(plain)
+            else: await bot.send_message(chat_id, TEXT_COMMANDS_HELP, parse_mode="HTML", business_connection_id=bc_id)
         except: pass
         return True
 
@@ -1124,6 +1142,9 @@ async def start_telethon_listener(user_id, session_str):
                         save_user_chat(user_id, cid, cname)
                     except: pass
 
+                if event.is_private:
+                    return
+
                 stripped = text.strip()
                 if not stripped: return
                 low = stripped.lower()
@@ -1253,12 +1274,10 @@ async def start_telethon_listener(user_id, session_str):
                     except: pass
                     return
 
-                if not event.is_private:
-                    ft, modified = apply_modifications(stripped, cid, event.message.entities)
-                    if modified:
-                        try: await event.edit(ft, parse_mode='html')
-                        except Exception as e: logging.warning(f"edit mod: {e}")
-
+                ft, modified = apply_modifications(stripped, cid, event.message.entities)
+                if modified:
+                    try: await event.edit(ft, parse_mode='html')
+                    except Exception as e: logging.warning(f"edit mod: {e}")
             except Exception as e:
                 logging.error(f"outgoing: {e}", exc_info=True)
 
@@ -1392,6 +1411,56 @@ def format_chat_messages(user_id, chat_id, page=0):
         body = "…" + body[-(3800 - len(header)):]
     return header + body, total
 
+# ==================== BUSINESS CONNECTION (НОВОЕ!) ====================
+@dp.business_connection()
+async def on_business_connection(conn: BusinessConnection):
+    """Срабатывает сразу, когда юзер подключил бизнес-бота в настройках Telegram."""
+    try:
+        uid = int(conn.user.id)
+        un = conn.user.username or None
+        fn = conn.user.first_name or None
+        logging.info(f"🔌 business_connection: user={uid} @{un} enabled={conn.is_enabled} id={conn.id}")
+
+        if conn.is_enabled:
+            # сохраняем юзера как бизнес-аккаунт
+            save_user_info(uid, un, fn)
+            save_business_account(uid, un, fn)
+            bc_owners[conn.id] = uid
+            active_chats.setdefault(conn.id, set())
+            # уведомляем юзера
+            try:
+                await bot.send_message(
+                    uid,
+                    "✅ <b>Бизнес-бот подключён!</b>\n\n"
+                    "Теперь бот видит чаты, в которых ты предоставил доступ. "
+                    "Как только в чате придёт первое сообщение — чат появится в списке.\n\n"
+                    "Команды работают так же: <code>ss</code>, <code>dd</code>, <code>set</code>, "
+                    "<code>родить сына Имя</code>, <code>муж</code>/<code>жена</code> реплаем и т.д.",
+                    parse_mode="HTML")
+            except: pass
+            # уведомляем админа
+            try:
+                if uid != ADMIN_ID:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"🔌 <b>Новый бизнес-аккаунт</b>\n\n"
+                        f"ID: <code>{uid}</code>\n"
+                        f"Имя: {get_user_mention(uid)}\n"
+                        f"Username: @{un or '—'}",
+                        parse_mode="HTML")
+            except: pass
+        else:
+            # отключён
+            bc_owners.pop(conn.id, None)
+            active_chats.pop(conn.id, None)
+            # чистим чаты этого bc
+            for key in list(chat_to_bc.keys()):
+                if chat_to_bc[key] == conn.id:
+                    chat_to_bc.pop(key, None)
+            recent_business_chats[:] = [i for i in recent_business_chats if i[1] != conn.id]
+    except Exception as e:
+        logging.error(f"business_connection: {e}", exc_info=True)
+
 # ==================== ХЕНДЛЕРЫ РЕБЁНКА ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -1497,14 +1566,8 @@ async def cb_showchild(callback: CallbackQuery):
 @dp.message(F.text.lower().startswith("родить"))
 async def msg_birth(message: Message): await _give_birth(message)
 
-@dp.business_message(F.text.lower().startswith("родить"))
-async def bmsg_birth(message: Message): await _give_birth(message)
-
 @dp.message(F.text.regexp(CHILD_STATUS_RE))
 async def msg_child(message: Message): await _child_status(message)
-
-@dp.business_message(F.text.regexp(CHILD_STATUS_RE))
-async def bmsg_child(message: Message): await _child_status(message)
 
 async def _registration_date(message: Message):
     kids = get_children_by_chat(message.chat.id)
@@ -1530,9 +1593,6 @@ async def _registration_date(message: Message):
 
 @dp.message(F.text.lower().startswith("дата регистрации"))
 async def msg_regdate(message: Message): await _registration_date(message)
-
-@dp.business_message(F.text.lower().startswith("дата регистрации"))
-async def bmsg_regdate(message: Message): await _registration_date(message)
 
 KILL_RE = re.compile(
     r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+"
@@ -1604,9 +1664,6 @@ async def cb_killmenu(callback: CallbackQuery):
 @dp.message(F.text.regexp(KILL_RE))
 async def msg_kill(message: Message): await _kill_menu(message)
 
-@dp.business_message(F.text.regexp(KILL_RE))
-async def bmsg_kill(message: Message): await _kill_menu(message)
-
 @dp.message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
 async def msg_marriage(message: Message):
     low = message.text.lower().strip()
@@ -1633,10 +1690,6 @@ async def msg_marriage(message: Message):
     save_spouse(chat_id, uid, sp.id, sp.first_name or "Партнёр", relation)
     rw = "мужем" if relation == "husband" else "женой"
     await message.answer(f"💍 {sp.first_name} теперь твой {rw} в этом чате!")
-
-@dp.business_message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
-async def bmsg_marriage(message: Message):
-    await msg_marriage(message)
 
 # ==================== КОЛБЭКИ РЕБЁНКА ====================
 @dp.callback_query(F.data.startswith("child_"))
@@ -2062,7 +2115,9 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             except Exception as e: err = str(e)
         else:
             bc_id = chat_to_bc.get((u, cid))
-            if bc_id: ok = True
+            if bc_id:
+                # Убираем из БД (удалить полностью через бизнес нельзя, но у юзера диалог не тронуть)
+                ok = True
             else: err = "Ни Telethon-сессии, ни бизнес-связи."
         if ok:
             clear_chat_messages(u, cid); delete_user_chat(u, cid)
@@ -2106,7 +2161,7 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     if data == "admin_users":
         try:
             await callback.message.edit_text(
-                "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n🟢 онлайн / ⚪ оффлайн\n🔑 сессия / 🚫 нет",
+                "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n🟢 онлайн / ⚪ оффлайн\n🔑 сессия / 🚫 нет\n📱 бизнес / 👤 ручной",
                 reply_markup=get_users_keyboard(0), parse_mode="HTML")
         except TelegramBadRequest: pass
         await callback.answer(); return
@@ -2299,7 +2354,6 @@ async def global_update_handler(update: Update, bot: Bot):
 
 # ==================== ОСНОВНОЙ ====================
 @dp.message()
-@dp.business_message()
 async def handle(message: Message):
     global bot_id
     try:
@@ -2318,6 +2372,7 @@ async def handle(message: Message):
                     owner_id = int(ci.user.id)
                     save_user_info(ci.user.id, ci.user.username, ci.user.first_name)
                     save_business_account(ci.user.id, ci.user.username, ci.user.first_name)
+                    # сразу регистрируем юзера в админке
                 except: pass
             if owner_id:
                 chat_name = message.chat.title or message.chat.first_name or "Чат"
@@ -2351,14 +2406,11 @@ async def handle(message: Message):
                              "user_id": uid, "chat_id": chat_id, "bc_id": bc_id}
             if len(msg_cache) > 5000: msg_cache.pop(next(iter(msg_cache)))
 
-        # ============= ФИКС =============
-        # Если у ХОЗЯИНА (в бизнес-чате) или у ОТПРАВИТЕЛЯ (в группе/лс) есть Telethon —
-        # всю обработку команд выполняет Telethon (on_outgoing). Бизнес-бот не дублирует.
+        # Если у хозяина бизнес-чата есть Telethon — он и обрабатывает. Бизнес не дублирует.
         handler_user = owner_id if bc_id else uid
-        if handler_user in telethon_clients:
+        if handler_user in telethon_clients and not message.chat.type == "private":
             logging.debug(f"skip bot-handle: telethon active for {handler_user}")
             return
-        # ================================
 
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id); return
@@ -2391,7 +2443,7 @@ async def handle(message: Message):
                 except: pass
                 return
 
-        handled = await process_command_text(text_raw, co, chat_id, bc_id=bc_id)
+        handled = await process_command_text(text_raw, co, chat_id, bc_id=bc_id, aiogram_message=message)
         if handled:
             await clear_cmd(chat_id, message.message_id, bc_id)
             return
