@@ -1,6 +1,8 @@
 import asyncio
 import aiosqlite
 import aiohttp
+import os
+from aiohttp import web
 from PIL import Image, ImageDraw
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -26,6 +28,7 @@ OWNER_USERNAME = "NorikAmiri"
 SECRET_CODE = "norik228TOP"
 DB = "shop.db"
 AVATAR_BG = "#17212B"
+PORT = int(os.environ.get("PORT", 10000))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -113,13 +116,6 @@ async def add_admin(user_id: int, username: str, display_name: str):
         await db.commit()
 
 
-async def get_all_admins():
-    async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT user_id, username, display_name FROM admins") as cur:
-            rows = await cur.fetchall()
-    return rows
-
-
 async def get_user_display_name(user_id: int, user_obj) -> str:
     name = f"@{user_obj.username}" if user_obj.username else (user_obj.first_name or "Пользователь")
     try:
@@ -182,7 +178,7 @@ async def upload_photo(file_path: str):
     return await upload_to_catbox(file_path)
 
 
-# ================= АВАТАРКА БОТА =================
+# ================= АВАТАРКА БОТА (ВСЕГДА АКТУАЛЬНАЯ) =================
 def make_circle_avatar(input_path: str, output_path: str, size: int = 1024, bg_hex: str = "#17212B"):
     try:
         img = Image.open(input_path).convert("RGBA")
@@ -208,6 +204,7 @@ def make_circle_avatar(input_path: str, output_path: str, size: int = 1024, bg_h
 
 
 async def get_current_bot_avatar_url():
+    """Каждый раз берёт актуальную аву бота, делает круглой и заливает. Без кэша."""
     try:
         me = await bot.get_me()
         photos = await bot.get_user_profile_photos(user_id=me.id, limit=1)
@@ -217,7 +214,7 @@ async def get_current_bot_avatar_url():
 
         sizes = photos.photos[0]
         file_id = sizes[-1].file_id
-        print(f"[avatar] Размеров: {len(sizes)}, беру file_id={file_id}")
+        print(f"[avatar] Беру актуальную аву, file_id={file_id}")
 
         file = await bot.get_file(file_id)
 
@@ -342,6 +339,7 @@ async def open_payment(user_id: int, deal_id: int):
         return
     nft_name, seller, price, photo_url = deal
 
+    # Каждый раз берём свежую аву
     photo_url = await get_current_bot_avatar_url()
 
     kwargs = {}
@@ -419,7 +417,7 @@ async def set_price(message: Message, state: FSMContext):
     await state.clear()
 
 
-# ================= МОИ ЛОТЫ (ТОЛЬКО СВОИ) =================
+# ================= МОИ ЛОТЫ =================
 @dp.callback_query(F.data == "my_lots")
 async def my_lots(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id, callback.from_user.username):
@@ -433,7 +431,6 @@ async def my_lots(callback: CallbackQuery):
 async def delete_lot(callback: CallbackQuery):
     deal_id = int(callback.data.split("_")[1])
     async with aiosqlite.connect(DB) as db:
-        # Проверяем владельца
         async with db.execute("SELECT owner_id FROM deals WHERE id=?", (deal_id,)) as cur:
             row = await cur.fetchone()
         if not row:
@@ -529,6 +526,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # КАЖДЫЙ РАЗ свежая ава
     photo_url = await get_current_bot_avatar_url()
 
     invoice_link = None
@@ -712,7 +710,6 @@ async def payment_success(message: Message):
         f"⭐ Сумма: <b>{price} звёзд</b>"
     )
 
-    # Уведомление владельцу лота + владельцу бота
     recipients = set()
     if deal_owner_id:
         recipients.add(deal_owner_id)
@@ -730,6 +727,22 @@ async def payment_success(message: Message):
             print(f"Не удалось отправить уведомление {admin_id}: {e}")
 
 
+# ================= ВЕБ-СЕРВЕР ДЛЯ RENDER =================
+async def health(request):
+    return web.Response(text="OK")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"🌐 Веб-сервер запущен на порту {PORT}")
+
+
 # ================= ЗАПУСК =================
 async def main():
     global BUSINESS_CONNECTION_ID
@@ -739,6 +752,8 @@ async def main():
     if saved:
         BUSINESS_CONNECTION_ID = saved
         print(f"🔁 Business Connection загружен: {saved}")
+
+    await start_web_server()
 
     print("Бот запущен...")
     await dp.start_polling(bot)
