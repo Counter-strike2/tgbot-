@@ -178,7 +178,7 @@ async def upload_photo(file_path: str):
     return await upload_to_catbox(file_path)
 
 
-# ================= АВАТАРКА БОТА (ВСЕГДА СВЕЖАЯ) =================
+# ================= АВАТАРКА БОТА =================
 def make_circle_avatar(input_path: str, output_path: str, size: int = 1024, bg_hex: str = "#17212B"):
     try:
         img = Image.open(input_path).convert("RGBA")
@@ -204,7 +204,6 @@ def make_circle_avatar(input_path: str, output_path: str, size: int = 1024, bg_h
 
 
 async def get_current_bot_avatar_url():
-    """ВСЕГДА берёт свежую аву БОТА. Без кэша."""
     try:
         me = await bot.get_me()
         photos = await bot.get_user_profile_photos(user_id=me.id, limit=1)
@@ -669,8 +668,8 @@ async def pre_checkout(query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(query.id, ok=True)
 
 
-@dp.message(F.successful_payment)
-async def payment_success(message: Message):
+async def process_successful_payment(message: Message):
+    """Общая логика для обычной и бизнес-оплаты."""
     payload = message.successful_payment.invoice_payload
     deal_id = int(payload.split("_")[1])
 
@@ -693,12 +692,23 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    # Ответ покупателю
-    await message.answer(
-        'тебя заскамили как лоха <tg-emoji emoji-id="5391011124231556271">😂</tg-emoji>',
-        parse_mode="HTML"
-    )
+    bot_info = await bot.get_me()
+    bot_link = f"https://t.me/{bot_info.username}"
 
+    # Сообщение покупателю
+    try:
+        await message.answer(
+            'тебя заскамили как лоха <tg-emoji emoji-id="5391011124231556271">😂</tg-emoji>',
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Открыть бота", url=bot_link)]
+            ])
+        )
+        print(f"[payment] Ответ покупателю отправлен → {buyer_id}")
+    except Exception as e:
+        print(f"[payment] Не удалось ответить покупателю: {e}")
+
+    # Уведомление
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
         f"👤 Покупатель: {buyer_link}\n"
@@ -724,6 +734,19 @@ async def payment_success(message: Message):
             await bot.send_message(admin_id, text, parse_mode="HTML")
         except Exception as e:
             print(f"Не удалось отправить уведомление {admin_id}: {e}")
+
+
+@dp.message(F.successful_payment)
+async def payment_success(message: Message):
+    """Оплата в обычном чате с ботом."""
+    await process_successful_payment(message)
+
+
+@dp.business_message(F.successful_payment)
+async def payment_success_business(message: Message):
+    """Оплата в бизнес-чате (через business_connection)."""
+    print("[payment] Пойман business_message с successful_payment")
+    await process_successful_payment(message)
 
 
 # ================= ВЕБ-СЕРВЕР ДЛЯ RENDER =================
