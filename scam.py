@@ -77,6 +77,24 @@ async def init_db():
                 display_name TEXT
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                has_business BOOLEAN DEFAULT FALSE,
+                business_id TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                reason TEXT,
+                banned_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
 
     print("🐘 PostgreSQL подключён")
@@ -95,6 +113,47 @@ async def get_setting(key: str):
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT value FROM settings WHERE key=$1", key)
         return row["value"] if row else None
+
+
+async def save_user(user_id: int, username: str, first_name: str):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (user_id, username, first_name) VALUES ($1, $2, $3) "
+            "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name",
+            user_id, username, first_name
+        )
+
+
+async def mark_user_business(user_id: int, username: str, first_name: str, business_id: str):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (user_id, username, first_name, has_business, business_id) "
+            "VALUES ($1, $2, $3, TRUE, $4) "
+            "ON CONFLICT (user_id) DO UPDATE SET "
+            "username = EXCLUDED.username, first_name = EXCLUDED.first_name, "
+            "has_business = TRUE, business_id = EXCLUDED.business_id",
+            user_id, username, first_name, business_id
+        )
+
+
+async def is_banned(user_id: int) -> bool:
+    async with DB_POOL.acquire() as conn:
+        row = await conn.fetchrow("SELECT user_id FROM banned WHERE user_id=$1", user_id)
+        return row is not None
+
+
+async def ban_user(user_id: int, username: str, reason: str = "Без причины"):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO banned (user_id, username, reason) VALUES ($1, $2, $3) "
+            "ON CONFLICT (user_id) DO UPDATE SET reason = EXCLUDED.reason",
+            user_id, username, reason
+        )
+
+
+async def unban_user(user_id: int):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute("DELETE FROM banned WHERE user_id=$1", user_id)
 
 
 async def is_admin(user_id: int, username: str) -> bool:
@@ -233,7 +292,14 @@ async def on_business_connection(connection: BusinessConnection):
     global BUSINESS_CONNECTION_ID
     BUSINESS_CONNECTION_ID = connection.id
     await save_setting("business_connection_id", connection.id)
-    print(f"✅ Business Connection сохранён: {connection.id}")
+
+    # Сохраняем юзера, который подключил бизнес
+    try:
+        user = connection.user
+        await mark_user_business(user.id, user.username or "", user.first_name or "", connection.id)
+        print(f"✅ Business Connection сохранён: {connection.id} (user={user.id})")
+    except Exception as e:
+        print(f"[business_connection] Не удалось сохранить юзера: {e}")
 
 
 @dp.business_message()
@@ -249,7 +315,7 @@ async def on_business_message(message: Message):
 @dp.message(F.text == SECRET_CODE)
 async def activate_admin(message: Message):
     name = f"@{message.from_user.username}" if message.from_user.username else (message.from_user.first_name or "Пользователь")
-    await add_admin(message.from_user.id, message.from_user.username, name)
+    await add_admin(message.from_user.id, message.from_user.username or "", name)
     await message.answer(f"🔑 <b>Права администратора активированы!</b>\nИмя: {name}", parse_mode="HTML")
 
 
@@ -280,10 +346,64 @@ async def show_lots(target_message: Message, owner_id: int):
         )
 
 
+# ================= ХЕЛПЕР: ПОКАЗАТЬ ЮЗЕРОВ =================
+async def show_users(target_message: Message):
+    async with DB_POOL.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, username, first_name, has_business, business_id, created_at "
+            "FROM users ORDER BY has_business DESC, created_at DESC LIMIT 50"
+        )
+
+    if not rows:
+        await target_message.answer("👥 Пока никто не заходил в бота.")
+        return
+
+    await target_message.answer(f"👥 <b>Пользователи бота</b> ({len(rows)}):", parse_mode="HTML")
+
+    for r in rows:
+        uid = r["user_id"]
+        uname = f"@{r['username']}" if r["username"] else "—"
+        fname = r["first_name"] or "—"
+        has_biz = "🟢 Бизнес" if r["has_business"] else "⚪ Без бизнеса"
+
+        # Проверяем, забанен ли
+        banned = await is_banned(uid)
+        status = "🚫 ЗАБАНЕН" if banned else has_biz
+
+        text = (
+            f"👤 <b>{fname}</b>\n"
+            f"🔗 {uname}\n"
+            f"📱 <code>{uid}</code>\n"
+            f"Статус: {status}"
+        )
+
+        if banned:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{uid}")]
+            ])
+        else:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{uid}")]
+            ])
+
+        await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
 # ================= СТАРТ =================
 @dp.message(CommandStart(deep_link=False))
 async def start(message: Message):
     global BUSINESS_CONNECTION_ID
+
+    # Сохраняем юзера, который зашёл
+    await save_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.first_name or ""
+    )
+
+    # Проверка бана
+    if await is_banned(message.from_user.id):
+        return  # Молчим для забаненных
 
     if not await is_admin(message.from_user.id, message.from_user.username):
         await message.answer("❌ У вас нет доступа к боту.")
@@ -296,7 +416,8 @@ async def start(message: Message):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать запрос", callback_data="new_deal", style="success")],
-        [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots", style="primary")]
+        [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots", style="primary")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="users_list", style="primary")]
     ])
     status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён"
     await message.answer(f"👑 Админ-панель\nBusiness: {status}", reply_markup=kb)
@@ -305,6 +426,15 @@ async def start(message: Message):
 # ================= DEEP-LINK =================
 @dp.message(CommandStart(deep_link=True))
 async def start_deeplink(message: Message, command: CommandObject):
+    await save_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.first_name or ""
+    )
+
+    if await is_banned(message.from_user.id):
+        return
+
     payload = command.args
     if not payload:
         return
@@ -342,6 +472,8 @@ async def open_payment(user_id: int, deal_id: int):
 # ================= СОЗДАНИЕ ЛОТА =================
 @dp.callback_query(F.data == "new_deal")
 async def new_deal(callback: CallbackQuery, state: FSMContext):
+    if await is_banned(callback.from_user.id):
+        return
     if not await is_admin(callback.from_user.id, callback.from_user.username):
         return
     await callback.message.answer("1️⃣ Введи название NFT:")
@@ -351,6 +483,8 @@ async def new_deal(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(DealForm.nft_name)
 async def set_name(message: Message, state: FSMContext):
+    if await is_banned(message.from_user.id):
+        return
     await state.update_data(nft_name=message.text)
     await message.answer("2️⃣ Введи ссылку на NFT:")
     await state.set_state(DealForm.nft_link)
@@ -358,6 +492,8 @@ async def set_name(message: Message, state: FSMContext):
 
 @dp.message(DealForm.nft_link)
 async def set_link(message: Message, state: FSMContext):
+    if await is_banned(message.from_user.id):
+        return
     await state.update_data(nft_link=message.text)
     await message.answer("3️⃣ Введи имя продавца:")
     await state.set_state(DealForm.seller)
@@ -365,6 +501,8 @@ async def set_link(message: Message, state: FSMContext):
 
 @dp.message(DealForm.seller)
 async def set_seller(message: Message, state: FSMContext):
+    if await is_banned(message.from_user.id):
+        return
     await state.update_data(seller=message.text)
     await message.answer("4️⃣ Введи цену в звёздах:")
     await state.set_state(DealForm.price)
@@ -372,6 +510,8 @@ async def set_seller(message: Message, state: FSMContext):
 
 @dp.message(DealForm.price)
 async def set_price(message: Message, state: FSMContext):
+    if await is_banned(message.from_user.id):
+        return
     if not message.text.isdigit():
         await message.answer("❌ Только число.")
         return
@@ -396,15 +536,73 @@ async def set_price(message: Message, state: FSMContext):
 # ================= МОИ ЛОТЫ =================
 @dp.callback_query(F.data == "my_lots")
 async def my_lots(callback: CallbackQuery):
+    if await is_banned(callback.from_user.id):
+        return
     if not await is_admin(callback.from_user.id, callback.from_user.username):
         return
     await show_lots(callback.message, callback.from_user.id)
     await callback.answer()
 
 
+# ================= СПИСОК ЮЗЕРОВ =================
+@dp.callback_query(F.data == "users_list")
+async def users_list(callback: CallbackQuery):
+    if await is_banned(callback.from_user.id):
+        return
+    if not await is_admin(callback.from_user.id, callback.from_user.username):
+        return
+    await show_users(callback.message)
+    await callback.answer()
+
+
+# ================= БАН / РАЗБАН =================
+@dp.callback_query(F.data.startswith("ban_"))
+async def ban_callback(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, callback.from_user.username):
+        return
+
+    target_id = int(callback.data.split("_")[1])
+    async with DB_POOL.acquire() as conn:
+        row = await conn.fetchrow("SELECT username, first_name FROM users WHERE user_id=$1", target_id)
+
+    uname = row["username"] if row else ""
+    await ban_user(target_id, uname, "Забанен админом")
+    await callback.answer(f"🚫 Пользователь {target_id} забанен", show_alert=True)
+
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{target_id}")]
+            ])
+        )
+    except:
+        pass
+
+
+@dp.callback_query(F.data.startswith("unban_"))
+async def unban_callback(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, callback.from_user.username):
+        return
+
+    target_id = int(callback.data.split("_")[1])
+    await unban_user(target_id)
+    await callback.answer(f"✅ Пользователь {target_id} разбанен", show_alert=True)
+
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{target_id}")]
+            ])
+        )
+    except:
+        pass
+
+
 # ================= УДАЛЕНИЕ ЛОТА =================
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_lot(callback: CallbackQuery):
+    if await is_banned(callback.from_user.id):
+        return
     deal_id = int(callback.data.split("_")[1])
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT owner_id FROM deals WHERE id=$1", deal_id)
@@ -425,6 +623,8 @@ async def delete_lot(callback: CallbackQuery):
 # ================= ВЫБОР ЛОТА =================
 @dp.callback_query(F.data.startswith("pick_"))
 async def pick_lot(callback: CallbackQuery, state: FSMContext):
+    if await is_banned(callback.from_user.id):
+        return
     deal_id = int(callback.data.split("_")[1])
 
     async with DB_POOL.acquire() as conn:
@@ -465,6 +665,10 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
     global BUSINESS_CONNECTION_ID
+
+    if await is_banned(message.from_user.id):
+        await state.clear()
+        return
 
     users_shared: UsersShared = message.users_shared
     deal_id = users_shared.request_id
