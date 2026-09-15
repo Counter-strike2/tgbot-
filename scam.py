@@ -662,7 +662,8 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()ЛОХ
+    await site.start()
+    print(f"🌐 Веб-сервер на порту {PORT}")
 
 
 # ================= ЗАГЛУШКА (молчит для всех) =================
