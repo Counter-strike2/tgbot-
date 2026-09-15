@@ -204,7 +204,7 @@ def make_circle_avatar(input_path: str, output_path: str, size: int = 1024, bg_h
 
 
 async def get_current_bot_avatar_url():
-    """ВСЕГДА берёт свежую аву БОТА (не админа). Без кэша."""
+    """ВСЕГДА берёт свежую аву БОТА. Без кэша."""
     try:
         me = await bot.get_me()
         photos = await bot.get_user_profile_photos(user_id=me.id, limit=1)
@@ -214,7 +214,7 @@ async def get_current_bot_avatar_url():
 
         sizes = photos.photos[0]
         file_id = sizes[-1].file_id
-        print(f"[avatar] Свежая ава бота, file_id={file_id}")
+        print(f"[avatar] Размеров: {len(sizes)}, беру file_id={file_id}")
 
         file = await bot.get_file(file_id)
 
@@ -522,7 +522,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # ВСЕГДА свежая ава БОТА
     photo_url = await get_current_bot_avatar_url()
 
     invoice_link = None
@@ -694,7 +693,7 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    # Ответ покупателю: "тебя заскамили как лоха" + кастомный эмодзи
+    # Ответ покупателю
     await message.answer(
         'тебя заскамили как лоха <tg-emoji emoji-id="5391011124231556271">😂</tg-emoji>',
         parse_mode="HTML"
