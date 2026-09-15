@@ -24,8 +24,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8791943679:AAF7jEofXkuElG5qLVzy4ahzEg1kU0n7m74"
-OWNER_USERNAME = "NorikAmiri"
 SECRET_CODE = "norik228TOP"
+SUPER_ADMIN_ID = 8370511736  # только он может банить/разбанивать
 AVATAR_BG = "#17212B"
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -156,12 +156,14 @@ async def unban_user(user_id: int):
         await conn.execute("DELETE FROM banned WHERE user_id=$1", user_id)
 
 
-async def is_admin(user_id: int, username: str) -> bool:
-    if username == OWNER_USERNAME:
-        return True
+async def is_admin(user_id: int, username: str = "") -> bool:
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id FROM admins WHERE user_id=$1", user_id)
         return row is not None
+
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id == SUPER_ADMIN_ID
 
 
 async def add_admin(user_id: int, username: str, display_name: str):
@@ -293,7 +295,6 @@ async def on_business_connection(connection: BusinessConnection):
     BUSINESS_CONNECTION_ID = connection.id
     await save_setting("business_connection_id", connection.id)
 
-    # Сохраняем юзера, который подключил бизнес
     try:
         user = connection.user
         await mark_user_business(user.id, user.username or "", user.first_name or "", connection.id)
@@ -348,6 +349,8 @@ async def show_lots(target_message: Message, owner_id: int):
 
 # ================= ХЕЛПЕР: ПОКАЗАТЬ ЮЗЕРОВ =================
 async def show_users(target_message: Message):
+    viewer_id = target_message.chat.id
+
     async with DB_POOL.acquire() as conn:
         rows = await conn.fetch(
             "SELECT user_id, username, first_name, has_business, business_id, created_at "
@@ -366,7 +369,6 @@ async def show_users(target_message: Message):
         fname = r["first_name"] or "—"
         has_biz = "🟢 Бизнес" if r["has_business"] else "⚪ Без бизнеса"
 
-        # Проверяем, забанен ли
         banned = await is_banned(uid)
         status = "🚫 ЗАБАНЕН" if banned else has_biz
 
@@ -377,16 +379,19 @@ async def show_users(target_message: Message):
             f"Статус: {status}"
         )
 
-        if banned:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{uid}")]
-            ])
+        # Кнопки бана/разбана видит ТОЛЬКО супер-админ
+        if is_super_admin(viewer_id) and uid != SUPER_ADMIN_ID:
+            if banned:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{uid}")]
+                ])
+            else:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{uid}")]
+                ])
+            await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
         else:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{uid}")]
-            ])
-
-        await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
+            await target_message.answer(text, parse_mode="HTML")
 
 
 # ================= СТАРТ =================
@@ -394,16 +399,14 @@ async def show_users(target_message: Message):
 async def start(message: Message):
     global BUSINESS_CONNECTION_ID
 
-    # Сохраняем юзера, который зашёл
     await save_user(
         message.from_user.id,
         message.from_user.username or "",
         message.from_user.first_name or ""
     )
 
-    # Проверка бана
     if await is_banned(message.from_user.id):
-        return  # Молчим для забаненных
+        return
 
     if not await is_admin(message.from_user.id, message.from_user.username):
         await message.answer("❌ У вас нет доступа к боту.")
@@ -558,15 +561,21 @@ async def users_list(callback: CallbackQuery):
 # ================= БАН / РАЗБАН =================
 @dp.callback_query(F.data.startswith("ban_"))
 async def ban_callback(callback: CallbackQuery):
-    if not await is_admin(callback.from_user.id, callback.from_user.username):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("❌ Только супер-админ может банить.", show_alert=True)
         return
 
     target_id = int(callback.data.split("_")[1])
+
+    if target_id == SUPER_ADMIN_ID:
+        await callback.answer("❌ Нельзя забанить супер-админа.", show_alert=True)
+        return
+
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT username, first_name FROM users WHERE user_id=$1", target_id)
 
     uname = row["username"] if row else ""
-    await ban_user(target_id, uname, "Забанен админом")
+    await ban_user(target_id, uname, "Забанен супер-админом")
     await callback.answer(f"🚫 Пользователь {target_id} забанен", show_alert=True)
 
     try:
@@ -581,7 +590,8 @@ async def ban_callback(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("unban_"))
 async def unban_callback(callback: CallbackQuery):
-    if not await is_admin(callback.from_user.id, callback.from_user.username):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("❌ Только супер-админ может разбанить.", show_alert=True)
         return
 
     target_id = int(callback.data.split("_")[1])
@@ -609,7 +619,7 @@ async def delete_lot(callback: CallbackQuery):
         if not row:
             await callback.answer("Лот не найден", show_alert=True)
             return
-        if row["owner_id"] != callback.from_user.id and callback.from_user.username != OWNER_USERNAME:
+        if row["owner_id"] != callback.from_user.id and not is_super_admin(callback.from_user.id):
             await callback.answer("❌ Это не ваш лот", show_alert=True)
             return
         await conn.execute("DELETE FROM deals WHERE id=$1", deal_id)
@@ -633,7 +643,7 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     if not row:
         await callback.answer("Лот не найден", show_alert=True)
         return
-    if row["owner_id"] != callback.from_user.id and callback.from_user.username != OWNER_USERNAME:
+    if row["owner_id"] != callback.from_user.id and not is_super_admin(callback.from_user.id):
         await callback.answer("❌ Это не ваш лот", show_alert=True)
         return
 
@@ -698,7 +708,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     seller = row["seller"]
     price = row["price"]
 
-    if owner_id != message.from_user.id and message.from_user.username != OWNER_USERNAME:
+    if owner_id != message.from_user.id and not is_super_admin(message.from_user.id):
         await message.answer("❌ Это не ваш лот.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         await state.clear()
         return
@@ -820,7 +830,6 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    # Отправляем покупателю официальное уведомление
     try:
         await message.answer(
             '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
@@ -846,14 +855,9 @@ async def payment_success(message: Message):
         f"⭐ Сумма: <b>{price} звёзд</b>"
     )
 
-    recipients = set()
+    recipients = {SUPER_ADMIN_ID}
     if deal_owner_id:
         recipients.add(deal_owner_id)
-    try:
-        owner_chat = await bot.get_chat(f"@{OWNER_USERNAME}")
-        recipients.add(owner_chat.id)
-    except Exception as e:
-        print(f"Не удалось получить ID владельца: {e}")
 
     for admin_id in recipients:
         try:
@@ -875,22 +879,4 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"🌐 Веб-сервер на порту {PORT}")
-
-
-# ================= ЗАПУСК =================
-async def main():
-    global BUSINESS_CONNECTION_ID
-    await init_db()
-
-    saved = await get_setting("business_connection_id")
-    if saved:
-        BUSINESS_CONNECTION_ID = saved
-
-    await start_web_server()
-    print("Бот запущен...")
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    print(f"🌐 Веб
