@@ -615,14 +615,8 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    try:
-        await message.answer(
-            'тебя заскамили как лоха <tg-emoji emoji-id="5391011124231556271">😂</tg-emoji>',
-            parse_mode="HTML"
-        )
-        print(f"[payment] Сообщение отправлено покупателю {buyer_id}")
-    except Exception as e:
-        print(f"[payment] Ошибка: {e}")
+    # Покупателю НИЧЕГО не пишем — бот не светится
+    print(f"[payment] Оплата от {buyer_id} — покупателю не пишем")
 
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
