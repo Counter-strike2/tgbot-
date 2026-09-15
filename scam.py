@@ -879,4 +879,22 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"🌐 Веб
+    print(f"🌐 Веб-сервер на порту {PORT}")
+
+
+# ================= ЗАПУСК =================
+async def main():
+    global BUSINESS_CONNECTION_ID
+    await init_db()
+
+    saved = await get_setting("business_connection_id")
+    if saved:
+        BUSINESS_CONNECTION_ID = saved
+
+    await start_web_server()
+    print("Бот запущен...")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
