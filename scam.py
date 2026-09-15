@@ -527,7 +527,7 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     rich_message = InputRichMessage(
         blocks=[
-            InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезду."),
+            InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
             InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
             InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
             InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", url="https://t.me/NorikAmiri", style="danger")])
