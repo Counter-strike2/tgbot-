@@ -175,19 +175,6 @@ async def add_admin(user_id: int, username: str, display_name: str):
         )
 
 
-async def get_user_display_name(user_id: int, user_obj) -> str:
-    name = f"@{user_obj.username}" if user_obj.username else (user_obj.first_name or "Пользователь")
-    try:
-        async with DB_POOL.acquire() as conn:
-            await conn.execute(
-                "UPDATE admins SET username=$1, display_name=$2 WHERE user_id=$3",
-                user_obj.username, name, user_id
-            )
-    except Exception:
-        pass
-    return name
-
-
 # ================= ЗАГРУЗКА ФОТО =================
 async def upload_to_telegraph(file_path: str):
     url = "https://telegra.ph/upload"
@@ -379,7 +366,6 @@ async def show_users(target_message: Message):
             f"Статус: {status}"
         )
 
-        # Кнопки бана/разбана видит ТОЛЬКО супер-админ
         if is_super_admin(viewer_id) and uid != SUPER_ADMIN_ID:
             if banned:
                 kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -422,7 +408,7 @@ async def start(message: Message):
         [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots", style="primary")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="users_list", style="primary")]
     ])
-    status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён"
+    status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён (заявки не уйдут!)"
     await message.answer(f"👑 Админ-панель\nBusiness: {status}", reply_markup=kb)
 
 
@@ -671,7 +657,7 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА =================
+# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА В ЛС (через business) =================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
     global BUSINESS_CONNECTION_ID
@@ -713,12 +699,19 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    photo_url = await get_current_bot_avatar_url()
+    # === ГЛАВНАЯ ПРОВЕРКА: без business connection заявку не отправить ===
+    if not BUSINESS_CONNECTION_ID:
+        await message.answer(
+            "❌ <b>Business Connection не подключён.</b>\n\n"
+            "Заявка отправляется от твоего имени в ЛС получателю, поэтому нужен подключённый бизнес-аккаунт.\n"
+            "Подключи бота к своему Telegram Business и попробуй снова.",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
+        await state.clear()
+        return
 
-    invoice_kwargs = {}
-    if photo_url:
-        invoice_kwargs["photo_url"] = photo_url
-
+    # Создаём ссылку на оплату (без photo_url — фото не нужно для оплаты в ЛС)
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name or "NFT Подарок",
@@ -726,8 +719,7 @@ async def on_user_selected(message: Message, state: FSMContext):
             payload=f"deal_{deal_id}",
             provider_token="",
             currency="XTR",
-            prices=[LabeledPrice(label=nft_name or "NFT", amount=price)],
-            **invoice_kwargs
+            prices=[LabeledPrice(label=nft_name or "NFT", amount=price)]
         )
         print(f"[invoice] создан: {invoice_link}")
     except Exception as e:
@@ -735,7 +727,10 @@ async def on_user_selected(message: Message, state: FSMContext):
         invoice_link = None
 
     if not invoice_link:
-        await message.answer("❌ Не удалось создать инвойс.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        await message.answer(
+            "❌ Не удалось создать инвойс.",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
         await state.clear()
         return
 
@@ -748,54 +743,27 @@ async def on_user_selected(message: Message, state: FSMContext):
         ]
     )
 
-    sent_via = None
-    last_error = None
+    # === Отправляем ТОЛЬКО через business_connection_id ===
+    # Никаких bot.send_message напрямую получателю — иначе будет Forbidden.
+    try:
+        await bot.send_rich_message(
+            chat_id=user_id,
+            rich_message=rich_message,
+            business_connection_id=BUSINESS_CONNECTION_ID
+        )
+        print(f"[send] OK через business → {user_id}")
 
-    if BUSINESS_CONNECTION_ID:
-        try:
-            await bot.send_rich_message(
-                chat_id=user_id,
-                rich_message=rich_message,
-                business_connection_id=BUSINESS_CONNECTION_ID
-            )
-            sent_via = "business"
-            print(f"[send] OK через business → {user_id}")
-        except Exception as e:
-            last_error = str(e)
-            print(f"[send business] Ошибка: {e}")
-
-    if not sent_via:
-        try:
-            await bot.send_rich_message(chat_id=user_id, rich_message=rich_message)
-            sent_via = "direct"
-            print(f"[send] OK напрямую → {user_id}")
-        except Exception as e:
-            last_error = str(e)
-            print(f"[send direct] Ошибка: {e}")
-
-    if not sent_via:
-        try:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⭐ ОПЛАТИТЬ", url=invoice_link)]
-            ])
-            await bot.send_message(
-                user_id,
-                f"👤 <b>{sender_name}</b> предлагает вам <b>{nft_name}</b>\n"
-                f"💰 Цена: <b>{price}⭐</b>",
-                parse_mode="HTML", reply_markup=kb
-            )
-            sent_via = "fallback"
-            print(f"[send] OK fallback → {user_id}")
-        except Exception as e:
-            last_error = str(e)
-            print(f"[send fallback] Ошибка: {e}")
-
-    if sent_via:
-        await message.answer("✅ Отправлено!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
-    else:
-        err = last_error or "unknown"
-        await message.answer(f"❌ Не удалось отправить.\n<code>{err}</code>", parse_mode="HTML",
-                            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        await message.answer(
+            "✅ Заявка отправлена в ЛС получателю от твоего имени!",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
+    except Exception as e:
+        print(f"[send business] Ошибка: {e}")
+        await message.answer(
+            f"❌ Не удалось отправить заявку.\n<code>{e}</code>",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
 
     await state.clear()
 
@@ -829,21 +797,6 @@ async def payment_success(message: Message):
     buyer_username = f"@{buyer.username}" if buyer.username else "—"
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
-
-    try:
-        await message.answer(
-            '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
-            '<b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
-            'Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.</b>\n\n'
-            '<b>Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.</b>\n\n'
-            '<b>Товар не выдан, так как оплата не была зачислена. Повторная оплата не требуется.</b>\n\n'
-            '<b>В целях безопасности излишние кнопки трогать не нужно. Дождитесь автоматического возврата средств на ваш баланс.</b>\n\n'
-            '<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>',
-            parse_mode="HTML"
-        )
-        print(f"[payment] Уведомление отправлено покупателю {buyer_id}")
-    except Exception as e:
-        print(f"[payment] Ошибка отправки покупателю: {e}")
 
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
