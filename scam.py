@@ -218,6 +218,27 @@ async def get_current_bot_avatar_url():
         return None
 
 
+# ================= БЕЗОПАСНАЯ ОТПРАВКА RICH =================
+async def safe_send_rich(chat_id: int, rich_message, business_connection_id: str = None) -> bool:
+    """
+    Пытается отправить rich message.
+    Если клиент не поддерживает — возвращает False, чтобы caller сделал fallback.
+    """
+    try:
+        kwargs = {"chat_id": chat_id, "rich_message": rich_message}
+        if business_connection_id:
+            kwargs["business_connection_id"] = business_connection_id
+        await bot.send_rich_message(**kwargs)
+        return True
+    except Exception as e:
+        err_text = str(e).lower()
+        if "not supported" in err_text or "unsupported" in err_text:
+            print(f"[safe_send_rich] Клиент не поддерживает rich message")
+        else:
+            print(f"[safe_send_rich] Ошибка: {e}")
+        return False
+
+
 # ================= FSM =================
 class DealForm(StatesGroup):
     nft_name = State()
@@ -525,6 +546,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # --- Rich Message (со стилями кнопок) ---
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
@@ -537,38 +559,32 @@ async def on_user_selected(message: Message, state: FSMContext):
     sent_via = None
     last_error = None
 
+    # Попытка 1: через business connection
     if BUSINESS_CONNECTION_ID:
-        try:
-            await bot.send_rich_message(
-                chat_id=user_id,
-                rich_message=rich_message,
-                business_connection_id=BUSINESS_CONNECTION_ID
-            )
+        if await safe_send_rich(user_id, rich_message, BUSINESS_CONNECTION_ID):
             sent_via = "business"
-            print(f"[send] OK через business → {user_id}")
-        except Exception as e:
-            last_error = str(e)
-            print(f"[send business] Ошибка: {e}")
+            print(f"[send] OK rich через business → {user_id}")
 
+    # Попытка 2: напрямую
     if not sent_via:
-        try:
-            await bot.send_rich_message(chat_id=user_id, rich_message=rich_message)
+        if await safe_send_rich(user_id, rich_message):
             sent_via = "direct"
-            print(f"[send] OK напрямую → {user_id}")
-        except Exception as e:
-            last_error = str(e)
-            print(f"[send direct] Ошибка: {e}")
+            print(f"[send] OK rich напрямую → {user_id}")
 
+    # Попытка 3: fallback — обычное сообщение с inline-кнопкой
     if not sent_via:
         try:
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⭐ ОПЛАТИТЬ", url=invoice_link)]
+                [InlineKeyboardButton(text="ОПЛАТИТЬ", url=invoice_link)]
             ])
             await bot.send_message(
                 user_id,
                 f"👤 <b>{sender_name}</b> предлагает вам <b>{nft_name}</b>\n"
-                f"💰 Цена: <b>{price}⭐</b>",
-                parse_mode="HTML", reply_markup=kb
+                f"🔗 {nft_link}\n"
+                f"💰 Цена: <b>{price}⭐</b>\n\n"
+                f"Предложение действует 24 часа",
+                parse_mode="HTML",
+                reply_markup=kb
             )
             sent_via = "fallback"
             print(f"[send] OK fallback → {user_id}")
