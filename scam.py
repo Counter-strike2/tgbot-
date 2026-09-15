@@ -23,7 +23,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "8617033510:AAGC53sl9WVYFlF6kS_qK8QnJ-DqPSbiWyQ"
+BOT_TOKEN = "8791943679:AAF7jEofXkuElG5qLVzy4ahzEg1kU0n7m74"
 OWNER_USERNAME = "NorikAmiri"
 SECRET_CODE = "norik228TOP"
 AVATAR_BG = "#17212B"
