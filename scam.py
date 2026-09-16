@@ -40,6 +40,7 @@ dp = Dispatcher(storage=MemoryStorage())
 BUSINESS_CONNECTION_ID = None
 DB_POOL = None
 
+
 def _clean_dsn(raw: str) -> str:
     if not raw:
         return ""
@@ -54,6 +55,7 @@ def _clean_dsn(raw: str) -> str:
         new_query = urllib.parse.urlencode(params, doseq=True)
         dsn = base + ("?" + new_query if new_query else "")
     return dsn
+
 
 # ================= БАЗА =================
 async def init_db():
@@ -121,6 +123,17 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        # НОВОЕ: кто когда-либо писал в бизнес-чат данного connection
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS business_peers (
+                connection_id TEXT NOT NULL,
+                peer_id BIGINT NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                last_seen TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (connection_id, peer_id)
+            )
+        """)
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_to BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_at TIMESTAMP")
@@ -132,6 +145,7 @@ async def init_db():
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
     print("🐘 PostgreSQL подключён")
 
+
 async def save_setting(key: str, value: str):
     async with DB_POOL.acquire() as conn:
         await conn.execute(
@@ -140,10 +154,12 @@ async def save_setting(key: str, value: str):
             key, value
         )
 
+
 async def get_setting(key: str):
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT value FROM settings WHERE key=$1", key)
         return row["value"] if row else None
+
 
 async def save_user(user_id: int, username: str, first_name: str):
     async with DB_POOL.acquire() as conn:
@@ -153,21 +169,20 @@ async def save_user(user_id: int, username: str, first_name: str):
             user_id, username, first_name
         )
 
+
 async def save_business_connection(user_id: int, connection_id: str):
-    """Сохраняет каждое новое подключение в отдельную таблицу."""
     async with DB_POOL.acquire() as conn:
         await conn.execute(
             "INSERT INTO business_connections (user_id, connection_id, is_enabled) VALUES ($1, $2, TRUE)",
             user_id, connection_id
         )
-        # Обновляем основную таблицу users
         await conn.execute(
             "UPDATE users SET has_business = TRUE, business_id = $1 WHERE user_id = $2",
             connection_id, user_id
         )
 
+
 async def get_user_business(user_id: int):
-    """Возвращает ПОСЛЕДНИЙ активный business_connection_id пользователя."""
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT connection_id FROM business_connections "
@@ -179,18 +194,42 @@ async def get_user_business(user_id: int):
             return row["connection_id"]
     return None
 
+
 async def mark_connection_disabled(connection_id: str):
-    """Помечает подключение как неактивное."""
     async with DB_POOL.acquire() as conn:
         await conn.execute(
             "UPDATE business_connections SET is_enabled = FALSE WHERE connection_id = $1",
             connection_id
         )
 
+
+# ---------- НОВОЕ: работа с известными peer'ами ----------
+async def save_business_peer(connection_id: str, peer_id: int, username: str, first_name: str):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO business_peers (connection_id, peer_id, username, first_name, last_seen) "
+            "VALUES ($1, $2, $3, $4, NOW()) "
+            "ON CONFLICT (connection_id, peer_id) DO UPDATE SET "
+            "username = EXCLUDED.username, first_name = EXCLUDED.first_name, last_seen = NOW()",
+            connection_id, peer_id, username, first_name
+        )
+
+
+async def is_known_peer(connection_id: str, peer_id: int) -> bool:
+    """Был ли peer в диалоге с этим бизнес-аккаунтом (писал нам)."""
+    async with DB_POOL.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM business_peers WHERE connection_id = $1 AND peer_id = $2",
+            connection_id, peer_id
+        )
+        return row is not None
+
+
 async def is_banned(user_id: int) -> bool:
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id FROM banned WHERE user_id=$1", user_id)
         return row is not None
+
 
 async def ban_user(user_id: int, username: str, reason: str = "Без причины"):
     async with DB_POOL.acquire() as conn:
@@ -200,9 +239,11 @@ async def ban_user(user_id: int, username: str, reason: str = "Без причи
             user_id, username, reason
         )
 
+
 async def unban_user(user_id: int):
     async with DB_POOL.acquire() as conn:
         await conn.execute("DELETE FROM banned WHERE user_id=$1", user_id)
+
 
 async def is_admin(user_id: int, username: str) -> bool:
     if username == OWNER_USERNAME:
@@ -210,6 +251,7 @@ async def is_admin(user_id: int, username: str) -> bool:
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id FROM admins WHERE user_id=$1", user_id)
         return row is not None
+
 
 async def add_admin(user_id: int, username: str, display_name: str):
     async with DB_POOL.acquire() as conn:
@@ -219,8 +261,10 @@ async def add_admin(user_id: int, username: str, display_name: str):
             user_id, username, display_name
         )
 
+
 def can_ban(user_id: int) -> bool:
     return user_id == BAN_MANAGER_ID
+
 
 # ================= ЗАГРУЗКА ФОТО =================
 async def upload_to_telegraph(file_path: str):
@@ -240,6 +284,7 @@ async def upload_to_telegraph(file_path: str):
         print(f"[telegra.ph] Ошибка: {e}")
     return None
 
+
 async def upload_to_catbox(file_path: str):
     url = "https://catbox.moe/user/api.php"
     try:
@@ -256,11 +301,13 @@ async def upload_to_catbox(file_path: str):
         print(f"[catbox] Ошибка: {e}")
     return None
 
+
 async def upload_photo(file_path: str):
     link = await upload_to_telegraph(file_path)
     if link:
         return link
     return await upload_to_catbox(file_path)
+
 
 # ================= АВАТАРКА =================
 async def get_current_bot_avatar_url():
@@ -279,6 +326,7 @@ async def get_current_bot_avatar_url():
         print(f"[avatar] Ошибка: {e}")
         return None
 
+
 # ================= FSM =================
 class DealForm(StatesGroup):
     nft_name = State()
@@ -286,6 +334,7 @@ class DealForm(StatesGroup):
     seller = State()
     price = State()
     select_chat = State()
+
 
 # ================= BUSINESS =================
 @dp.business_connection()
@@ -301,18 +350,36 @@ async def on_business_connection(connection: BusinessConnection):
     except Exception as e:
         print(f"[business_connection] Ошибка: {e}")
 
+
 @dp.business_message()
 async def on_business_message(message: Message):
     global BUSINESS_CONNECTION_ID
-    if message.business_connection_id and message.business_connection_id != BUSINESS_CONNECTION_ID:
-        BUSINESS_CONNECTION_ID = message.business_connection_id
-        await save_setting("business_connection_id", message.business_connection_id)
-        try:
-            user = message.from_user
-            await save_business_connection(user.id, message.business_connection_id)
-        except Exception as e:
-            print(f"[business_message] Ошибка: {e}")
-        print(f"✅ Business Connection обновлен из сообщения: {message.business_connection_id}")
+    bc_id = message.business_connection_id
+    if bc_id and bc_id != BUSINESS_CONNECTION_ID:
+        BUSINESS_CONNECTION_ID = bc_id
+        await save_setting("business_connection_id", bc_id)
+
+    # Запоминаем peer'а — кто пишет в бизнес-чат.
+    # Именно эти пользователи потом смогут получать сообщения через business_connection_id.
+    try:
+        if bc_id and message.from_user:
+            await save_business_peer(
+                bc_id,
+                message.from_user.id,
+                message.from_user.username or "",
+                message.from_user.first_name or ""
+            )
+            print(f"👥 peer сохранён: {message.from_user.id} для {bc_id}")
+    except Exception as e:
+        print(f"[business_message] Ошибка сохранения peer: {e}")
+
+    # Запоминаем владельца бизнес-подключения (если первый раз видим)
+    try:
+        if bc_id and message.from_user:
+            await save_business_connection(message.from_user.id, bc_id)
+    except Exception as e:
+        print(f"[business_message] Ошибка save_business_connection: {e}")
+
 
 # ================= АКТИВАЦИЯ ПРАВ =================
 @dp.message(F.text == SECRET_CODE)
@@ -328,6 +395,7 @@ async def activate_admin(message: Message):
         f"🔑 <b>Права администратора активированы!</b>\nИмя: {html.escape(name)}",
         parse_mode="HTML"
     )
+
 
 # ================= ХЕЛПЕР: ПОКАЗАТЬ ЛОТЫ =================
 async def show_lots(target_message: Message, owner_id: int):
@@ -353,6 +421,7 @@ async def show_lots(target_message: Message, owner_id: int):
             reply_markup=kb,
             parse_mode="HTML"
         )
+
 
 # ================= ХЕЛПЕР: ПОКАЗАТЬ ЮЗЕРОВ =================
 async def show_users(target_message: Message):
@@ -387,12 +456,13 @@ async def show_users(target_message: Message):
         )
         if viewer_can_ban:
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Разбанить" if banned else "🚫 Забанить", 
-                                       callback_data=f"{'unban' if banned else 'ban'}_{uid}")]
+                [InlineKeyboardButton(text="✅ Разбанить" if banned else "🚫 Забанить",
+                                      callback_data=f"{'unban' if banned else 'ban'}_{uid}")]
             ])
             await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
         else:
             await target_message.answer(text, parse_mode="HTML")
+
 
 # ================= СТАРТ =================
 @dp.message(CommandStart(deep_link=False))
@@ -408,19 +478,20 @@ async def start(message: Message):
         message.from_user.username or "",
         message.from_user.first_name or ""
     )
-    
+
     saved_conn = await get_setting("business_connection_id")
     if saved_conn:
         BUSINESS_CONNECTION_ID = saved_conn
-        
+
     status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён (подключи в Telegram Business)"
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать запрос", callback_data="new_deal")],
         [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="users_list")]
     ])
     await message.answer(f"👑 Админ-панель\nBusiness: {status}", reply_markup=kb)
+
 
 # ================= DEEP-LINK =================
 @dp.message(CommandStart(deep_link=True))
@@ -433,6 +504,7 @@ async def start_deeplink(message: Message, command: CommandObject):
     if payload.startswith("deal_"):
         deal_id = int(payload.split("_")[1])
         await open_payment(message.from_user.id, deal_id)
+
 
 async def open_payment(user_id: int, deal_id: int):
     async with DB_POOL.acquire() as conn:
@@ -452,6 +524,7 @@ async def open_payment(user_id: int, deal_id: int):
         prices=[LabeledPrice(label=row["nft_name"] or "NFT", amount=row["price"])],
     )
 
+
 # ================= СОЗДАНИЕ ЛОТА =================
 @dp.callback_query(F.data == "new_deal")
 async def new_deal(callback: CallbackQuery, state: FSMContext):
@@ -463,6 +536,7 @@ async def new_deal(callback: CallbackQuery, state: FSMContext):
     await state.set_state(DealForm.nft_name)
     await callback.answer()
 
+
 @dp.message(DealForm.nft_name)
 async def set_name(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
@@ -470,6 +544,7 @@ async def set_name(message: Message, state: FSMContext):
     await state.update_data(nft_name=message.text)
     await message.answer("2️⃣ Введи ссылку на NFT:")
     await state.set_state(DealForm.nft_link)
+
 
 @dp.message(DealForm.nft_link)
 async def set_link(message: Message, state: FSMContext):
@@ -479,6 +554,7 @@ async def set_link(message: Message, state: FSMContext):
     await message.answer("3️⃣ Введи имя продавца:")
     await state.set_state(DealForm.seller)
 
+
 @dp.message(DealForm.seller)
 async def set_seller(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
@@ -486,6 +562,7 @@ async def set_seller(message: Message, state: FSMContext):
     await state.update_data(seller=message.text)
     await message.answer("4️⃣ Введи цену в звёздах:")
     await state.set_state(DealForm.price)
+
 
 @dp.message(DealForm.price)
 async def set_price(message: Message, state: FSMContext):
@@ -508,6 +585,7 @@ async def set_price(message: Message, state: FSMContext):
     await show_lots(message, message.from_user.id)
     await state.clear()
 
+
 # ================= МОИ ЛОТЫ =================
 @dp.callback_query(F.data == "my_lots")
 async def my_lots(callback: CallbackQuery):
@@ -518,6 +596,7 @@ async def my_lots(callback: CallbackQuery):
     await show_lots(callback.message, callback.from_user.id)
     await callback.answer()
 
+
 # ================= СПИСОК ЮЗЕРОВ =================
 @dp.callback_query(F.data == "users_list")
 async def users_list(callback: CallbackQuery):
@@ -527,6 +606,7 @@ async def users_list(callback: CallbackQuery):
         return
     await show_users(callback.message)
     await callback.answer()
+
 
 # ================= БАН / РАЗБАН =================
 @dp.callback_query(F.data.startswith("ban_"))
@@ -549,6 +629,7 @@ async def ban_callback(callback: CallbackQuery):
     except Exception:
         pass
 
+
 @dp.callback_query(F.data.startswith("unban_"))
 async def unban_callback(callback: CallbackQuery):
     if not can_ban(callback.from_user.id):
@@ -565,6 +646,7 @@ async def unban_callback(callback: CallbackQuery):
         )
     except Exception:
         pass
+
 
 # ================= УДАЛЕНИЕ ЛОТА =================
 @dp.callback_query(F.data.startswith("del_"))
@@ -586,6 +668,7 @@ async def delete_lot(callback: CallbackQuery):
         await callback.message.delete()
     except Exception:
         pass
+
 
 # ================= ВЫБОР ЛОТА =================
 @dp.callback_query(F.data.startswith("pick_"))
@@ -622,6 +705,15 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     await state.set_state(DealForm.select_chat)
     await callback.answer()
 
+
+# ================= ХЕЛПЕР: определение business-ошибки =================
+def _is_business_peer_missing(err: Exception) -> bool:
+    s = str(err).lower()
+    return ("business_peer_usage_missing" in s
+            or "peer_usage_missing" in s
+            or "business_peer" in s)
+
+
 # ================= ОТПРАВКА ЗАЯВКИ =================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
@@ -635,7 +727,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     user_id = users_shared.users[0].user_id
     sender_name = message.from_user.first_name or "Пользователь"
 
-    # БЕРЁМ ПОСЛЕДНИЙ АКТИВНЫЙ business_connection_id ПОЛЬЗОВАТЕЛЯ
     active_business_id = await get_user_business(message.from_user.id)
 
     if not active_business_id:
@@ -654,7 +745,8 @@ async def on_user_selected(message: Message, state: FSMContext):
             deal_id
         )
     if not row:
-        await message.answer("❌ Лот не найден.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        await message.answer("❌ Лот не найден.",
+                             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         await state.clear()
         return
 
@@ -663,7 +755,10 @@ async def on_user_selected(message: Message, state: FSMContext):
     seller = row["seller"] or "продавца"
     price = row["price"]
 
-    # create_invoice_link с business_connection_id → Telegram покажет имя бизнес-аккаунта, а не имя бота
+    # Проверяем: писал ли этот peer в бизнес-чат? — тогда business_connection_id "пропустят".
+    peer_known = await is_known_peer(active_business_id, user_id)
+    print(f"[send] peer={user_id} known={peer_known} conn={active_business_id}")
+
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
@@ -679,7 +774,8 @@ async def on_user_selected(message: Message, state: FSMContext):
         invoice_link = None
 
     if not invoice_link:
-        await message.answer("❌ Ошибка генерации счета.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        await message.answer("❌ Ошибка генерации счета.",
+                             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         await state.clear()
         return
 
@@ -692,28 +788,70 @@ async def on_user_selected(message: Message, state: FSMContext):
         ]
     )
 
-    rich_ok = False
-    try:
-        await bot.send_rich_message(
-            chat_id=user_id,
-            rich_message=rich_message,
-            business_connection_id=active_business_id
-        )
-        rich_ok = True
-        await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
-    except Exception as e:
-        print(f"[Rich] Ошибка: {e}. Fallback → инлайн-кнопки")
+    sent_ok = False
 
-    if not rich_ok:
+    # ---------- Если peer известен — шлём ТОЛЬКО через бизнес (гарантированно сработает) ----------
+    if peer_known:
+        try:
+            await bot.send_rich_message(
+                chat_id=user_id,
+                rich_message=rich_message,
+                business_connection_id=active_business_id
+            )
+            sent_ok = True
+            await message.answer("✅ Отправлено (Rich Message, бизнес-аккаунт)!",
+                                 reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            await state.clear()
+            return
+        except Exception as e:
+            print(f"[Rich/business] Ошибка при known peer: {e}")
+        # если rich не прошёл — обычное через бизнес
         try:
             fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
                 [InlineKeyboardButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")]
             ])
-            fallback_text = (
-                f"<b>{sender_name}</b> предлагает {nft_link} За <b>{price} звезд</b>.\n\n"
-                f"<i>Предложение действует 24 часа</i>"
+            await bot.send_message(
+                chat_id=user_id,
+                text=(f"<b>{sender_name}</b> предлагает {nft_link} За <b>{price} звезд</b>.\n\n"
+                      f"<i>Предложение действует 24 часа</i>"),
+                reply_markup=fallback_kb,
+                business_connection_id=active_business_id,
+                parse_mode="HTML"
             )
+            sent_ok = True
+            await message.answer("✅ Отправлено (инлайн, бизнес-аккаунт)!",
+                                 reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            await state.clear()
+            return
+        except Exception as e:
+            print(f"[Business/known peer] Ошибка: {e}")
+
+    # ---------- Peer неизвестен: пробуем бизнес → если ошибка → обычный бот ----------
+    if not sent_ok:
+        try:
+            await bot.send_rich_message(
+                chat_id=user_id,
+                rich_message=rich_message,
+                business_connection_id=active_business_id
+            )
+            sent_ok = True
+            await message.answer("✅ Отправлено (Rich Message)!",
+                                 reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        except Exception as e:
+            print(f"[Rich] Ошибка: {e}")
+
+    if not sent_ok:
+        fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
+            [InlineKeyboardButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")]
+        ])
+        fallback_text = (
+            f"<b>{sender_name}</b> предлагает {nft_link} За <b>{price} звезд</b>.\n\n"
+            f"<i>Предложение действует 24 часа</i>"
+        )
+        # бизнес
+        try:
             await bot.send_message(
                 chat_id=user_id,
                 text=fallback_text,
@@ -721,9 +859,40 @@ async def on_user_selected(message: Message, state: FSMContext):
                 business_connection_id=active_business_id,
                 parse_mode="HTML"
             )
-            await message.answer("✅ Отправлено (инлайн)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            sent_ok = True
+            await message.answer("✅ Отправлено (инлайн, бизнес)!",
+                                 reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         except Exception as e:
-            await message.answer(f"❌ Ошибка отправки: {e}", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            print(f"[Business send] Ошибка: {e}")
+            # фолбэк на обычного бота
+            if _is_business_peer_missing(e) or "business" in str(e).lower():
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=fallback_text,
+                        reply_markup=fallback_kb,
+                        parse_mode="HTML"
+                    )
+                    sent_ok = True
+                    await message.answer(
+                        "⚠️ Этот получатель ещё <b>не писал</b> в твой бизнес-аккаунт — "
+                        "сообщение отправлено от имени обычного бота.\n\n"
+                        "Если хочешь отправлять от бизнес-аккаунта — попроси получателя написать "
+                        "тебе хотя бы одно сообщение в business-чат.",
+                        parse_mode="HTML",
+                        reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+                    )
+                except Exception as e2:
+                    print(f"[Fallback send] Ошибка: {e2}")
+
+    if not sent_ok:
+        await message.answer(
+            "❌ <b>Не удалось отправить сообщение.</b>\n\n"
+            "Скорее всего получатель ещё <b>не писал</b> в твой бизнес-аккаунт, "
+            "а обычный бот не может ему написать (он не запускал бота).",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
 
     await state.clear()
 
@@ -733,10 +902,12 @@ async def on_user_selected(message: Message, state: FSMContext):
 async def ignore_button(callback: CallbackQuery):
     await callback.answer()
 
+
 # ================= ОПЛАТА =================
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(query.id, ok=True)
+
 
 @dp.message(F.successful_payment)
 async def payment_success(message: Message):
@@ -775,7 +946,6 @@ async def payment_success(message: Message):
     except Exception as e:
         print(f"[payment] Ошибка отправки покупателю: {e}")
 
-    # Отправляем уведомление только владельцу лота (не себе же, если это ты)
     if deal_owner_id and deal_owner_id != buyer_id:
         text = (
             f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
@@ -791,9 +961,11 @@ async def payment_success(message: Message):
         except Exception as e:
             print(f"Не удалось отправить уведомление владельцу лота: {e}")
 
+
 # ================= ВЕБ-СЕРВЕР =================
 async def health(request):
     return web.Response(text="OK")
+
 
 async def start_web_server():
     app = web.Application()
@@ -803,6 +975,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
+
 
 # ================= ЗАПУСК =================
 async def main():
@@ -814,6 +987,7 @@ async def main():
     await start_web_server()
     print("Бот запущен...")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
