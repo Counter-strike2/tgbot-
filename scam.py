@@ -4,7 +4,9 @@ import aiohttp
 import os
 import html
 from aiohttp import web
+from PIL import Image, ImageDraw
 from aiogram import Bot, Dispatcher, F
+from aiogram.methods import SendInvoice
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     LabeledPrice, PreCheckoutQuery, BusinessConnection,
@@ -129,15 +131,6 @@ async def mark_user_business(user_id: int, username: str, first_name: str, busin
             user_id, username, first_name, True, business_id
         )
 
-async def get_user_business(user_id: int):
-    async with DB_POOL.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT business_id, is_enabled FROM users WHERE user_id=$1", user_id
-        )
-        if row and row["business_id"]:
-            return row["business_id"], True
-        return None, False
-
 async def is_banned(user_id: int) -> bool:
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id FROM banned WHERE user_id=$1", user_id)
@@ -180,7 +173,7 @@ async def upload_to_telegraph(file_path: str):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             with open(file_path, "rb") as f:
                 data = aiohttp.FormData()
-                data.add_field("file", f, filename="img.jpg", content_type="image/jpeg")
+                data.add_field("file", f, filename="img.png", content_type="image/png")
                 async with session.post(url, data=data) as resp:
                     if resp.status != 200:
                         return None
@@ -198,7 +191,7 @@ async def upload_to_catbox(file_path: str):
             with open(file_path, "rb") as f:
                 data = aiohttp.FormData()
                 data.add_field("reqtype", "fileupload")
-                data.add_field("fileToUpload", f, filename="img.jpg", content_type="image/jpeg")
+                data.add_field("fileToUpload", f, filename="img.png", content_type="image/png")
                 async with session.post(url, data=data) as resp:
                     text = (await resp.text()).strip()
                     if text.startswith("http"):
@@ -213,7 +206,28 @@ async def upload_photo(file_path: str):
         return link
     return await upload_to_catbox(file_path)
 
-# ================= АВАТАРКА БОТА (БЕЗ ОБРЕЗКИ) =================
+# ================= КРУГЛАЯ АВА БЕЗ СЕРЫХ КРАЁВ (ПРОЗРАЧНЫЙ PNG) =================
+def make_circle_avatar(input_path: str, output_path: str, size: int = 1024):
+    try:
+        img = Image.open(input_path).convert("RGBA")
+        w, h = img.size
+        side = min(w, h)
+        left = (w - side) // 2
+        top = (h - side) // 2
+        img = img.crop((left, top, left + side, top + side))
+        img = img.resize((size, size), Image.LANCZOS)
+        mask = Image.new("L", (size, size), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.ellipse((0, 0, size, size), fill=255)
+        # Прозрачный фон вместо серого
+        bg = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        bg.paste(img, (0, 0), mask)
+        bg.save(output_path, "PNG")
+        return True
+    except Exception as e:
+        print(f"[circle] Ошибка: {e}")
+        return False
+
 async def get_current_bot_avatar_url():
     try:
         me = await bot.get_me()
@@ -224,8 +238,11 @@ async def get_current_bot_avatar_url():
         file_id = sizes[-1].file_id
         file = await bot.get_file(file_id)
         raw_path = f"bot_avatar_raw_{me.id}.jpg"
+        round_path = f"bot_avatar_round_{me.id}.png"
         await bot.download_file(file.file_path, destination=raw_path)
-        return await upload_photo(raw_path)
+        ok = make_circle_avatar(raw_path, round_path, size=1024)
+        upload_path = round_path if ok else raw_path
+        return await upload_photo(upload_path)
     except Exception as e:
         print(f"[avatar] Ошибка: {e}")
         return None
@@ -390,10 +407,7 @@ async def open_payment(user_id: int, deal_id: int):
     if not row:
         return
     photo_url = await get_current_bot_avatar_url()
-    kwargs = {}
-    if photo_url:
-        kwargs["photo_url"] = photo_url
-    await bot.send_invoice(
+    method = SendInvoice(
         chat_id=user_id,
         title=row["nft_name"] or "NFT Подарок",
         description="NFT",
@@ -401,8 +415,10 @@ async def open_payment(user_id: int, deal_id: int):
         provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label=row["nft_name"] or "NFT", amount=row["price"])],
-        **kwargs
     )
+    if photo_url:
+        method.photo_url = photo_url
+    await bot(method)
 
 # ================= СОЗДАНИЕ ЛОТА =================
 @dp.callback_query(F.data == "new_deal")
@@ -619,6 +635,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     if photo_url:
         invoice_kwargs["photo_url"] = photo_url
 
+    # Ссылка на оплату (для Rich Message кнопки)
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
@@ -638,7 +655,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # Кнопка "ИГНОРИРОВАТЬ" — заглушка через callback
+    # 1. Пробуем Rich Message (работает у Premium-юзеров)
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
@@ -648,15 +665,20 @@ async def on_user_selected(message: Message, state: FSMContext):
         ]
     )
 
+    rich_sent = False
     try:
         await bot.send_rich_message(
             chat_id=user_id,
             rich_message=rich_message,
             business_connection_id=active_business_id
         )
+        rich_sent = True
         await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     except Exception as e:
-        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычный формат...")
+        print(f"[send_rich failed] {e}. Fallback → цветные inline-кнопки")
+
+    # 2. Fallback: обычное сообщение с цветными inline-кнопками
+    if not rich_sent:
         try:
             fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
@@ -669,7 +691,7 @@ async def on_user_selected(message: Message, state: FSMContext):
                 business_connection_id=active_business_id,
                 parse_mode="HTML"
             )
-            await message.answer("✅ Отправлено (обычный формат)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            await message.answer("✅ Отправлено (цветные inline-кнопки)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         except Exception as fallback_err:
             await message.answer(f"❌ Ошибка отправки: {fallback_err}", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
