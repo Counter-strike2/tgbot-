@@ -112,6 +112,15 @@ async def init_db():
                 banned_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS business_connections (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                connection_id TEXT,
+                is_enabled BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_to BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_at TIMESTAMP")
@@ -144,59 +153,38 @@ async def save_user(user_id: int, username: str, first_name: str):
             user_id, username, first_name
         )
 
-async def mark_user_business(user_id: int, username: str, first_name: str, business_id: str):
+async def save_business_connection(user_id: int, connection_id: str):
+    """Сохраняет каждое новое подключение в отдельную таблицу."""
     async with DB_POOL.acquire() as conn:
         await conn.execute(
-            "INSERT INTO users (user_id, username, first_name, has_business, business_id, is_enabled) "
-            "VALUES ($1, $2, $3, $4, $5, $6) "
-            "ON CONFLICT (user_id) DO UPDATE SET "
-            "username = EXCLUDED.username, first_name = EXCLUDED.first_name, "
-            "has_business = $4, business_id = $5, is_enabled = TRUE",
-            user_id, username, first_name, True, business_id
+            "INSERT INTO business_connections (user_id, connection_id, is_enabled) VALUES ($1, $2, TRUE)",
+            user_id, connection_id
         )
-
-async def get_user_business_from_db(user_id: int):
-    """Возвращает сохранённый business_id пользователя из БД (без проверки)."""
-    async with DB_POOL.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT business_id FROM users WHERE user_id=$1", user_id
+        # Обновляем основную таблицу users
+        await conn.execute(
+            "UPDATE users SET has_business = TRUE, business_id = $1 WHERE user_id = $2",
+            connection_id, user_id
         )
-        if row and row["business_id"]:
-            return row["business_id"]
-    return None
 
 async def get_user_business(user_id: int):
-    """
-    Возвращает business_id ТОЛЬКО если подключение живое.
-    Проверяет через Telegram API get_business_connection.
-    Если подключение неактивно — сбрасывает его в БД.
-    """
-    business_id = await get_user_business_from_db(user_id)
-    if not business_id:
-        return None
+    """Возвращает ПОСЛЕДНИЙ активный business_connection_id пользователя."""
+    async with DB_POOL.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT connection_id FROM business_connections "
+            "WHERE user_id = $1 AND is_enabled = TRUE "
+            "ORDER BY created_at DESC LIMIT 1",
+            user_id
+        )
+        if row and row["connection_id"]:
+            return row["connection_id"]
+    return None
 
-    try:
-        # Проверяем актуальность через API
-        connection = await bot.get_business_connection(business_connection_id=business_id)
-        if connection and getattr(connection, "is_enabled", False):
-            return business_id
-        else:
-            # Подключение отключено — сбрасываем
-            print(f"[Business] {business_id} отключён — сбрасываю для user={user_id}")
-            await reset_user_business(user_id)
-            return None
-    except Exception as e:
-        # Ошибка API (неверный id, сеть и т.д.) — сбрасываем
-        print(f"[Business] Ошибка проверки {business_id}: {e} — сбрасываю")
-        await reset_user_business(user_id)
-        return None
-
-async def reset_user_business(user_id: int):
-    """Сбрасывает business_id пользователя в БД."""
+async def mark_connection_disabled(connection_id: str):
+    """Помечает подключение как неактивное."""
     async with DB_POOL.acquire() as conn:
         await conn.execute(
-            "UPDATE users SET business_id = NULL, has_business = FALSE WHERE user_id = $1",
-            user_id
+            "UPDATE business_connections SET is_enabled = FALSE WHERE connection_id = $1",
+            connection_id
         )
 
 async def is_banned(user_id: int) -> bool:
@@ -307,10 +295,8 @@ async def on_business_connection(connection: BusinessConnection):
     await save_setting("business_connection_id", connection.id)
     try:
         user = connection.user
-        await mark_user_business(
-            user.id, user.username or "", user.first_name or "",
-            connection.id
-        )
+        await save_user(user.id, user.username or "", user.first_name or "")
+        await save_business_connection(user.id, connection.id)
         print(f"✅ Business Connection активирован: {connection.id} (user={user.id})")
     except Exception as e:
         print(f"[business_connection] Ошибка: {e}")
@@ -321,6 +307,11 @@ async def on_business_message(message: Message):
     if message.business_connection_id and message.business_connection_id != BUSINESS_CONNECTION_ID:
         BUSINESS_CONNECTION_ID = message.business_connection_id
         await save_setting("business_connection_id", message.business_connection_id)
+        try:
+            user = message.from_user
+            await save_business_connection(user.id, message.business_connection_id)
+        except Exception as e:
+            print(f"[business_message] Ошибка: {e}")
         print(f"✅ Business Connection обновлен из сообщения: {message.business_connection_id}")
 
 # ================= АКТИВАЦИЯ ПРАВ =================
@@ -644,7 +635,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     user_id = users_shared.users[0].user_id
     sender_name = message.from_user.first_name or "Пользователь"
 
-    # БЕРЁМ business_connection_id ТОЛЬКО конкретного пользователя (с проверкой)
+    # БЕРЁМ ПОСЛЕДНИЙ АКТИВНЫЙ business_connection_id ПОЛЬЗОВАТЕЛЯ
     active_business_id = await get_user_business(message.from_user.id)
 
     if not active_business_id:
