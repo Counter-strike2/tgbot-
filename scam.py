@@ -3,6 +3,7 @@ import asyncpg
 import aiohttp
 import os
 import html
+import urllib.parse
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -30,10 +31,7 @@ PORT = int(os.environ.get("PORT", 10000))
 
 BAN_MANAGER_ID = 5825717381
 
-# Читаем DATABASE_URL из env, чистим пробелы и кавычки
-_RAW_DB_URL = os.environ.get("DATABASE_URL", "").strip().strip("'\"")
-# Если env пустой — используем хардкод (только для дебага!)
-DATABASE_URL = _RAW_DB_URL if _RAW_DB_URL else "postgres://avnadmin:AVNS_flaNS62IAOP4I8xcydM@pg-3b25b080-norikbratik.a.aivencloud.com:20041/defaultdb?sslmode=require"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -42,22 +40,28 @@ BUSINESS_CONNECTION_ID = None
 DB_POOL = None
 
 def _clean_dsn(raw: str) -> str:
-    """Приводит строку к формату, который точно понимает asyncpg."""
-    dsn = raw.strip().strip("'\"")
+    """Чистит строку от мусора и убирает sslmode (asyncpg хочет ssl=True отдельно)."""
+    if not raw:
+        return ""
+    dsn = raw.strip().strip("'\"").replace("`", "").replace("\n", "").replace(" ", "")
     if dsn.startswith("postgres://"):
         dsn = "postgresql://" + dsn[len("postgres://"):]
     dsn = dsn.replace("+asyncpg", "")
-    if "sslmode=" not in dsn:
-        sep = "&" if "?" in dsn else "?"
-        dsn += f"{sep}sslmode=require"
+    # Убираем sslmode из query — он конфликтует с ssl=True
+    if "?" in dsn:
+        base, query = dsn.split("?", 1)
+        params = urllib.parse.parse_qs(query)
+        params.pop("sslmode", None)
+        new_query = urllib.parse.urlencode(params, doseq=True)
+        dsn = base + ("?" + new_query if new_query else "")
     return dsn
 
 # ================= БАЗА =================
 async def init_db():
     global DB_POOL
     dsn = _clean_dsn(DATABASE_URL)
-    print(f"[DEBUG] raw DATABASE_URL (first 30): {DATABASE_URL[:30]}...")
-    print(f"[DEBUG] cleaned DSN (first 40): {dsn[:40]}...")
+    print(f"[DEBUG] raw DATABASE_URL (first 40): {repr(DATABASE_URL[:40])}")
+    print(f"[DEBUG] cleaned DSN (first 60): {dsn[:60]}")
     if not dsn or dsn == "postgresql://":
         raise RuntimeError("DATABASE_URL пустой или битый")
     DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10, ssl=True)
