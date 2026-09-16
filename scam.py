@@ -12,14 +12,19 @@ from aiogram.types import (
     KeyboardButton, ReplyKeyboardMarkup, KeyboardButtonRequestUsers,
     UsersShared, FSInputFile
 )
+from aiogram.types import (
+    InputRichMessage,
+    InputRichBlockButtons,
+    InputRichBlockParagraph,
+    RichMessageButton,
+)
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАСТРОЙКИ =================
-# Беру токен из переменных окружения (или подставь свой, если запускаешь локально)
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8791943679:AAF7jEofXkuElG5qLVzy4ahzEg1kU0n7m74")
+BOT_TOKEN = "8791943679:AAF7jEofXkuElG5qLVzy4ahzEg1kU0n7m74"
 OWNER_USERNAME = "NorikAmiri"
 SECRET_CODE = "norik228TOP"
 AVATAR_BG = "#17212B"
@@ -615,7 +620,7 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     await state.set_state(DealForm.select_chat)
     await callback.answer()
 
-# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА ОТ ИМЕНИ АДМИНА =================
+# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА С RICH MESSAGE =================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
@@ -674,7 +679,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # Готовим инвойс-ссылку
     photo_url = await get_current_bot_avatar_url()
     invoice_kwargs = {}
     if photo_url:
@@ -703,53 +707,59 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # ============ 100% РАБОЧИЙ ВАРИАНТ ДЛЯ ВСЕХ АККАУНТОВ И КЛИЕНТОВ ============
-    # Вместо unstable InputRichMessage отправляем официальное HTML-сообщение с инлайн-кнопками через Business Connection.
-    offer_text = (
-        f"<b>{html.escape(sender_name)}</b> предлагает <a href='{html.escape(nft_link)}'>NFT</a> "
-        f"за <b>{price} ⭐</b>.\n\n"
-        f"<i>Предложение действует 24 часа</i>"
+    # ============ RICH MESSAGE ============
+    rich_message = InputRichMessage(
+        blocks=[
+            InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
+            InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
+            InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
+            InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}", style="danger")])
+        ]
     )
 
-    action_buttons = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ ПРИНЯТЬ", url=invoice_link)],
-        [InlineKeyboardButton(text="❌ ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}")]
-    ])
-
     try:
-        await bot.send_message(
+        await bot.send_rich_message(
             chat_id=user_id,
-            text=offer_text,
-            reply_markup=action_buttons,
-            business_connection_id=sender_business_id,
-            parse_mode="HTML"
+            rich_message=rich_message,
+            business_connection_id=sender_business_id
         )
-        print(f"[send business message] OK через business {sender_business_id} → {user_id}")
+        print(f"[send rich] OK через business {sender_business_id} → {user_id}")
         await message.answer(
             "✅ Отправлено от твоего имени!",
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
     except Exception as e:
         err = str(e)
-        print(f"[send business message] Ошибка: {e}")
+        print(f"[send rich] Ошибка: {e}")
         if "BUSINESS_PEER_USAGE_MISSING" in err:
             hint = (
                 "❌ <b>Telegram не дал отправить.</b>\n\n"
                 "<b>Причина:</b> <code>BUSINESS_PEER_USAGE_MISSING</code>\n\n"
-                "Ограничение Telegram Business: бот может писать в чат только тогда, "
-                "когда <b>в этом диалоге была активность в последние 24 часа</b>.\n\n"
+                "Это ограничение Telegram: бот может писать через Business только в те чаты, "
+                "где <b>диалог был активен в последние 24 часа</b>.\n\n"
                 "<b>Что делать:</b> напиши сам этому человеку что-нибудь в ЛС, "
-                "и <b>сразу после этого</b> отправь предложение снова."
+                "и <b>сразу после этого</b> попробуй отправить заявку снова."
+            )
+        elif "RICH_MESSAGE_UNSUPPORTED" in err:
+            hint = (
+                "❌ <b>Клиент получателя не поддерживает rich-сообщения.</b>\n\n"
+                "<b>Причина:</b> <code>RICH_MESSAGE_UNSUPPORTED</code>\n\n"
+                "Telegram Web, macOS-клиент, AyuGram и некоторые сборки Android "
+                "не умеют отображать rich-сообщения. Текст уйдёт, но получатель "                "увидит пустой пузырь или заглушку.\n\n"
+                "<b>Что делать:</b> попроси получателя обновить Telegram "
+                "или отправь заявку с другого аккаунта, у которого клиент поддерживает rich."
             )
         elif "BUSINESS_PEER_INVALID" in err:
             hint = (
                 "❌ <b>Неверный Business-чат.</b>\n\n"
                 "<b>Причина:</b> <code>BUSINESS_PEER_INVALID</code>\n\n"
-                "Этот человек не является контактом вашего аккаунта или выбрана несуществующая переписка."
+                "Похоже, этот человек не является контактом твоего Business-аккаунта, "
+                "или ты выбрал не тот чат."
             )
         else:
             hint = f"❌ Не удалось отправить.\n<code>{html.escape(err)}</code>"
-        await message.answer(hint, parse_mode="HTML", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        await message.answer(hint, parse_mode="HTML",
+                             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
     await state.clear()
 
