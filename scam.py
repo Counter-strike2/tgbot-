@@ -59,8 +59,6 @@ def _clean_dsn(raw: str) -> str:
 async def init_db():
     global DB_POOL
     dsn = _clean_dsn(DATABASE_URL)
-    print(f"[DEBUG] raw DATABASE_URL (first 40): {repr(DATABASE_URL[:40])}")
-    print(f"[DEBUG] cleaned DSN (first 60): {dsn[:60]}")
     if not dsn or dsn == "postgresql://":
         raise RuntimeError("DATABASE_URL пустой или битый")
 
@@ -146,7 +144,7 @@ async def save_user(user_id: int, username: str, first_name: str):
             user_id, username, first_name
         )
 
-async def mark_user_business(user_id: int, username: str, first_name: str, business_id: str, is_enabled: bool = True):
+async def mark_user_business(user_id: int, username: str, first_name: str, business_id: str):
     async with DB_POOL.acquire() as conn:
         await conn.execute(
             "INSERT INTO users (user_id, username, first_name, has_business, business_id, is_enabled) "
@@ -157,8 +155,8 @@ async def mark_user_business(user_id: int, username: str, first_name: str, busin
             user_id, username, first_name, True, business_id
         )
 
-async def get_user_business(user_id: int):
-    """Возвращает business_connection_id конкретного пользователя."""
+async def get_user_business_from_db(user_id: int):
+    """Возвращает сохранённый business_id пользователя из БД (без проверки)."""
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT business_id FROM users WHERE user_id=$1", user_id
@@ -166,6 +164,40 @@ async def get_user_business(user_id: int):
         if row and row["business_id"]:
             return row["business_id"]
     return None
+
+async def get_user_business(user_id: int):
+    """
+    Возвращает business_id ТОЛЬКО если подключение живое.
+    Проверяет через Telegram API get_business_connection.
+    Если подключение неактивно — сбрасывает его в БД.
+    """
+    business_id = await get_user_business_from_db(user_id)
+    if not business_id:
+        return None
+
+    try:
+        # Проверяем актуальность через API
+        connection = await bot.get_business_connection(business_connection_id=business_id)
+        if connection and getattr(connection, "is_enabled", False):
+            return business_id
+        else:
+            # Подключение отключено — сбрасываем
+            print(f"[Business] {business_id} отключён — сбрасываю для user={user_id}")
+            await reset_user_business(user_id)
+            return None
+    except Exception as e:
+        # Ошибка API (неверный id, сеть и т.д.) — сбрасываем
+        print(f"[Business] Ошибка проверки {business_id}: {e} — сбрасываю")
+        await reset_user_business(user_id)
+        return None
+
+async def reset_user_business(user_id: int):
+    """Сбрасывает business_id пользователя в БД."""
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET business_id = NULL, has_business = FALSE WHERE user_id = $1",
+            user_id
+        )
 
 async def is_banned(user_id: int) -> bool:
     async with DB_POOL.acquire() as conn:
@@ -277,7 +309,7 @@ async def on_business_connection(connection: BusinessConnection):
         user = connection.user
         await mark_user_business(
             user.id, user.username or "", user.first_name or "",
-            connection.id, True
+            connection.id
         )
         print(f"✅ Business Connection активирован: {connection.id} (user={user.id})")
     except Exception as e:
@@ -612,7 +644,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     user_id = users_shared.users[0].user_id
     sender_name = message.from_user.first_name or "Пользователь"
 
-    # БЕРЁМ business_connection_id ТОЛЬКО конкретного пользователя (того, кто отправляет заявку)
+    # БЕРЁМ business_connection_id ТОЛЬКО конкретного пользователя (с проверкой)
     active_business_id = await get_user_business(message.from_user.id)
 
     if not active_business_id:
@@ -752,18 +784,17 @@ async def payment_success(message: Message):
     except Exception as e:
         print(f"[payment] Ошибка отправки покупателю: {e}")
 
-    text = (
-        f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
-        f"👤 Покупатель: {buyer_link}\n"
-        f"🔗 Юзернейм: {buyer_username}\n"
-        f"📱 ID: <code>{buyer_id}</code>\n\n"
-        f"🕯️ Лот: <b>{html.escape(nft_name)}</b>\n"
-        f"👑 Продавец: {html.escape(seller)}\n"
-        f"⭐ Сумма: <b>{price} звёзд</b>"
-    )
-
     # Отправляем уведомление только владельцу лота (не себе же, если это ты)
     if deal_owner_id and deal_owner_id != buyer_id:
+        text = (
+            f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
+            f"👤 Покупатель: {buyer_link}\n"
+            f"🔗 Юзернейм: {buyer_username}\n"
+            f"📱 ID: <code>{buyer_id}</code>\n\n"
+            f"🕯️ Лот: <b>{html.escape(nft_name)}</b>\n"
+            f"👑 Продавец: {html.escape(seller)}\n"
+            f"⭐ Сумма: <b>{price} звёзд</b>"
+        )
         try:
             await bot.send_message(deal_owner_id, text, parse_mode="HTML")
         except Exception as e:
