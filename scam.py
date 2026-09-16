@@ -612,12 +612,8 @@ async def on_user_selected(message: Message, state: FSMContext):
     user_id = users_shared.users[0].user_id
     sender_name = message.from_user.first_name or "Пользователь"
 
-    # БЕРЁМ business_connection_id КОНКРЕТНОГО ПОЛЬЗОВАТЕЛЯ (того, кто отправляет заявку)
+    # БЕРЁМ business_connection_id ТОЛЬКО конкретного пользователя (того, кто отправляет заявку)
     active_business_id = await get_user_business(message.from_user.id)
-
-    # Если у него нет — fallback на глобальный
-    if not active_business_id:
-        active_business_id = BUSINESS_CONNECTION_ID or await get_setting("business_connection_id")
 
     if not active_business_id:
         await message.answer(
@@ -644,7 +640,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     seller = row["seller"] or "продавца"
     price = row["price"]
 
-    # ВАЖНО: передаём business_connection_id → Telegram покажет имя бизнес-аккаунта, а не имя бота
+    # create_invoice_link с business_connection_id → Telegram покажет имя бизнес-аккаунта, а не имя бота
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
@@ -653,7 +649,7 @@ async def on_user_selected(message: Message, state: FSMContext):
             provider_token="",
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
-            business_connection_id=active_business_id,   # <-- ВОТ ЭТА СТРОКА
+            business_connection_id=active_business_id,
         )
     except Exception as e:
         print(f"[invoice_link] Ошибка: {e}")
@@ -766,20 +762,12 @@ async def payment_success(message: Message):
         f"⭐ Сумма: <b>{price} звёзд</b>"
     )
 
-    recipients = set()
-    if deal_owner_id:
-        recipients.add(deal_owner_id)
-    try:
-        owner_chat = await bot.get_chat(f"@{OWNER_USERNAME}")
-        recipients.add(owner_chat.id)
-    except Exception as e:
-        print(f"Не удалось получить ID владельца: {e}")
-
-    for admin_id in recipients:
+    # Отправляем уведомление только владельцу лота (не себе же, если это ты)
+    if deal_owner_id and deal_owner_id != buyer_id:
         try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
+            await bot.send_message(deal_owner_id, text, parse_mode="HTML")
         except Exception as e:
-            print(f"Не удалось отправить уведомление {admin_id}: {e}")
+            print(f"Не удалось отправить уведомление владельцу лота: {e}")
 
 # ================= ВЕБ-СЕРВЕР =================
 async def health(request):
