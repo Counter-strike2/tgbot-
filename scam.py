@@ -334,7 +334,6 @@ async def on_business_message(message: Message):
 async def activate_admin(message: Message):
     name = f"@{message.from_user.username}" if message.from_user.username else (message.from_user.first_name or "Пользователь")
 
-    # Добавляем в admins И в users (чтобы потом отображался в списке)
     await save_user(
         message.from_user.id,
         message.from_user.username or "",
@@ -420,7 +419,6 @@ async def show_users(target_message: Message):
             f"Статус: {status}"
         )
 
-        # Кнопки бан/разбан — только для BAN_MANAGER_ID
         if viewer_can_ban:
             if banned:
                 kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -447,7 +445,6 @@ async def start(message: Message):
         await message.answer("❌ У вас нет доступа к боту.")
         return
 
-    # Сохраняем в users (если админ — обновляем данные)
     await save_user(
         message.from_user.id,
         message.from_user.username or "",
@@ -801,7 +798,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # ============ 1) Пробуем rich message (как было) ============
+    # ============ RICH MESSAGE — твой текст, без эмодзи ============
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
@@ -811,62 +808,21 @@ async def on_user_selected(message: Message, state: FSMContext):
         ]
     )
 
-    sent_ok = False
-    last_error = None
-    used_fallback = False
-
     try:
         await bot.send_rich_message(
             chat_id=user_id,
             rich_message=rich_message,
             business_connection_id=sender_business_id
         )
-        sent_ok = True
         print(f"[send rich] OK через business {sender_business_id} → {user_id}")
+        await message.answer(
+            "✅ Отправлено от твоего имени!",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
     except Exception as e:
-        last_error = str(e)
+        err = str(e)
         print(f"[send rich] Ошибка: {e}")
 
-        # ============ 2) Fallback на обычное сообщение ============
-        if "RICH_MESSAGE_UNSUPPORTED" in last_error:
-            try:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⭐ ПРИНЯТЬ", url=invoice_link, style="success")],
-                    [InlineKeyboardButton(text="❌ ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}", style="danger")]
-                ])
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        f"👋 <b>{html.escape(sender_name)}</b> предлагает вам:\n\n"
-                        f"🕯️ <b>{html.escape(nft_name)}</b>\n"
-                        f"🔗 {html.escape(nft_link)}\n\n"
-                        f"💰 Цена: <b>{price}⭐</b>\n\n"
-                        f"<i>Предложение действует 24 часа</i>"
-                    ),
-                    parse_mode="HTML",
-                    reply_markup=kb,
-                    business_connection_id=sender_business_id
-                )
-                sent_ok = True
-                used_fallback = True
-                print(f"[send fallback] OK через business {sender_business_id} → {user_id}")
-            except Exception as e2:
-                last_error = str(e2)
-                print(f"[send fallback] Ошибка: {e2}")
-
-    if sent_ok:
-        if used_fallback:
-            await message.answer(
-                "✅ Отправлено (rich-формат не поддержан клиентом получателя, ушло обычным сообщением).",
-                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-            )
-        else:
-            await message.answer(
-                "✅ Отправлено от твоего имени!",
-                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-            )
-    else:
-        err = last_error or "unknown"
         if "BUSINESS_PEER_USAGE_MISSING" in err:
             hint = (
                 "❌ <b>Telegram не дал отправить.</b>\n\n"
@@ -875,6 +831,16 @@ async def on_user_selected(message: Message, state: FSMContext):
                 "где <b>диалог был активен в последние 24 часа</b>.\n\n"
                 "<b>Что делать:</b> напиши сам этому человеку что-нибудь в ЛС, "
                 "и <b>сразу после этого</b> попробуй отправить заявку снова."
+            )
+        elif "RICH_MESSAGE_UNSUPPORTED" in err:
+            hint = (
+                "❌ <b>Клиент получателя не поддерживает rich-сообщения.</b>\n\n"
+                "<b>Причина:</b> <code>RICH_MESSAGE_UNSUPPORTED</code>\n\n"
+                "Telegram Web, macOS-клиент, AyuGram и некоторые сборки Android "
+                "не умеют отображать rich-сообщения. Текст уйдёт, но получатель "
+                "увидит пустой пузырь или заглушку.\n\n"
+                "<b>Что делать:</b> попроси получателя обновить Telegram "
+                "или отправь заявку с другого аккаунта, у которого клиент поддерживает rich."
             )
         elif "BUSINESS_PEER_INVALID" in err:
             hint = (
