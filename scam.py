@@ -4,7 +4,6 @@ import aiohttp
 import os
 import html
 from aiohttp import web
-from PIL import Image, ImageDraw
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -27,7 +26,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 BOT_TOKEN = "8791943679:AAF7jEofXkuElG5qLVzy4ahzEg1kU0n7m74"
 OWNER_USERNAME = "NorikAmiri"
 SECRET_CODE = "norik228TOP"
-AVATAR_BG = "#17212B"
 PORT = int(os.environ.get("PORT", 10000))
 
 BAN_MANAGER_ID = 5825717381
@@ -38,10 +36,6 @@ dp = Dispatcher(storage=MemoryStorage())
 
 BUSINESS_CONNECTION_ID = None
 DB_POOL = None
-
-def hex_to_rgb(hex_color: str):
-    hex_color = hex_color.lstrip("#")
-    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
 # ================= БАЗА =================
 async def init_db():
@@ -219,27 +213,7 @@ async def upload_photo(file_path: str):
         return link
     return await upload_to_catbox(file_path)
 
-# ================= АВАТАРКА БОТА =================
-def make_circle_avatar(input_path: str, output_path: str, size: int = 1024, bg_hex: str = "#17212B"):
-    try:
-        img = Image.open(input_path).convert("RGBA")
-        w, h = img.size
-        side = min(w, h)
-        left = (w - side) // 2
-        top = (h - side) // 2
-        img = img.crop((left, top, left + side, top + side))
-        img = img.resize((size, size), Image.LANCZOS)
-        mask = Image.new("L", (size, size), 0)
-        draw = ImageDraw.Draw(mask)
-        draw.ellipse((0, 0, size, size), fill=255)
-        bg = Image.new("RGBA", (size, size), hex_to_rgb(bg_hex) + (255,))
-        bg.paste(img, (0, 0), mask)
-        bg.convert("RGB").save(output_path, "JPEG", quality=95)
-        return True
-    except Exception as e:
-        print(f"[circle] Ошибка: {e}")
-        return False
-
+# ================= АВАТАРКА БОТА (БЕЗ ОБРЕЗКИ) =================
 async def get_current_bot_avatar_url():
     try:
         me = await bot.get_me()
@@ -250,11 +224,8 @@ async def get_current_bot_avatar_url():
         file_id = sizes[-1].file_id
         file = await bot.get_file(file_id)
         raw_path = f"bot_avatar_raw_{me.id}.jpg"
-        round_path = f"bot_avatar_round_{me.id}.jpg"
         await bot.download_file(file.file_path, destination=raw_path)
-        ok = make_circle_avatar(raw_path, round_path, size=1024, bg_hex=AVATAR_BG)
-        upload_path = round_path if ok else raw_path
-        return await upload_photo(upload_path)
+        return await upload_photo(raw_path)
     except Exception as e:
         print(f"[avatar] Ошибка: {e}")
         return None
@@ -425,7 +396,7 @@ async def open_payment(user_id: int, deal_id: int):
     await bot.send_invoice(
         chat_id=user_id,
         title=row["nft_name"] or "NFT Подарок",
-        description=f"Покупка у {row['seller'] or 'продавца'}",
+        description="NFT",
         payload=f"deal_{deal_id}",
         provider_token="",
         currency="XTR",
@@ -648,26 +619,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     if photo_url:
         invoice_kwargs["photo_url"] = photo_url
 
-    try:
-        invoice_link = await bot.create_invoice_link(
-            title=nft_name,
-            description=f"Покупка у {seller}",
-            payload=f"deal_{deal_id}",
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice(label=nft_name, amount=price)],
-            **invoice_kwargs
-        )
-    except Exception as e:
-        print(f"[invoice] Ошибка: {e}")
-        invoice_link = None
-
-    if not invoice_link:
-        await message.answer("❌ Ошибка генерации счета.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
-        await state.clear()
-        return
-
-    # 1. Пробуем отправить Rich Message
+    # 1. Пробуем отправить Rich Message с кнопкой-пей
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
@@ -678,6 +630,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     )
 
     try:
+        # Отправляем Rich Message с инлайн-кнопкой pay
         await bot.send_rich_message(
             chat_id=user_id,
             rich_message=rich_message,
@@ -685,27 +638,21 @@ async def on_user_selected(message: Message, state: FSMContext):
         )
         await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     except Exception as e:
-        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычное сообщение с цветными кнопками...")
-        # 2. Fallback с цветными инлайн-кнопками
+        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычное сообщение с инвойсом...")
+        # 2. Fallback: отправляем инвойс через send_invoice, чтобы убрать имя бота
         try:
-            fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
-                [InlineKeyboardButton(text="ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}", style="danger")]
-            ])
-            
-            fallback_text = (
-                f"<b>{sender_name}</b> предлагает <a href='{nft_link}'>NFT</a> за <b>{price} звезд</b>.\n\n"
-                f"<i>Предложение действует 24 часа</i>"
-            )
-            
-            await bot.send_message(
+            await bot.send_invoice(
                 chat_id=user_id,
-                text=fallback_text,
-                reply_markup=fallback_kb,
+                title=nft_name,
+                description="NFT",
+                payload=f"deal_{deal_id}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label=nft_name, amount=price)],
                 business_connection_id=active_business_id,
-                parse_mode="HTML"
+                **invoice_kwargs
             )
-            await message.answer("✅ Отправлено (обычный формат с цветными кнопками)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            await message.answer("✅ Отправлено (счёт в чат)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         except Exception as fallback_err:
             await message.answer(f"❌ Ошибка отправки: {fallback_err}", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
