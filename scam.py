@@ -19,6 +19,16 @@ from aiogram.types import (
     InputRichBlockParagraph,
     RichMessageButton,
 )
+# Пытаемся импортировать фото-блок (имя зависит от версии aiogram)
+try:
+    from aiogram.types import InputRichBlockPhoto  # aiogram >= 3.22
+except Exception:
+    InputRichBlockPhoto = None
+try:
+    from aiogram.types import InputRichBlockImage  # альтернативное имя
+except Exception:
+    InputRichBlockImage = None
+
 from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -123,7 +133,6 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        # НОВОЕ: кто когда-либо писал в бизнес-чат данного connection
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS business_peers (
                 connection_id TEXT NOT NULL,
@@ -203,7 +212,6 @@ async def mark_connection_disabled(connection_id: str):
         )
 
 
-# ---------- НОВОЕ: работа с известными peer'ами ----------
 async def save_business_peer(connection_id: str, peer_id: int, username: str, first_name: str):
     async with DB_POOL.acquire() as conn:
         await conn.execute(
@@ -216,7 +224,6 @@ async def save_business_peer(connection_id: str, peer_id: int, username: str, fi
 
 
 async def is_known_peer(connection_id: str, peer_id: int) -> bool:
-    """Был ли peer в диалоге с этим бизнес-аккаунтом (писал нам)."""
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT 1 FROM business_peers WHERE connection_id = $1 AND peer_id = $2",
@@ -309,22 +316,64 @@ async def upload_photo(file_path: str):
     return await upload_to_catbox(file_path)
 
 
-# ================= АВАТАРКА =================
-async def get_current_bot_avatar_url():
+# ================= АВАТАРКА БОТА (из BotFather, не пользователя) =================
+_BOT_AVATAR_URL_CACHE = None
+
+
+async def get_current_bot_avatar_url(force_refresh: bool = False):
+    """
+    Берёт аватарку БОТА (которая установлена в BotFather),
+    грузит её на telegra.ph/catbox, кэширует в памяти + в settings.
+    """
+    global _BOT_AVATAR_URL_CACHE
+    if _BOT_AVATAR_URL_CACHE and not force_refresh:
+        return _BOT_AVATAR_URL_CACHE
+
+    if not force_refresh:
+        cached = await get_setting("bot_avatar_url")
+        if cached:
+            _BOT_AVATAR_URL_CACHE = cached
+            return cached
+
     try:
         me = await bot.get_me()
         photos = await bot.get_user_profile_photos(user_id=me.id, limit=1)
         if not photos.total_count or not photos.photos:
+            print("[avatar] У бота нет установленной аватарки в BotFather.")
             return None
         sizes = photos.photos[0]
         file_id = sizes[-1].file_id
         file = await bot.get_file(file_id)
         raw_path = f"bot_avatar_raw_{me.id}.jpg"
         await bot.download_file(file.file_path, destination=raw_path)
-        return await upload_photo(raw_path)
+        url = await upload_photo(raw_path)
+        try:
+            os.remove(raw_path)
+        except Exception:
+            pass
+        if url:
+            _BOT_AVATAR_URL_CACHE = url
+            await save_setting("bot_avatar_url", url)
+            print(f"[avatar] Аватарка бота загружена: {url}")
+        return url
     except Exception as e:
         print(f"[avatar] Ошибка: {e}")
         return None
+
+
+def _build_photo_block(url: str):
+    """Создаёт фото-блок для rich-сообщения с учётом доступного класса в aiogram."""
+    if InputRichBlockPhoto is not None:
+        try:
+            return InputRichBlockPhoto(photo=url)
+        except Exception as e:
+            print(f"[photo-block] InputRichBlockPhoto fail: {e}")
+    if InputRichBlockImage is not None:
+        try:
+            return InputRichBlockImage(photo=url)
+        except Exception as e:
+            print(f"[photo-block] InputRichBlockImage fail: {e}")
+    return None
 
 
 # ================= FSM =================
@@ -359,8 +408,6 @@ async def on_business_message(message: Message):
         BUSINESS_CONNECTION_ID = bc_id
         await save_setting("business_connection_id", bc_id)
 
-    # Запоминаем peer'а — кто пишет в бизнес-чат.
-    # Именно эти пользователи потом смогут получать сообщения через business_connection_id.
     try:
         if bc_id and message.from_user:
             await save_business_peer(
@@ -373,7 +420,6 @@ async def on_business_message(message: Message):
     except Exception as e:
         print(f"[business_message] Ошибка сохранения peer: {e}")
 
-    # Запоминаем владельца бизнес-подключения (если первый раз видим)
     try:
         if bc_id and message.from_user:
             await save_business_connection(message.from_user.id, bc_id)
@@ -395,6 +441,21 @@ async def activate_admin(message: Message):
         f"🔑 <b>Права администратора активированы!</b>\nИмя: {html.escape(name)}",
         parse_mode="HTML"
     )
+
+
+# ================= КОМАНДА ОБНОВИТЬ АВАТАРКУ БОТА =================
+@dp.message(F.text == "/refresh_avatar")
+async def refresh_avatar(message: Message):
+    if not await is_admin(message.from_user.id, message.from_user.username):
+        return
+    url = await get_current_bot_avatar_url(force_refresh=True)
+    if url:
+        await message.answer(f"✅ Аватарка бота обновлена:\n{url}")
+    else:
+        await message.answer(
+            "❌ Не удалось получить аватарку бота.\n"
+            "Проверь, что у бота установлена аватарка в BotFather."
+        )
 
 
 # ================= ХЕЛПЕР: ПОКАЗАТЬ ЛОТЫ =================
@@ -755,7 +816,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     seller = row["seller"] or "продавца"
     price = row["price"]
 
-    # Проверяем: писал ли этот peer в бизнес-чат? — тогда business_connection_id "пропустят".
     peer_known = await is_known_peer(active_business_id, user_id)
     print(f"[send] peer={user_id} known={peer_known} conn={active_business_id}")
 
@@ -779,18 +839,33 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    rich_message = InputRichMessage(
-        blocks=[
-            InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
-            InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
-            InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
-            InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")])
-        ]
-    )
+    # --- АВАТАРКА БОТА (не профиля!) ---
+    bot_avatar_url = await get_current_bot_avatar_url()
+
+    blocks = []
+    if bot_avatar_url:
+        photo_block = _build_photo_block(bot_avatar_url)
+        if photo_block is not None:
+            blocks.append(photo_block)
+        else:
+            print("[rich] Фото-блок недоступен в этой версии aiogram, пропускаем.")
+
+    blocks.append(InputRichBlockParagraph(
+        text=f"{sender_name} предлагает {nft_link} За {price} звезд."
+    ))
+    blocks.append(InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"))
+    blocks.append(InputRichBlockButtons(
+        buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]
+    ))
+    blocks.append(InputRichBlockButtons(
+        buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")]
+    ))
+
+    rich_message = InputRichMessage(blocks=blocks)
 
     sent_ok = False
 
-    # ---------- Если peer известен — шлём ТОЛЬКО через бизнес (гарантированно сработает) ----------
+    # ---- Если peer известен — шлём через бизнес (гарантированно) ----
     if peer_known:
         try:
             await bot.send_rich_message(
@@ -805,7 +880,7 @@ async def on_user_selected(message: Message, state: FSMContext):
             return
         except Exception as e:
             print(f"[Rich/business] Ошибка при known peer: {e}")
-        # если rich не прошёл — обычное через бизнес
+
         try:
             fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
@@ -827,7 +902,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         except Exception as e:
             print(f"[Business/known peer] Ошибка: {e}")
 
-    # ---------- Peer неизвестен: пробуем бизнес → если ошибка → обычный бот ----------
+    # ---- Peer неизвестен: пробуем бизнес → если ошибка → обычный бот ----
     if not sent_ok:
         try:
             await bot.send_rich_message(
@@ -850,7 +925,6 @@ async def on_user_selected(message: Message, state: FSMContext):
             f"<b>{sender_name}</b> предлагает {nft_link} За <b>{price} звезд</b>.\n\n"
             f"<i>Предложение действует 24 часа</i>"
         )
-        # бизнес
         try:
             await bot.send_message(
                 chat_id=user_id,
@@ -864,7 +938,6 @@ async def on_user_selected(message: Message, state: FSMContext):
                                  reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         except Exception as e:
             print(f"[Business send] Ошибка: {e}")
-            # фолбэк на обычного бота
             if _is_business_peer_missing(e) or "business" in str(e).lower():
                 try:
                     await bot.send_message(
