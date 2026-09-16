@@ -39,6 +39,8 @@ OWNER_USERNAME = "NorikAmiri"
 SECRET_CODE = "norik228TOP"
 PORT = int(os.environ.get("PORT", 10000))
 
+# Главный админ — ему приходят все уведомления об оплате и о том,
+# какие лоты и кому кидают другие админы
 BAN_MANAGER_ID = 5825717381
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -140,6 +142,19 @@ async def init_db():
                 first_name TEXT,
                 last_seen TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (connection_id, peer_id)
+            )
+        """)
+        # Лог отправок: кто, кому, какой лот отправил
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS send_log (
+                id SERIAL PRIMARY KEY,
+                sender_id BIGINT,
+                sender_username TEXT,
+                recipient_id BIGINT,
+                deal_id INTEGER,
+                nft_name TEXT,
+                price INTEGER,
+                sent_at TIMESTAMP DEFAULT NOW()
             )
         """)
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
@@ -287,23 +302,14 @@ def can_ban(user_id: int) -> bool:
     return user_id == BAN_MANAGER_ID
 
 
-# ================= ХЕЛПЕР: имя продавца из Telegram =================
-def resolve_seller_name(user) -> str:
-    """
-    Всегда возвращает АКТУАЛЬНОЕ имя из Telegram:
-      1) first_name (то, что видно как имя)
-      2) если пусто — @username
-      3) фолбэк — "Продавец"
-    """
-    if user is None:
-        return "Продавец"
-    first = (user.first_name or "").strip()
-    if first:
-        return first
-    uname = (user.username or "").strip()
-    if uname:
-        return f"@{uname}"
-    return "Продавец"
+async def log_send(sender_id: int, sender_username: str, recipient_id: int,
+                   deal_id: int, nft_name: str, price: int):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO send_log (sender_id, sender_username, recipient_id, deal_id, nft_name, price) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            sender_id, sender_username, recipient_id, deal_id, nft_name, price
+        )
 
 
 # ================= ЗАГРУЗКА ФОТО =================
@@ -408,6 +414,7 @@ def _build_photo_block(url: str):
 class DealForm(StatesGroup):
     nft_name = State()
     nft_link = State()
+    seller = State()
     price = State()
     select_chat = State()
 
@@ -427,6 +434,14 @@ async def on_business_connection(connection: BusinessConnection):
         print(f"[business_connection] Ошибка: {e}")
 
 
+# ----- ВАЖНО: обработчик успешной оплаты в business-контексте
+# Регистрируем ДО общего business_message, чтобы фильтр успел сработать
+@dp.business_message(F.successful_payment)
+async def business_payment_success(message: Message):
+    print("[payment] business successful_payment получен")
+    await process_successful_payment(message)
+
+
 @dp.business_message()
 async def on_business_message(message: Message):
     global BUSINESS_CONNECTION_ID
@@ -443,7 +458,6 @@ async def on_business_message(message: Message):
                 message.from_user.username or "",
                 message.from_user.first_name or ""
             )
-            print(f"👥 peer сохранён: {message.from_user.id} для {bc_id}")
     except Exception as e:
         print(f"[business_message] Ошибка сохранения peer: {e}")
 
@@ -638,7 +652,16 @@ async def set_link(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
     await state.update_data(nft_link=message.text)
-    await message.answer("3️⃣ Введи цену в звёздах:")
+    await message.answer("3️⃣ Введи имя продавца:")
+    await state.set_state(DealForm.seller)
+
+
+@dp.message(DealForm.seller)
+async def set_seller(message: Message, state: FSMContext):
+    if await is_banned(message.from_user.id):
+        return
+    await state.update_data(seller=message.text)
+    await message.answer("4️⃣ Введи цену в звёздах:")
     await state.set_state(DealForm.price)
 
 
@@ -651,16 +674,12 @@ async def set_price(message: Message, state: FSMContext):
         return
     await state.update_data(price=int(message.text))
     data = await state.get_data()
-
-    # Имя продавца подставляем СРАЗУ из актуального Telegram-профиля
-    seller_name = resolve_seller_name(message.from_user)
-
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
             "INSERT INTO deals (owner_id, nft_name, nft_link, seller, price) "
             "VALUES ($1, $2, $3, $4, $5) RETURNING id",
             message.from_user.id, data["nft_name"], data["nft_link"],
-            seller_name, data["price"]
+            data["seller"], data["price"]
         )
         deal_id = row["id"]
     await message.answer(f"✅ Лот #{deal_id} создан! Выбери получателя:", parse_mode="HTML")
@@ -795,6 +814,38 @@ def _is_business_peer_missing(err: Exception) -> bool:
             or "business_peer" in s)
 
 
+# ================= УВЕДОМЛЕНИЕ ГЛАВНОГО АДМИНА =================
+async def notify_main_admin_about_send(
+    sender: Message,
+    recipient_id: int,
+    deal_id: int,
+    nft_name: str,
+    nft_link: str,
+    seller: str,
+    price: int,
+):
+    if sender.from_user.id == BAN_MANAGER_ID:
+        return
+    sender_uname = f"@{sender.from_user.username}" if sender.from_user.username else "—"
+    sender_name = html.escape(sender.from_user.first_name or "Админ")
+    text = (
+        f"📤 <b>Другой админ отправил лот</b>\n\n"
+        f"👤 Отправитель: <b>{sender_name}</b>\n"
+        f"🔗 Юзернейм: {sender_uname}\n"
+        f"📱 ID: <code>{sender.from_user.id}</code>\n\n"
+        f"🎯 Получатель ID: <code>{recipient_id}</code>\n"
+        f"🕯️ Лот: <b>{html.escape(nft_name)}</b> (#{deal_id})\n"
+        f"🔗 Ссылка: {html.escape(nft_link or '—')}\n"
+        f"👑 Продавец: {html.escape(seller or '—')}\n"
+        f"⭐️ Цена: <b>{price} звёзд</b>"
+    )
+    try:
+        await bot.send_message(BAN_MANAGER_ID, text, parse_mode="HTML")
+        print(f"[notify main admin] уведомление об отправке лота отправлено")
+    except Exception as e:
+        print(f"[notify main admin] {e}")
+
+
 # ================= ОТПРАВКА ЗАЯВКИ =================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
@@ -806,12 +857,8 @@ async def on_user_selected(message: Message, state: FSMContext):
     users_shared: UsersShared = message.users_shared
     deal_id = users_shared.request_id
     user_id = users_shared.users[0].user_id
+    sender_name = message.from_user.first_name or "Пользователь"
 
-    # === ИМЯ ПРОДАВЦА — берём АКТУАЛЬНОЕ из Telegram ПРЯМО СЕЙЧАС ===
-    # Если ты поменял имя в профиле ТГ — здесь оно подхватится автоматически.
-    sender_name = resolve_seller_name(message.from_user)
-
-    # business_connection_id ПРОДАВЦА (того, кто создал лот и жмёт кнопку)
     active_business_id = await get_user_business(message.from_user.id)
 
     if not active_business_id:
@@ -837,41 +884,64 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     nft_name = row["nft_name"] or "NFT"
     nft_link = row["nft_link"] or ""
+    seller = row["seller"] or "продавца"
     price = row["price"]
 
-    # Обновляем имя продавца в БД, чтобы оно всегда было свежим
+    # Логируем отправку и уведомляем главного админа
     try:
-        async with DB_POOL.acquire() as conn:
-            await conn.execute(
-                "UPDATE deals SET seller=$1 WHERE id=$2",
-                sender_name, deal_id
-            )
+        await log_send(
+            message.from_user.id,
+            message.from_user.username or "",
+            user_id, deal_id, nft_name, price
+        )
     except Exception as e:
-        print(f"[seller update] Ошибка: {e}")
+        print(f"[log_send] {e}")
+
+    await notify_main_admin_about_send(
+        sender=message,
+        recipient_id=user_id,
+        deal_id=deal_id,
+        nft_name=nft_name,
+        nft_link=nft_link,
+        seller=seller,
+        price=price,
+    )
 
     peer_known = await is_known_peer(active_business_id, user_id)
-    print(f"[send] peer={user_id} known={peer_known} conn={active_business_id} seller={sender_name}")
+    print(f"[send] peer={user_id} known={peer_known} conn={active_business_id}")
 
-    # ========== ВАЖНО ==========
-    # Счёт создаём БЕЗ business_connection_id — тогда в нативном окне
-    # оплаты Telegram покажет АВАТАРКУ И ИМЯ БОТА (аватарку).
-    # Имя продавца "{sender_name}" показывается в description, оно всегда
-    # берётся из актуального Telegram-профиля (First Name).
-    # ==========================
+    # Счёт создаём С business_connection_id продавца — тогда в нативном
+    # окне оплаты Telegram покажет имя/аву продавца.
     invoice_link = None
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
-            description=f"Покупка у {sender_name}",
+            description=f"Покупка у {seller}",
             payload=f"deal_{deal_id}",
             provider_token="",
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
+            business_connection_id=active_business_id,
         )
-        print("[invoice_link] Создана БЕЗ business_connection_id (аватарка бота)")
+        print("[invoice_link] Создана с business_connection_id продавца")
     except Exception as e:
-        print(f"[invoice_link] Ошибка: {e}")
+        print(f"[invoice_link/business] Ошибка: {e}")
         invoice_link = None
+
+    if not invoice_link:
+        try:
+            invoice_link = await bot.create_invoice_link(
+                title=nft_name,
+                description=f"Покупка у {seller}",
+                payload=f"deal_{deal_id}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label=nft_name, amount=price)],
+            )
+            print("[invoice_link] Фолбэк — без business_connection_id")
+        except Exception as e:
+            print(f"[invoice_link/fallback] Ошибка: {e}")
+            invoice_link = None
 
     if not invoice_link:
         await message.answer("❌ Ошибка генерации счета.",
@@ -1012,13 +1082,27 @@ async def ignore_button(callback: CallbackQuery):
 # ================= ОПЛАТА =================
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(query.id, ok=True)
+    try:
+        await bot.answer_pre_checkout_query(query.id, ok=True)
+    except Exception as e:
+        print(f"[pre_checkout] {e}")
 
 
 @dp.message(F.successful_payment)
 async def payment_success(message: Message):
-    payload = message.successful_payment.invoice_payload
-    deal_id = int(payload.split("_")[1])
+    print("[payment] regular successful_payment получен")
+    await process_successful_payment(message)
+
+
+async def process_successful_payment(message: Message):
+    """Общая логика обработки успешной оплаты (и для обычных, и для бизнес-сообщений)."""
+    try:
+        payload = message.successful_payment.invoice_payload
+        deal_id = int(payload.split("_")[1])
+    except Exception as e:
+        print(f"[payment] Некорректный payload: {e}")
+        return
+
     buyer_id = message.from_user.id
 
     async with DB_POOL.acquire() as conn:
@@ -1039,7 +1123,6 @@ async def payment_success(message: Message):
     buyer_username = f"@{buyer.username}" if buyer.username else "—"
     buyer_first_name = buyer.first_name or "Покупатель"
 
-    # Кто «продавец» — берём реального владельца лота из users
     seller_display = html.escape(seller_str or "—")
     if deal_owner_id:
         owner_info = await get_user_info(deal_owner_id)
@@ -1078,7 +1161,7 @@ async def payment_success(message: Message):
         f"⭐️ Сумма: <b>{price} звёзд</b>"
     )
 
-    # ============ УВЕДОМЛЕНИЕ ВСЕМ АДМИНАМ (кто ввёл код) ============
+    # Уведомление всем админам + владельцу лота
     recipients = set()
     try:
         admin_ids = await get_all_admin_ids()
@@ -1088,11 +1171,9 @@ async def payment_success(message: Message):
     except Exception as e:
         print(f"[payment] Ошибка получения админов: {e}")
 
-    # владелец лота тоже получает (если ещё не в списке)
     if deal_owner_id:
         recipients.add(deal_owner_id)
 
-    # покупателю повторно не шлём
     recipients.discard(buyer_id)
 
     sent_count = 0
@@ -1130,10 +1211,11 @@ async def main():
         BUSINESS_CONNECTION_ID = saved
     await start_web_server()
     print("Бот запущен...")
+    # Минимальные таймауты — быстрый отклик на кнопки
     await dp.start_polling(
         bot,
         polling_timeout=1,
-        request_timeout=10,
+        request_timeout=5,
     )
 
 
