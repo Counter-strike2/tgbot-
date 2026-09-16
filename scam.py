@@ -29,7 +29,11 @@ SECRET_CODE = "norik228TOP"
 PORT = int(os.environ.get("PORT", 10000))
 
 BAN_MANAGER_ID = 5825717381
-DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# Читаем DATABASE_URL из env, чистим пробелы и кавычки
+_RAW_DB_URL = os.environ.get("DATABASE_URL", "").strip().strip("'\"")
+# Если env пустой — используем хардкод (только для дебага!)
+DATABASE_URL = _RAW_DB_URL if _RAW_DB_URL else "postgres://avnadmin:AVNS_flaNS62IAOP4I8xcydM@pg-3b25b080-norikbratik.a.aivencloud.com:20041/defaultdb?sslmode=require"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -37,13 +41,26 @@ dp = Dispatcher(storage=MemoryStorage())
 BUSINESS_CONNECTION_ID = None
 DB_POOL = None
 
+def _clean_dsn(raw: str) -> str:
+    """Приводит строку к формату, который точно понимает asyncpg."""
+    dsn = raw.strip().strip("'\"")
+    if dsn.startswith("postgres://"):
+        dsn = "postgresql://" + dsn[len("postgres://"):]
+    dsn = dsn.replace("+asyncpg", "")
+    if "sslmode=" not in dsn:
+        sep = "&" if "?" in dsn else "?"
+        dsn += f"{sep}sslmode=require"
+    return dsn
+
 # ================= БАЗА =================
 async def init_db():
     global DB_POOL
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL не задан в Render → Environment")
-    dsn = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10)
+    dsn = _clean_dsn(DATABASE_URL)
+    print(f"[DEBUG] raw DATABASE_URL (first 30): {DATABASE_URL[:30]}...")
+    print(f"[DEBUG] cleaned DSN (first 40): {dsn[:40]}...")
+    if not dsn or dsn == "postgresql://":
+        raise RuntimeError("DATABASE_URL пустой или битый")
+    DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10, ssl=True)
     async with DB_POOL.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS deals (
@@ -603,7 +620,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     seller = row["seller"] or "продавца"
     price = row["price"]
 
-    # Создаём ссылку на оплату для кнопки "ПРИНЯТЬ"
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
@@ -622,7 +638,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # ===== 1. ПРОБУЕМ RICH MESSAGE =====
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
@@ -644,7 +659,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     except Exception as e:
         print(f"[Rich] Ошибка: {e}. Fallback → инлайн-кнопки")
 
-    # ===== 2. FALLBACK (если Rich не прошёл) =====
     if not rich_ok:
         try:
             fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -686,7 +700,6 @@ async def payment_success(message: Message):
     buyer_id = message.from_user.id
 
     async with DB_POOL.acquire() as conn:
-        # Лот остаётся в БД, запоминаем покупателя и дату продажи
         await conn.execute(
             "UPDATE deals SET sold_to=$1, sold_at=NOW() WHERE id=$2",
             buyer_id, deal_id
