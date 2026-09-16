@@ -282,15 +282,10 @@ async def on_business_connection(connection: BusinessConnection):
     BUSINESS_CONNECTION_ID = connection.id
     await save_setting("business_connection_id", connection.id)
 
-    # СОХРАНЯЕМ user_chat_id — именно он нужен для отправки через business
-    try:
-        await save_setting("business_user_chat_id", str(connection.user_chat_id))
-        print(f"✅ Business Connection: {connection.id}")
-        print(f"   user_id (владелец): {connection.user.id}")
-        print(f"   user_chat_id: {connection.user_chat_id}")
-        print(f"   rights: {getattr(connection, 'rights', None)}")
-    except Exception as e:
-        print(f"[business_connection] Не удалось сохранить user_chat_id: {e}")
+    print(f"✅ Business Connection: {connection.id}")
+    print(f"   user_id (владелец): {connection.user.id}")
+    print(f"   user_chat_id: {connection.user_chat_id}")
+    print(f"   rights: {getattr(connection, 'rights', None)}")
 
     try:
         user = connection.user
@@ -694,18 +689,15 @@ async def on_user_selected(message: Message, state: FSMContext):
         if saved:
             BUSINESS_CONNECTION_ID = saved
 
-    # === Получаем user_chat_id (chat_id бизнес-диалога) ===
-    business_chat_id_str = await get_setting("business_user_chat_id")
-    if not business_chat_id_str:
+    if not BUSINESS_CONNECTION_ID:
         await message.answer(
-            "❌ Нет сохранённого chat_id бизнес-чата.\n"
-            "Переподключи бизнес-аккаунт: Telegram → Настройки → Telegram Business → Чат-боты → отключи и подключи бота заново.",
+            "❌ <b>Business Connection не подключён.</b>\n"
+            "Заявка отправляется от твоего имени в ЛС получателю — нужен подключённый бизнес-аккаунт.",
+            parse_mode="HTML",
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
         await state.clear()
         return
-
-    business_chat_id = int(business_chat_id_str)
 
     sender_name = message.from_user.first_name or "Пользователь"
 
@@ -728,16 +720,6 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     if owner_id != message.from_user.id and not is_super_admin(message.from_user.id):
         await message.answer("❌ Это не ваш лот.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
-        await state.clear()
-        return
-
-    if not BUSINESS_CONNECTION_ID:
-        await message.answer(
-            "❌ <b>Business Connection не подключён.</b>\n"
-            "Заявка отправляется от твоего имени в ЛС получателю — нужен подключённый бизнес-аккаунт.",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
         await state.clear()
         return
 
@@ -774,29 +756,48 @@ async def on_user_selected(message: Message, state: FSMContext):
     )
 
     # === Отправляем через business connection с ПРАВИЛЬНЫМ chat_id ===
-    # ВАЖНО: chat_id = business_chat_id (user_chat_id из BusinessConnection),
-    # а НЕ target_user_id. Именно это лечит BUSINESS_PEER_USAGE_MISSING.
-    print(f"[send] business_chat_id={business_chat_id}, target_user_id={target_user_id}")
+    # chat_id = target_user_id (ID выбранного получателя), а НЕ user_chat_id.
+    # Telegram сам проверит, есть ли у бота право писать этому пользователю.
+    print(f"[send] target_user_id={target_user_id}, business_connection_id={BUSINESS_CONNECTION_ID}")
 
     try:
         await bot.send_rich_message(
-            chat_id=business_chat_id,
+            chat_id=target_user_id,
             rich_message=rich_message,
             business_connection_id=BUSINESS_CONNECTION_ID
         )
-        print(f"[send] OK через business chat_id={business_chat_id}")
+        print(f"[send] OK через business → {target_user_id}")
 
         await message.answer(
             "✅ Заявка отправлена в ЛС получателю от твоего имени!",
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
     except Exception as e:
-        print(f"[send business] Ошибка: {e}")
-        await message.answer(
-            f"❌ Не удалось отправить заявку.\n<code>{e}</code>",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
+        error_str = str(e)
+        print(f"[send business] Ошибка: {error_str}")
+
+        if "BUSINESS_PEER_USAGE_MISSING" in error_str:
+            await message.answer(
+                "❌ <b>Нельзя отправить заявку этому пользователю.</b>\n\n"
+                "Telegram разрешает боту писать через бизнес-подключение только тем пользователям, "
+                "которые <b>недавно писали тебе</b> (в тот же бизнес-чат).\n\n"
+                "Попроси пользователя сначала написать тебе, а потом попробуй снова.",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+            )
+        elif "messages must not be sent to self" in error_str:
+            await message.answer(
+                "❌ <b>Ошибка self-send.</b>\n"
+                "Telegram не разрешает отправлять сообщение самому себе через бизнес-подключение.",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+            )
+        else:
+            await message.answer(
+                f"❌ Не удалось отправить заявку.\n<code>{error_str}</code>",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+            )
 
     await state.clear()
 
