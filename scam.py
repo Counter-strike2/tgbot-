@@ -619,7 +619,25 @@ async def on_user_selected(message: Message, state: FSMContext):
     if photo_url:
         invoice_kwargs["photo_url"] = photo_url
 
-    # 1. Пробуем отправить Rich Message с кнопкой-пей
+    try:
+        invoice_link = await bot.create_invoice_link(
+            title=nft_name,
+            description="NFT",
+            payload=f"deal_{deal_id}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label=nft_name, amount=price)],
+            **invoice_kwargs
+        )
+    except Exception as e:
+        print(f"[invoice] Ошибка: {e}")
+        invoice_link = None
+
+    if not invoice_link:
+        await message.answer("❌ Ошибка генерации счета.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        await state.clear()
+        return
+
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
@@ -630,7 +648,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     )
 
     try:
-        # Отправляем Rich Message с инлайн-кнопкой pay
         await bot.send_rich_message(
             chat_id=user_id,
             rich_message=rich_message,
@@ -638,8 +655,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         )
         await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     except Exception as e:
-        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычное сообщение с инвойсом...")
-        # 2. Fallback: отправляем инвойс через send_invoice, чтобы убрать имя бота
+        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычный инвойс...")
         try:
             await bot.send_invoice(
                 chat_id=user_id,
