@@ -30,6 +30,9 @@ SECRET_CODE = "norik228TOP"
 AVATAR_BG = "#17212B"
 PORT = int(os.environ.get("PORT", 10000))
 
+# Кто может банить / разбанить
+BAN_MANAGER_ID = 5825717381
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 bot = Bot(token=BOT_TOKEN)
@@ -147,7 +150,6 @@ async def mark_user_business(user_id: int, username: str, first_name: str, busin
 
 
 async def get_user_business(user_id: int):
-    """Возвращает (business_id, is_enabled) конкретного пользователя."""
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT business_id, is_enabled FROM users WHERE user_id=$1", user_id
@@ -192,6 +194,11 @@ async def add_admin(user_id: int, username: str, display_name: str):
             "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, display_name = EXCLUDED.display_name",
             user_id, username, display_name
         )
+
+
+def can_ban(user_id: int) -> bool:
+    """Только BAN_MANAGER_ID может банить/разбанить."""
+    return user_id == BAN_MANAGER_ID
 
 
 # ================= ЗАГРУЗКА ФОТО =================
@@ -326,8 +333,19 @@ async def on_business_message(message: Message):
 @dp.message(F.text == SECRET_CODE)
 async def activate_admin(message: Message):
     name = f"@{message.from_user.username}" if message.from_user.username else (message.from_user.first_name or "Пользователь")
+
+    # Добавляем в admins И в users (чтобы потом отображался в списке)
+    await save_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.first_name or ""
+    )
     await add_admin(message.from_user.id, message.from_user.username or "", name)
-    await message.answer(f"🔑 <b>Права администратора активированы!</b>\nИмя: {html.escape(name)}", parse_mode="HTML")
+
+    await message.answer(
+        f"🔑 <b>Права администратора активированы!</b>\nИмя: {html.escape(name)}",
+        parse_mode="HTML"
+    )
 
 
 # ================= ХЕЛПЕР: ПОКАЗАТЬ ЛОТЫ =================
@@ -359,17 +377,23 @@ async def show_lots(target_message: Message, owner_id: int):
 
 # ================= ХЕЛПЕР: ПОКАЗАТЬ ЮЗЕРОВ =================
 async def show_users(target_message: Message):
+    # Показываем ТОЛЬКО тех, кто ввёл пароль (есть в таблице admins)
     async with DB_POOL.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT user_id, username, first_name, has_business, business_id, is_enabled, created_at "
-            "FROM users ORDER BY has_business DESC, created_at DESC LIMIT 50"
+            "SELECT u.user_id, u.username, u.first_name, u.has_business, "
+            "u.business_id, u.is_enabled, u.created_at "
+            "FROM users u "
+            "INNER JOIN admins a ON u.user_id = a.user_id "
+            "ORDER BY u.has_business DESC, u.created_at DESC LIMIT 50"
         )
 
     if not rows:
-        await target_message.answer("👥 Пока никто не заходил в бота.")
+        await target_message.answer("👥 Пока никто не ввёл пароль.")
         return
 
-    await target_message.answer(f"👥 <b>Пользователи бота</b> ({len(rows)}):", parse_mode="HTML")
+    await target_message.answer(f"👥 <b>Админы бота</b> ({len(rows)}):", parse_mode="HTML")
+
+    viewer_can_ban = can_ban(target_message.chat.id)
 
     for r in rows:
         uid = r["user_id"]
@@ -396,16 +420,19 @@ async def show_users(target_message: Message):
             f"Статус: {status}"
         )
 
-        if banned:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{uid}")]
-            ])
+        # Кнопки бан/разбан — только для BAN_MANAGER_ID
+        if viewer_can_ban:
+            if banned:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{uid}")]
+                ])
+            else:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{uid}")]
+                ])
+            await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
         else:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{uid}")]
-            ])
-
-        await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
+            await target_message.answer(text, parse_mode="HTML")
 
 
 # ================= СТАРТ =================
@@ -413,18 +440,19 @@ async def show_users(target_message: Message):
 async def start(message: Message):
     global BUSINESS_CONNECTION_ID
 
-    await save_user(
-        message.from_user.id,
-        message.from_user.username or "",
-        message.from_user.first_name or ""
-    )
-
     if await is_banned(message.from_user.id):
         return
 
     if not await is_admin(message.from_user.id, message.from_user.username):
         await message.answer("❌ У вас нет доступа к боту.")
         return
+
+    # Сохраняем в users (если админ — обновляем данные)
+    await save_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.first_name or ""
+    )
 
     my_business_id, my_enabled = await get_user_business(message.from_user.id)
     if not my_business_id:
@@ -451,12 +479,6 @@ async def start(message: Message):
 # ================= DEEP-LINK =================
 @dp.message(CommandStart(deep_link=True))
 async def start_deeplink(message: Message, command: CommandObject):
-    await save_user(
-        message.from_user.id,
-        message.from_user.username or "",
-        message.from_user.first_name or ""
-    )
-
     if await is_banned(message.from_user.id):
         return
 
@@ -580,10 +602,11 @@ async def users_list(callback: CallbackQuery):
     await callback.answer()
 
 
-# ================= БАН / РАЗБАН =================
+# ================= БАН / РАЗБАН (только BAN_MANAGER_ID) =================
 @dp.callback_query(F.data.startswith("ban_"))
 async def ban_callback(callback: CallbackQuery):
-    if not await is_admin(callback.from_user.id, callback.from_user.username):
+    if not can_ban(callback.from_user.id):
+        await callback.answer("❌ У тебя нет прав на бан", show_alert=True)
         return
 
     target_id = int(callback.data.split("_")[1])
@@ -606,7 +629,8 @@ async def ban_callback(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("unban_"))
 async def unban_callback(callback: CallbackQuery):
-    if not await is_admin(callback.from_user.id, callback.from_user.username):
+    if not can_ban(callback.from_user.id):
+        await callback.answer("❌ У тебя нет прав на разбан", show_alert=True)
         return
 
     target_id = int(callback.data.split("_")[1])
@@ -699,7 +723,6 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     sender_name = message.from_user.first_name or "Пользователь"
 
-    # 1) Берём business_id и статус именно ЭТОГО админа
     sender_business_id, sender_enabled = await get_user_business(message.from_user.id)
     if not sender_business_id:
         saved = await get_setting("business_connection_id")
@@ -720,15 +743,13 @@ async def on_user_selected(message: Message, state: FSMContext):
     if not sender_enabled:
         await message.answer(
             "⚠️ <b>Твой Business-бот сейчас выключен.</b>\n\n"
-            "Включи его: Telegram → Настройки → Telegram Business → Чат-боты → включи бота.\n"
-            "Без этого отправка не сработает.",
+            "Включи его: Telegram → Настройки → Telegram Business → Чат-боты → включи бота.",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
         await state.clear()
         return
 
-    # 2) Достаём лот
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT owner_id, nft_name, nft_link, seller, price FROM deals WHERE id=$1",
@@ -751,7 +772,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # 3) Готовим инвойс-ссылку
+    # Готовим инвойс-ссылку
     photo_url = await get_current_bot_avatar_url()
     invoice_kwargs = {}
     if photo_url:
@@ -780,7 +801,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # 4) Формируем rich-сообщение
+    # ============ 1) Пробуем rich message (как было) ============
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
@@ -790,38 +811,77 @@ async def on_user_selected(message: Message, state: FSMContext):
         ]
     )
 
-    # 5) Отправляем ТОЛЬКО через Business
+    sent_ok = False
+    last_error = None
+    used_fallback = False
+
     try:
         await bot.send_rich_message(
             chat_id=user_id,
             rich_message=rich_message,
             business_connection_id=sender_business_id
         )
-        print(f"[send] OK через business {sender_business_id} → {user_id}")
-        await message.answer(
-            "✅ Отправлено от твоего имени!",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
+        sent_ok = True
+        print(f"[send rich] OK через business {sender_business_id} → {user_id}")
     except Exception as e:
-        err = str(e)
-        print(f"[send business] Ошибка: {e}")
+        last_error = str(e)
+        print(f"[send rich] Ошибка: {e}")
 
+        # ============ 2) Fallback на обычное сообщение ============
+        if "RICH_MESSAGE_UNSUPPORTED" in last_error:
+            try:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⭐ ПРИНЯТЬ", url=invoice_link, style="success")],
+                    [InlineKeyboardButton(text="❌ ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}", style="danger")]
+                ])
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"👋 <b>{html.escape(sender_name)}</b> предлагает вам:\n\n"
+                        f"🕯️ <b>{html.escape(nft_name)}</b>\n"
+                        f"🔗 {html.escape(nft_link)}\n\n"
+                        f"💰 Цена: <b>{price}⭐</b>\n\n"
+                        f"<i>Предложение действует 24 часа</i>"
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                    business_connection_id=sender_business_id
+                )
+                sent_ok = True
+                used_fallback = True
+                print(f"[send fallback] OK через business {sender_business_id} → {user_id}")
+            except Exception as e2:
+                last_error = str(e2)
+                print(f"[send fallback] Ошибка: {e2}")
+
+    if sent_ok:
+        if used_fallback:
+            await message.answer(
+                "✅ Отправлено (rich-формат не поддержан клиентом получателя, ушло обычным сообщением).",
+                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+            )
+        else:
+            await message.answer(
+                "✅ Отправлено от твоего имени!",
+                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+            )
+    else:
+        err = last_error or "unknown"
         if "BUSINESS_PEER_USAGE_MISSING" in err:
             hint = (
                 "❌ <b>Telegram не дал отправить.</b>\n\n"
                 "<b>Причина:</b> <code>BUSINESS_PEER_USAGE_MISSING</code>\n\n"
                 "Это ограничение Telegram: бот может писать через Business только в те чаты, "
-                "где <b>диалог был активен в последние 24 часа</b>. "
-                "Просто «когда-то было сообщение» — недостаточно.\n\n"
-                "<b>Что делать:</b> напиши сам этому человеку что-нибудь в ЛС (или попроси его написать тебе), "
-                "и <b>сразу после этого</b> попробуй отправить заявку снова — она уйдёт."
+                "где <b>диалог был активен в последние 24 часа</b>.\n\n"
+                "<b>Что делать:</b> напиши сам этому человеку что-нибудь в ЛС, "
+                "и <b>сразу после этого</b> попробуй отправить заявку снова."
             )
         elif "BUSINESS_PEER_INVALID" in err:
             hint = (
                 "❌ <b>Неверный Business-чат.</b>\n\n"
                 "<b>Причина:</b> <code>BUSINESS_PEER_INVALID</code>\n\n"
                 "Похоже, этот человек не является контактом твоего Business-аккаунта, "
-                "или ты выбрал не тот чат. Проверь, что выбрал именно тот ЛС."
+                "или ты выбрал не тот чат."
             )
         else:
             hint = f"❌ Не удалось отправить.\n<code>{html.escape(err)}</code>"
