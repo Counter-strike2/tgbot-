@@ -3,6 +3,7 @@ import asyncpg
 import aiohttp
 import os
 import html
+import ssl
 import urllib.parse
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -40,14 +41,13 @@ BUSINESS_CONNECTION_ID = None
 DB_POOL = None
 
 def _clean_dsn(raw: str) -> str:
-    """Чистит строку от мусора и убирает sslmode (asyncpg хочет ssl=True отдельно)."""
+    """Чистит строку от мусора и убирает sslmode (asyncpg хочет ssl отдельно)."""
     if not raw:
         return ""
     dsn = raw.strip().strip("'\"").replace("`", "").replace("\n", "").replace(" ", "")
     if dsn.startswith("postgres://"):
         dsn = "postgresql://" + dsn[len("postgres://"):]
     dsn = dsn.replace("+asyncpg", "")
-    # Убираем sslmode из query — он конфликтует с ssl=True
     if "?" in dsn:
         base, query = dsn.split("?", 1)
         params = urllib.parse.parse_qs(query)
@@ -64,7 +64,14 @@ async def init_db():
     print(f"[DEBUG] cleaned DSN (first 60): {dsn[:60]}")
     if not dsn or dsn == "postgresql://":
         raise RuntimeError("DATABASE_URL пустой или битый")
-    DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10, ssl=True)
+
+    # SSL-контекст без проверки сертификата (Aiven использует свой CA)
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10, ssl=ssl_ctx)
+
     async with DB_POOL.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS deals (
