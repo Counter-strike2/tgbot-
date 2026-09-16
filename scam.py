@@ -95,7 +95,14 @@ async def init_db():
                 banned_at TIMESTAMP DEFAULT NOW()
             )
         """)
+
+        # ===== МИГРАЦИИ (для уже существующих таблиц) =====
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS has_business BOOLEAN DEFAULT FALSE")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS business_id TEXT")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
 
     print("🐘 PostgreSQL подключён")
 
@@ -689,7 +696,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     # 1) Берём business_connection именно ЭТОГО админа
     sender_business_id = await get_user_business_id(message.from_user.id)
     if not sender_business_id:
-        # Фолбэк на общий (на случай старого подключения)
         saved = await get_setting("business_connection_id")
         if saved:
             sender_business_id = saved
@@ -767,8 +773,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         ]
     )
 
-    # 5) Отправляем ТОЛЬКО через Business — от имени админа, в его ЛС с получателем.
-    #    Никаких фолбэков "от бота". Если не получилось — говорим админу.
+    # 5) Отправляем ТОЛЬКО через Business — от имени админа.
     try:
         await bot.send_rich_message(
             chat_id=user_id,
@@ -823,7 +828,7 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
-    # Уведомление покупателю (уходит от бота — это системное сообщение об оплате)
+    # Уведомление покупателю
     try:
         await message.answer(
             '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
