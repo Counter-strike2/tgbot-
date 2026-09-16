@@ -30,7 +30,6 @@ SECRET_CODE = "norik228TOP"
 AVATAR_BG = "#17212B"
 PORT = int(os.environ.get("PORT", 10000))
 
-# Кто может банить / разбанить
 BAN_MANAGER_ID = 5825717381
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -686,17 +685,17 @@ async def on_user_selected(message: Message, state: FSMContext):
         )
         await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     except Exception as e:
-        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычное сообщение с кнопкой...")
-        # 2. Если Rich Message заблокирован клиентом/Telegram, отправляем обычное через Business
+        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычное сообщение с цветными кнопками...")
+        # 2. Fallback с цветными инлайн-кнопками
         try:
             fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎁 ПРИНЯТЬ", url=invoice_link)],
-                [InlineKeyboardButton(text="❌ ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}")]
+                [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
+                [InlineKeyboardButton(text="ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}", style="danger")]
             ])
             
             fallback_text = (
-                f"<b>{sender_name}</b> предлагает <a href='{nft_link}'>NFT</a> за <b>{price}⭐</b>.\n\n"
-                f"⏰ <i>Предложение действует 24 часа</i>"
+                f"<b>{sender_name}</b> предлагает <a href='{nft_link}'>NFT</a> за <b>{price} звезд</b>.\n\n"
+                f"<i>Предложение действует 24 часа</i>"
             )
             
             await bot.send_message(
@@ -706,7 +705,7 @@ async def on_user_selected(message: Message, state: FSMContext):
                 business_connection_id=active_business_id,
                 parse_mode="HTML"
             )
-            await message.answer("✅ Отправлено (обычный формат, т.к. Rich недоступен в этом чате)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            await message.answer("✅ Отправлено (обычный формат с цветными кнопками)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         except Exception as fallback_err:
             await message.answer(f"❌ Ошибка отправки: {fallback_err}", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
