@@ -5,7 +5,6 @@ import os
 import html
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.methods import SendInvoice
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     LabeledPrice, PreCheckoutQuery, BusinessConnection,
@@ -205,7 +204,7 @@ async def upload_photo(file_path: str):
         return link
     return await upload_to_catbox(file_path)
 
-# ================= АВАТАРКА — БЕРЁМ КАК ЕСТЬ =================
+# ================= АВАТАРКА =================
 async def get_current_bot_avatar_url():
     try:
         me = await bot.get_me()
@@ -217,7 +216,6 @@ async def get_current_bot_avatar_url():
         file = await bot.get_file(file_id)
         raw_path = f"bot_avatar_raw_{me.id}.jpg"
         await bot.download_file(file.file_path, destination=raw_path)
-        # Никаких обрезок — просто заливаем как есть
         return await upload_photo(raw_path)
     except Exception as e:
         print(f"[avatar] Ошибка: {e}")
@@ -382,19 +380,14 @@ async def open_payment(user_id: int, deal_id: int):
         )
     if not row:
         return
-    photo_url = await get_current_bot_avatar_url()
-    kwargs = {}
-    if photo_url:
-        kwargs["photo_url"] = photo_url
     await bot.send_invoice(
         chat_id=user_id,
         title=row["nft_name"] or "NFT Подарок",
-        description="NFT",
+        description=f"Покупка у {row['seller'] or 'продавца'}",
         payload=f"deal_{deal_id}",
         provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label=row["nft_name"] or "NFT", amount=row["price"])],
-        **kwargs
     )
 
 # ================= СОЗДАНИЕ ЛОТА =================
@@ -607,86 +600,69 @@ async def on_user_selected(message: Message, state: FSMContext):
     seller = row["seller"] or "продавца"
     price = row["price"]
 
-    photo_url = await get_current_bot_avatar_url()
-    invoice_kwargs = {}
-    if photo_url:
-        invoice_kwargs["photo_url"] = photo_url
-
-    # Пробуем отправить инвойс через business_connection_id → уберёт имя бота
-    invoice_sent = False
+    # Создаём ссылку на оплату для кнопки "ПРИНЯТЬ"
     try:
-        method = SendInvoice(
-            chat_id=user_id,
+        invoice_link = await bot.create_invoice_link(
             title=nft_name,
-            description="NFT",
+            description=f"Покупка у {seller}",
             payload=f"deal_{deal_id}",
             provider_token="",
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
-            business_connection_id=active_business_id,
-            **invoice_kwargs
         )
-        await bot(method)
-        invoice_sent = True
-        await message.answer("✅ Счёт отправлен!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     except Exception as e:
-        print(f"[SendInvoice business] Ошибка: {e}")
+        print(f"[invoice_link] Ошибка: {e}")
+        invoice_link = None
 
-    # Если не получилось через business — fallback через Rich или inline
-    if not invoice_sent:
+    if not invoice_link:
+        await message.answer("❌ Ошибка генерации счета.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        await state.clear()
+        return
+
+    # ===== 1. ПРОБУЕМ RICH MESSAGE =====
+    rich_message = InputRichMessage(
+        blocks=[
+            InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
+            InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
+            InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
+            InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")])
+        ]
+    )
+
+    rich_ok = False
+    try:
+        await bot.send_rich_message(
+            chat_id=user_id,
+            rich_message=rich_message,
+            business_connection_id=active_business_id
+        )
+        rich_ok = True
+        await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+    except Exception as e:
+        print(f"[Rich] Ошибка: {e}. Fallback → инлайн-кнопки")
+
+    # ===== 2. FALLBACK (если Rich не прошёл) =====
+    if not rich_ok:
         try:
-            invoice_link = await bot.create_invoice_link(
-                title=nft_name,
-                description="NFT",
-                payload=f"deal_{deal_id}",
-                provider_token="",
-                currency="XTR",
-                prices=[LabeledPrice(label=nft_name, amount=price)],
-                **invoice_kwargs
+            fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
+                [InlineKeyboardButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")]
+            ])
+            # Голая ссылка как текст (не "NFT" кликабельный)
+            fallback_text = (
+                f"<b>{sender_name}</b> предлагает {nft_link} За <b>{price} звезд</b>.\n\n"
+                f"<i>Предложение действует 24 часа</i>"
             )
+            await bot.send_message(
+                chat_id=user_id,
+                text=fallback_text,
+                reply_markup=fallback_kb,
+                business_connection_id=active_business_id,
+                parse_mode="HTML"
+            )
+            await message.answer("✅ Отправлено (инлайн)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         except Exception as e:
-            print(f"[invoice_link] Ошибка: {e}")
-            invoice_link = None
-
-        if invoice_link:
-            rich_message = InputRichMessage(
-                blocks=[
-                    InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
-                    InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
-                    InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
-                    InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")])
-                ]
-            )
-            rich_ok = False
-            try:
-                await bot.send_rich_message(
-                    chat_id=user_id,
-                    rich_message=rich_message,
-                    business_connection_id=active_business_id
-                )
-                rich_ok = True
-                await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
-            except Exception as e:
-                print(f"[Rich] Ошибка: {e}")
-
-            if not rich_ok:
-                try:
-                    fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
-                        [InlineKeyboardButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")]
-                    ])
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=f"<b>{sender_name}</b> предлагает <a href='{nft_link}'>NFT</a> за <b>{price} звезд</b>.\n\n<i>Предложение действует 24 часа</i>",
-                        reply_markup=fallback_kb,
-                        business_connection_id=active_business_id,
-                        parse_mode="HTML"
-                    )
-                    await message.answer("✅ Отправлено (инлайн)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
-                except Exception as e:
-                    await message.answer(f"❌ Ошибка отправки: {e}", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
-        else:
-            await message.answer("❌ Ошибка генерации счета.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            await message.answer(f"❌ Ошибка отправки: {e}", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
     await state.clear()
 
