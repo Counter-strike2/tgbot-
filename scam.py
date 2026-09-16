@@ -75,7 +75,6 @@ async def init_db():
                 owner_id BIGINT,
                 nft_name TEXT,
                 nft_link TEXT,
-                nft_photo TEXT,
                 seller TEXT,
                 price INTEGER,
                 status TEXT DEFAULT 'pending'
@@ -123,7 +122,6 @@ async def init_db():
             )
         """)
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
-        await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS nft_photo TEXT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_to BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_at TIMESTAMP")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
@@ -156,17 +154,20 @@ async def save_user(user_id: int, username: str, first_name: str):
         )
 
 async def save_business_connection(user_id: int, connection_id: str):
+    """Сохраняет каждое новое подключение в отдельную таблицу."""
     async with DB_POOL.acquire() as conn:
         await conn.execute(
             "INSERT INTO business_connections (user_id, connection_id, is_enabled) VALUES ($1, $2, TRUE)",
             user_id, connection_id
         )
+        # Обновляем основную таблицу users
         await conn.execute(
             "UPDATE users SET has_business = TRUE, business_id = $1 WHERE user_id = $2",
             connection_id, user_id
         )
 
 async def get_user_business(user_id: int):
+    """Возвращает ПОСЛЕДНИЙ активный business_connection_id пользователя."""
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT connection_id FROM business_connections "
@@ -177,6 +178,14 @@ async def get_user_business(user_id: int):
         if row and row["connection_id"]:
             return row["connection_id"]
     return None
+
+async def mark_connection_disabled(connection_id: str):
+    """Помечает подключение как неактивное."""
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "UPDATE business_connections SET is_enabled = FALSE WHERE connection_id = $1",
+            connection_id
+        )
 
 async def is_banned(user_id: int) -> bool:
     async with DB_POOL.acquire() as conn:
@@ -222,10 +231,7 @@ async def upload_to_telegraph(file_path: str):
                 data = aiohttp.FormData()
                 data.add_field("file", f, filename="img.jpg", content_type="image/jpeg")
                 async with session.post(url, data=data) as resp:
-                    print(f"[telegra.ph] status={resp.status}")
                     if resp.status != 200:
-                        text = await resp.text()
-                        print(f"[telegra.ph] body={text[:200]}")
                         return None
                     result = await resp.json()
                     if isinstance(result, list) and result and "src" in result[0]:
@@ -237,71 +243,46 @@ async def upload_to_telegraph(file_path: str):
 async def upload_to_catbox(file_path: str):
     url = "https://catbox.moe/user/api.php"
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Bot)"}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
             with open(file_path, "rb") as f:
                 data = aiohttp.FormData()
                 data.add_field("reqtype", "fileupload")
                 data.add_field("fileToUpload", f, filename="img.jpg", content_type="image/jpeg")
-                async with session.post(url, data=data, headers=headers) as resp:
+                async with session.post(url, data=data) as resp:
                     text = (await resp.text()).strip()
-                    print(f"[catbox] status={resp.status} body={text[:200]}")
                     if text.startswith("http"):
                         return text
     except Exception as e:
         print(f"[catbox] Ошибка: {e}")
     return None
 
-async def upload_to_0x0(file_path: str):
-    url = "https://0x0.st"
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-            with open(file_path, "rb") as f:
-                data = aiohttp.FormData()
-                data.add_field("file", f, filename="img.jpg", content_type="image/jpeg")
-                async with session.post(url, data=data, headers=headers) as resp:
-                    text = (await resp.text()).strip()
-                    print(f"[0x0.st] status={resp.status} body={text[:200]}")
-                    if text.startswith("http"):
-                        return text
-    except Exception as e:
-        print(f"[0x0.st] Ошибка: {e}")
-    return None
-
-async def upload_to_tmpfiles(file_path: str):
-    url = "https://tmpfiles.org/api/v1/upload"
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-            with open(file_path, "rb") as f:
-                data = aiohttp.FormData()
-                data.add_field("file", f, filename="img.jpg", content_type="image/jpeg")
-                async with session.post(url, data=data, headers=headers) as resp:
-                    result = await resp.json()
-                    print(f"[tmpfiles] status={resp.status} body={result}")
-                    if isinstance(result, dict) and result.get("status") == "success":
-                        raw_url = result["data"]["url"]
-                        direct = raw_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                        return direct
-    except Exception as e:
-        print(f"[tmpfiles] Ошибка: {e}")
-    return None
-
 async def upload_photo(file_path: str):
-    for uploader in (upload_to_telegraph, upload_to_catbox, upload_to_0x0, upload_to_tmpfiles):
-        link = await uploader(file_path)
-        if link:
-            print(f"[upload] Успех через {uploader.__name__}: {link}")
-            return link
-    print("[upload] Все хостинги не сработали")
-    return None
+    link = await upload_to_telegraph(file_path)
+    if link:
+        return link
+    return await upload_to_catbox(file_path)
+
+# ================= АВАТАРКА =================
+async def get_current_bot_avatar_url():
+    try:
+        me = await bot.get_me()
+        photos = await bot.get_user_profile_photos(user_id=me.id, limit=1)
+        if not photos.total_count or not photos.photos:
+            return None
+        sizes = photos.photos[0]
+        file_id = sizes[-1].file_id
+        file = await bot.get_file(file_id)
+        raw_path = f"bot_avatar_raw_{me.id}.jpg"
+        await bot.download_file(file.file_path, destination=raw_path)
+        return await upload_photo(raw_path)
+    except Exception as e:
+        print(f"[avatar] Ошибка: {e}")
+        return None
 
 # ================= FSM =================
 class DealForm(StatesGroup):
     nft_name = State()
     nft_link = State()
-    nft_photo = State()
     seller = State()
     price = State()
     select_chat = State()
@@ -456,14 +437,11 @@ async def start_deeplink(message: Message, command: CommandObject):
 async def open_payment(user_id: int, deal_id: int):
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT nft_name, seller, price, nft_photo FROM deals WHERE id=$1 AND status='pending'",
+            "SELECT nft_name, seller, price FROM deals WHERE id=$1 AND status='pending'",
             deal_id
         )
     if not row:
         return
-    kwargs = {}
-    if row["nft_photo"]:
-        kwargs["photo_url"] = row["nft_photo"]
     await bot.send_invoice(
         chat_id=user_id,
         title=row["nft_name"] or "NFT Подарок",
@@ -472,7 +450,6 @@ async def open_payment(user_id: int, deal_id: int):
         provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label=row["nft_name"] or "NFT", amount=row["price"])],
-        **kwargs
     )
 
 # ================= СОЗДАНИЕ ЛОТА =================
@@ -499,38 +476,15 @@ async def set_link(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
     await state.update_data(nft_link=message.text)
-    await message.answer("3️⃣ Отправь фотку NFT:")
-    await state.set_state(DealForm.nft_photo)
-
-@dp.message(DealForm.nft_photo, F.photo)
-async def set_photo(message: Message, state: FSMContext):
-    if await is_banned(message.from_user.id):
-        return
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    local_path = f"nft_photo_{message.from_user.id}_{photo.file_unique_id}.jpg"
-    await bot.download_file(file.file_path, destination=local_path)
-
-    photo_url = await upload_photo(local_path)
-
-    if not photo_url:
-        await message.answer("❌ Не удалось загрузить фотку. Попробуй ещё раз.")
-        return
-
-    await state.update_data(nft_photo=photo_url)
-    await message.answer("4️⃣ Введи имя продавца:")
+    await message.answer("3️⃣ Введи имя продавца:")
     await state.set_state(DealForm.seller)
-
-@dp.message(DealForm.nft_photo)
-async def set_photo_invalid(message: Message, state: FSMContext):
-    await message.answer("❌ Отправь именно фотку (не текст, не файл).")
 
 @dp.message(DealForm.seller)
 async def set_seller(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
     await state.update_data(seller=message.text)
-    await message.answer("5️⃣ Введи цену в звёздах:")
+    await message.answer("4️⃣ Введи цену в звёздах:")
     await state.set_state(DealForm.price)
 
 @dp.message(DealForm.price)
@@ -544,10 +498,10 @@ async def set_price(message: Message, state: FSMContext):
     data = await state.get_data()
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO deals (owner_id, nft_name, nft_link, nft_photo, seller, price) "
-            "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+            "INSERT INTO deals (owner_id, nft_name, nft_link, seller, price) "
+            "VALUES ($1, $2, $3, $4, $5) RETURNING id",
             message.from_user.id, data["nft_name"], data["nft_link"],
-            data.get("nft_photo"), data["seller"], data["price"]
+            data["seller"], data["price"]
         )
         deal_id = row["id"]
     await message.answer(f"✅ Лот #{deal_id} создан! Выбери получателя:", parse_mode="HTML")
@@ -681,6 +635,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     user_id = users_shared.users[0].user_id
     sender_name = message.from_user.first_name or "Пользователь"
 
+    # БЕРЁМ ПОСЛЕДНИЙ АКТИВНЫЙ business_connection_id ПОЛЬЗОВАТЕЛЯ
     active_business_id = await get_user_business(message.from_user.id)
 
     if not active_business_id:
@@ -695,7 +650,7 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT owner_id, nft_name, nft_link, nft_photo, seller, price FROM deals WHERE id=$1",
+            "SELECT owner_id, nft_name, nft_link, seller, price FROM deals WHERE id=$1",
             deal_id
         )
     if not row:
@@ -705,14 +660,10 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     nft_name = row["nft_name"] or "NFT"
     nft_link = row["nft_link"] or ""
-    nft_photo = row["nft_photo"]
     seller = row["seller"] or "продавца"
     price = row["price"]
 
-    invoice_kwargs = {}
-    if nft_photo:
-        invoice_kwargs["photo_url"] = nft_photo
-
+    # create_invoice_link с business_connection_id → Telegram покажет имя бизнес-аккаунта, а не имя бота
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
@@ -722,7 +673,6 @@ async def on_user_selected(message: Message, state: FSMContext):
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
             business_connection_id=active_business_id,
-            **invoice_kwargs
         )
     except Exception as e:
         print(f"[invoice_link] Ошибка: {e}")
@@ -825,6 +775,7 @@ async def payment_success(message: Message):
     except Exception as e:
         print(f"[payment] Ошибка отправки покупателю: {e}")
 
+    # Отправляем уведомление только владельцу лота (не себе же, если это ты)
     if deal_owner_id and deal_owner_id != buyer_id:
         text = (
             f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
