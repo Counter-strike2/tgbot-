@@ -287,6 +287,25 @@ def can_ban(user_id: int) -> bool:
     return user_id == BAN_MANAGER_ID
 
 
+# ================= ХЕЛПЕР: имя продавца из Telegram =================
+def resolve_seller_name(user) -> str:
+    """
+    Всегда возвращает АКТУАЛЬНОЕ имя из Telegram:
+      1) first_name (то, что видно как имя)
+      2) если пусто — @username
+      3) фолбэк — "Продавец"
+    """
+    if user is None:
+        return "Продавец"
+    first = (user.first_name or "").strip()
+    if first:
+        return first
+    uname = (user.username or "").strip()
+    if uname:
+        return f"@{uname}"
+    return "Продавец"
+
+
 # ================= ЗАГРУЗКА ФОТО =================
 async def upload_to_telegraph(file_path: str):
     url = "https://telegra.ph/upload"
@@ -389,7 +408,6 @@ def _build_photo_block(url: str):
 class DealForm(StatesGroup):
     nft_name = State()
     nft_link = State()
-    seller = State()
     price = State()
     select_chat = State()
 
@@ -620,16 +638,7 @@ async def set_link(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
     await state.update_data(nft_link=message.text)
-    await message.answer("3️⃣ Введи имя продавца:")
-    await state.set_state(DealForm.seller)
-
-
-@dp.message(DealForm.seller)
-async def set_seller(message: Message, state: FSMContext):
-    if await is_banned(message.from_user.id):
-        return
-    await state.update_data(seller=message.text)
-    await message.answer("4️⃣ Введи цену в звёздах:")
+    await message.answer("3️⃣ Введи цену в звёздах:")
     await state.set_state(DealForm.price)
 
 
@@ -642,12 +651,16 @@ async def set_price(message: Message, state: FSMContext):
         return
     await state.update_data(price=int(message.text))
     data = await state.get_data()
+
+    # Имя продавца подставляем СРАЗУ из актуального Telegram-профиля
+    seller_name = resolve_seller_name(message.from_user)
+
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
             "INSERT INTO deals (owner_id, nft_name, nft_link, seller, price) "
             "VALUES ($1, $2, $3, $4, $5) RETURNING id",
             message.from_user.id, data["nft_name"], data["nft_link"],
-            data["seller"], data["price"]
+            seller_name, data["price"]
         )
         deal_id = row["id"]
     await message.answer(f"✅ Лот #{deal_id} создан! Выбери получателя:", parse_mode="HTML")
@@ -793,7 +806,10 @@ async def on_user_selected(message: Message, state: FSMContext):
     users_shared: UsersShared = message.users_shared
     deal_id = users_shared.request_id
     user_id = users_shared.users[0].user_id
-    sender_name = message.from_user.first_name or "Пользователь"
+
+    # === ИМЯ ПРОДАВЦА — берём АКТУАЛЬНОЕ из Telegram ПРЯМО СЕЙЧАС ===
+    # Если ты поменял имя в профиле ТГ — здесь оно подхватится автоматически.
+    sender_name = resolve_seller_name(message.from_user)
 
     # business_connection_id ПРОДАВЦА (того, кто создал лот и жмёт кнопку)
     active_business_id = await get_user_business(message.from_user.id)
@@ -821,48 +837,41 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     nft_name = row["nft_name"] or "NFT"
     nft_link = row["nft_link"] or ""
-    seller = row["seller"] or "продавца"
     price = row["price"]
 
+    # Обновляем имя продавца в БД, чтобы оно всегда было свежим
+    try:
+        async with DB_POOL.acquire() as conn:
+            await conn.execute(
+                "UPDATE deals SET seller=$1 WHERE id=$2",
+                sender_name, deal_id
+            )
+    except Exception as e:
+        print(f"[seller update] Ошибка: {e}")
+
     peer_known = await is_known_peer(active_business_id, user_id)
-    print(f"[send] peer={user_id} known={peer_known} conn={active_business_id}")
+    print(f"[send] peer={user_id} known={peer_known} conn={active_business_id} seller={sender_name}")
 
     # ========== ВАЖНО ==========
-    # Счёт создаём С business_connection_id ПРОДАВЦА — тогда в нативном
-    # окне оплаты Telegram покажет ИМЯ И АВУ ПРОДАВЦА (его бизнес-аккаунта),
-    # а не бота.
+    # Счёт создаём БЕЗ business_connection_id — тогда в нативном окне
+    # оплаты Telegram покажет АВАТАРКУ И ИМЯ БОТА (аватарку).
+    # Имя продавца "{sender_name}" показывается в description, оно всегда
+    # берётся из актуального Telegram-профиля (First Name).
     # ==========================
     invoice_link = None
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
-            description=f"Покупка у {seller}",
+            description=f"Покупка у {sender_name}",
             payload=f"deal_{deal_id}",
             provider_token="",
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
-            business_connection_id=active_business_id,
         )
-        print("[invoice_link] Создана с business_connection_id продавца")
+        print("[invoice_link] Создана БЕЗ business_connection_id (аватарка бота)")
     except Exception as e:
-        print(f"[invoice_link/business] Ошибка: {e}")
+        print(f"[invoice_link] Ошибка: {e}")
         invoice_link = None
-
-    # Фолбэк — если с business_connection_id не получилось, создаём от бота
-    if not invoice_link:
-        try:
-            invoice_link = await bot.create_invoice_link(
-                title=nft_name,
-                description=f"Покупка у {seller}",
-                payload=f"deal_{deal_id}",
-                provider_token="",
-                currency="XTR",
-                prices=[LabeledPrice(label=nft_name, amount=price)],
-            )
-            print("[invoice_link] Фолбэк — без business_connection_id")
-        except Exception as e:
-            print(f"[invoice_link/fallback] Ошибка: {e}")
-            invoice_link = None
 
     if not invoice_link:
         await message.answer("❌ Ошибка генерации счета.",
@@ -1121,7 +1130,6 @@ async def main():
         BUSINESS_CONNECTION_ID = saved
     await start_web_server()
     print("Бот запущен...")
-    # polling_timeout=1 → максимально быстрый отклик, никаких sleep
     await dp.start_polling(
         bot,
         polling_timeout=1,
