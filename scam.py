@@ -2,6 +2,7 @@ import asyncio
 import asyncpg
 import aiohttp
 import os
+import html
 from aiohttp import web
 from PIL import Image, ImageDraw
 from aiogram import Bot, Dispatcher, F
@@ -84,6 +85,7 @@ async def init_db():
                 first_name TEXT,
                 has_business BOOLEAN DEFAULT FALSE,
                 business_id TEXT,
+                is_enabled BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -96,12 +98,13 @@ async def init_db():
             )
         """)
 
-        # ===== МИГРАЦИИ (для уже существующих таблиц) =====
+        # ===== МИГРАЦИИ =====
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS has_business BOOLEAN DEFAULT FALSE")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS business_id TEXT")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT FALSE")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
 
     print("🐘 PostgreSQL подключён")
@@ -131,25 +134,27 @@ async def save_user(user_id: int, username: str, first_name: str):
         )
 
 
-async def mark_user_business(user_id: int, username: str, first_name: str, business_id: str):
+async def mark_user_business(user_id: int, username: str, first_name: str, business_id: str, is_enabled: bool = True):
     async with DB_POOL.acquire() as conn:
         await conn.execute(
-            "INSERT INTO users (user_id, username, first_name, has_business, business_id) "
-            "VALUES ($1, $2, $3, TRUE, $4) "
+            "INSERT INTO users (user_id, username, first_name, has_business, business_id, is_enabled) "
+            "VALUES ($1, $2, $3, $4, $5, $6) "
             "ON CONFLICT (user_id) DO UPDATE SET "
             "username = EXCLUDED.username, first_name = EXCLUDED.first_name, "
-            "has_business = TRUE, business_id = EXCLUDED.business_id",
-            user_id, username, first_name, business_id
+            "has_business = $4, business_id = $5, is_enabled = $6",
+            user_id, username, first_name, True, business_id, is_enabled
         )
 
 
-async def get_user_business_id(user_id: int):
-    """Возвращает business_connection_id конкретного пользователя (если он подключал бизнес)."""
+async def get_user_business(user_id: int):
+    """Возвращает (business_id, is_enabled) конкретного пользователя."""
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT business_id FROM users WHERE user_id=$1", user_id
+            "SELECT business_id, is_enabled FROM users WHERE user_id=$1", user_id
         )
-        return row["business_id"] if row and row["business_id"] else None
+        if row and row["business_id"]:
+            return row["business_id"], bool(row["is_enabled"])
+        return None, False
 
 
 async def is_banned(user_id: int) -> bool:
@@ -187,19 +192,6 @@ async def add_admin(user_id: int, username: str, display_name: str):
             "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, display_name = EXCLUDED.display_name",
             user_id, username, display_name
         )
-
-
-async def get_user_display_name(user_id: int, user_obj) -> str:
-    name = f"@{user_obj.username}" if user_obj.username else (user_obj.first_name or "Пользователь")
-    try:
-        async with DB_POOL.acquire() as conn:
-            await conn.execute(
-                "UPDATE admins SET username=$1, display_name=$2 WHERE user_id=$3",
-                user_obj.username, name, user_id
-            )
-    except Exception:
-        pass
-    return name
 
 
 # ================= ЗАГРУЗКА ФОТО =================
@@ -309,13 +301,16 @@ async def on_business_connection(connection: BusinessConnection):
     BUSINESS_CONNECTION_ID = connection.id
     await save_setting("business_connection_id", connection.id)
 
-    # Сохраняем юзера, который подключил бизнес
     try:
         user = connection.user
-        await mark_user_business(user.id, user.username or "", user.first_name or "", connection.id)
-        print(f"✅ Business Connection сохранён: {connection.id} (user={user.id})")
+        is_enabled = getattr(connection, "is_enabled", True)
+        await mark_user_business(
+            user.id, user.username or "", user.first_name or "",
+            connection.id, is_enabled
+        )
+        print(f"✅ Business Connection: {connection.id} (user={user.id}, enabled={is_enabled})")
     except Exception as e:
-        print(f"[business_connection] Не удалось сохранить юзера: {e}")
+        print(f"[business_connection] Ошибка: {e}")
 
 
 @dp.business_message()
@@ -332,7 +327,7 @@ async def on_business_message(message: Message):
 async def activate_admin(message: Message):
     name = f"@{message.from_user.username}" if message.from_user.username else (message.from_user.first_name or "Пользователь")
     await add_admin(message.from_user.id, message.from_user.username or "", name)
-    await message.answer(f"🔑 <b>Права администратора активированы!</b>\nИмя: {name}", parse_mode="HTML")
+    await message.answer(f"🔑 <b>Права администратора активированы!</b>\nИмя: {html.escape(name)}", parse_mode="HTML")
 
 
 # ================= ХЕЛПЕР: ПОКАЗАТЬ ЛОТЫ =================
@@ -349,7 +344,7 @@ async def show_lots(target_message: Message, owner_id: int):
 
     for r in rows:
         deal_id = r["id"]
-        nft_name = r["nft_name"]
+        nft_name = html.escape(r["nft_name"] or "NFT")
         price = r["price"]
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Выбрать получателя", callback_data=f"pick_{deal_id}", style="primary")],
@@ -366,7 +361,7 @@ async def show_lots(target_message: Message, owner_id: int):
 async def show_users(target_message: Message):
     async with DB_POOL.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT user_id, username, first_name, has_business, business_id, created_at "
+            "SELECT user_id, username, first_name, has_business, business_id, is_enabled, created_at "
             "FROM users ORDER BY has_business DESC, created_at DESC LIMIT 50"
         )
 
@@ -378,9 +373,18 @@ async def show_users(target_message: Message):
 
     for r in rows:
         uid = r["user_id"]
-        uname = f"@{r['username']}" if r["username"] else "—"
-        fname = r["first_name"] or "—"
-        has_biz = "🟢 Бизнес" if r["has_business"] else "⚪ Без бизнеса"
+        raw_uname = r["username"] or ""
+        raw_fname = r["first_name"] or "—"
+
+        uname = f"@{html.escape(raw_uname)}" if raw_uname else "—"
+        fname = html.escape(raw_fname)
+
+        if r["has_business"] and r["is_enabled"]:
+            has_biz = "🟢 Бизнес (активен)"
+        elif r["has_business"]:
+            has_biz = "🟡 Бизнес (выключен)"
+        else:
+            has_biz = "⚪ Без бизнеса"
 
         banned = await is_banned(uid)
         status = "🚫 ЗАБАНЕН" if banned else has_biz
@@ -422,19 +426,25 @@ async def start(message: Message):
         await message.answer("❌ У вас нет доступа к боту.")
         return
 
-    # Смотрим бизнес именно этого админа
-    my_business = await get_user_business_id(message.from_user.id)
-    if not my_business:
+    my_business_id, my_enabled = await get_user_business(message.from_user.id)
+    if not my_business_id:
         saved = await get_setting("business_connection_id")
         if saved:
-            my_business = saved
+            my_business_id = saved
+            my_enabled = True
+
+    if my_business_id and my_enabled:
+        status = "🟢 Подключён"
+    elif my_business_id and not my_enabled:
+        status = "🟡 Подключён, но выключен"
+    else:
+        status = "🔴 Не подключён (подключи в Telegram Business)"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать запрос", callback_data="new_deal", style="success")],
         [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots", style="primary")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="users_list", style="primary")]
     ])
-    status = "🟢 Подключён" if my_business else "🔴 Не подключён (подключи в Telegram Business)"
     await message.answer(f"👑 Админ-панель\nBusiness: {status}", reply_markup=kb)
 
 
@@ -679,10 +689,6 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
 # ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА ОТ ИМЕНИ АДМИНА =================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
-    """
-    Отправляем заявку ТОЛЬКО через Business-подключение админа.
-    Так получатель видит сообщение в ЛС с админом, а не с ботом.
-    """
     if await is_banned(message.from_user.id):
         await state.clear()
         return
@@ -693,18 +699,29 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     sender_name = message.from_user.first_name or "Пользователь"
 
-    # 1) Берём business_connection именно ЭТОГО админа
-    sender_business_id = await get_user_business_id(message.from_user.id)
+    # 1) Берём business_id и статус именно ЭТОГО админа
+    sender_business_id, sender_enabled = await get_user_business(message.from_user.id)
     if not sender_business_id:
         saved = await get_setting("business_connection_id")
         if saved:
             sender_business_id = saved
+            sender_enabled = True
 
     if not sender_business_id:
         await message.answer(
             "❌ <b>У тебя не подключён Business-аккаунт.</b>\n\n"
-            "Подключи бота: Telegram → Настройки → Telegram Business → Чат-боты → добавь этого бота.\n"
-            "Без этого сообщение уйдёт от бота, а не от тебя — а так нельзя.",
+            "Подключи бота: Telegram → Настройки → Telegram Business → Чат-боты → добавь этого бота.",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
+        await state.clear()
+        return
+
+    if not sender_enabled:
+        await message.answer(
+            "⚠️ <b>Твой Business-бот сейчас выключен.</b>\n\n"
+            "Включи его: Telegram → Настройки → Telegram Business → Чат-боты → включи бота.\n"
+            "Без этого отправка не сработает.",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
@@ -724,9 +741,9 @@ async def on_user_selected(message: Message, state: FSMContext):
         return
 
     owner_id = row["owner_id"]
-    nft_name = row["nft_name"]
-    nft_link = row["nft_link"]
-    seller = row["seller"]
+    nft_name = row["nft_name"] or "NFT"
+    nft_link = row["nft_link"] or ""
+    seller = row["seller"] or "продавца"
     price = row["price"]
 
     if owner_id != message.from_user.id and message.from_user.username != OWNER_USERNAME:
@@ -742,12 +759,12 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     try:
         invoice_link = await bot.create_invoice_link(
-            title=nft_name or "NFT Подарок",
-            description=f"Покупка у {seller or 'продавца'}",
+            title=nft_name,
+            description=f"Покупка у {seller}",
             payload=f"deal_{deal_id}",
             provider_token="",
             currency="XTR",
-            prices=[LabeledPrice(label=nft_name or "NFT", amount=price)],
+            prices=[LabeledPrice(label=nft_name, amount=price)],
             **invoice_kwargs
         )
         print(f"[invoice] создан: {invoice_link}")
@@ -769,11 +786,11 @@ async def on_user_selected(message: Message, state: FSMContext):
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
             InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
             InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
-            InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", url="https://t.me/NorikAmiri", style="danger")])
+            InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}", style="danger")])
         ]
     )
 
-    # 5) Отправляем ТОЛЬКО через Business — от имени админа.
+    # 5) Отправляем ТОЛЬКО через Business
     try:
         await bot.send_rich_message(
             chat_id=user_id,
@@ -786,14 +803,31 @@ async def on_user_selected(message: Message, state: FSMContext):
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
     except Exception as e:
+        err = str(e)
         print(f"[send business] Ошибка: {e}")
-        await message.answer(
-            f"❌ Не удалось отправить.\n"
-            f"<b>Причина:</b> <code>{e}</code>\n\n"
-            f"Проверь, что получатель хоть раз писал тебе в ЛС, и что Business подключён корректно.",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
+
+        if "BUSINESS_PEER_USAGE_MISSING" in err:
+            hint = (
+                "❌ <b>Telegram не дал отправить.</b>\n\n"
+                "<b>Причина:</b> <code>BUSINESS_PEER_USAGE_MISSING</code>\n\n"
+                "Это ограничение Telegram: бот может писать через Business только в те чаты, "
+                "где <b>диалог был активен в последние 24 часа</b>. "
+                "Просто «когда-то было сообщение» — недостаточно.\n\n"
+                "<b>Что делать:</b> напиши сам этому человеку что-нибудь в ЛС (или попроси его написать тебе), "
+                "и <b>сразу после этого</b> попробуй отправить заявку снова — она уйдёт."
+            )
+        elif "BUSINESS_PEER_INVALID" in err:
+            hint = (
+                "❌ <b>Неверный Business-чат.</b>\n\n"
+                "<b>Причина:</b> <code>BUSINESS_PEER_INVALID</code>\n\n"
+                "Похоже, этот человек не является контактом твоего Business-аккаунта, "
+                "или ты выбрал не тот чат. Проверь, что выбрал именно тот ЛС."
+            )
+        else:
+            hint = f"❌ Не удалось отправить.\n<code>{html.escape(err)}</code>"
+
+        await message.answer(hint, parse_mode="HTML",
+                             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
     await state.clear()
 
@@ -826,9 +860,8 @@ async def payment_success(message: Message):
     buyer_id = buyer.id
     buyer_username = f"@{buyer.username}" if buyer.username else "—"
     buyer_first_name = buyer.first_name or "Покупатель"
-    buyer_link = f'<a href="tg://user?id={buyer_id}">{buyer_first_name}</a>'
+    buyer_link = f'<a href="tg://user?id={buyer_id}">{html.escape(buyer_first_name)}</a>'
 
-    # Уведомление покупателю
     try:
         await message.answer(
             '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
@@ -848,8 +881,8 @@ async def payment_success(message: Message):
         f"👤 Покупатель: {buyer_link}\n"
         f"🔗 Юзернейм: {buyer_username}\n"
         f"📱 ID: <code>{buyer_id}</code>\n\n"
-        f"🕯️ Лот: <b>{nft_name}</b>\n"
-        f"👑 Продавец: {seller}\n"
+        f"🕯️ Лот: <b>{html.escape(nft_name)}</b>\n"
+        f"👑 Продавец: {html.escape(seller)}\n"
         f"⭐ Сумма: <b>{price} звёзд</b>"
     )
 
