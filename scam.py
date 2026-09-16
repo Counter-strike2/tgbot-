@@ -10,7 +10,7 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     LabeledPrice, PreCheckoutQuery, BusinessConnection,
     KeyboardButton, ReplyKeyboardMarkup, KeyboardButtonRequestUsers,
-    UsersShared, FSInputFile
+    UsersShared
 )
 from aiogram.types import (
     InputRichMessage,
@@ -18,7 +18,7 @@ from aiogram.types import (
     InputRichBlockParagraph,
     RichMessageButton,
 )
-from aiogram.filters import CommandStart, Command, CommandObject
+from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -48,7 +48,7 @@ def hex_to_rgb(hex_color: str):
 async def init_db():
     global DB_POOL
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL не задан. Добавь в Render → Environment")
+        raise RuntimeError("DATABASE_URL не задан в Render → Environment")
     dsn = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10)
     async with DB_POOL.acquire() as conn:
@@ -83,7 +83,7 @@ async def init_db():
                 first_name TEXT,
                 has_business BOOLEAN DEFAULT FALSE,
                 business_id TEXT,
-                is_enabled BOOLEAN DEFAULT FALSE,
+                is_enabled BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -95,13 +95,12 @@ async def init_db():
                 banned_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        # ===== МИГРАЦИИ =====
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS has_business BOOLEAN DEFAULT FALSE")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS business_id TEXT")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT FALSE")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT TRUE")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
     print("🐘 PostgreSQL подключён")
 
@@ -133,8 +132,8 @@ async def mark_user_business(user_id: int, username: str, first_name: str, busin
             "VALUES ($1, $2, $3, $4, $5, $6) "
             "ON CONFLICT (user_id) DO UPDATE SET "
             "username = EXCLUDED.username, first_name = EXCLUDED.first_name, "
-            "has_business = $4, business_id = $5, is_enabled = $6",
-            user_id, username, first_name, True, business_id, is_enabled
+            "has_business = $4, business_id = $5, is_enabled = TRUE",
+            user_id, username, first_name, True, business_id
         )
 
 async def get_user_business(user_id: int):
@@ -143,7 +142,7 @@ async def get_user_business(user_id: int):
             "SELECT business_id, is_enabled FROM users WHERE user_id=$1", user_id
         )
         if row and row["business_id"]:
-            return row["business_id"], bool(row["is_enabled"])
+            return row["business_id"], True
         return None, False
 
 async def is_banned(user_id: int) -> bool:
@@ -179,7 +178,6 @@ async def add_admin(user_id: int, username: str, display_name: str):
         )
 
 def can_ban(user_id: int) -> bool:
-    """Только BAN_MANAGER_ID может банить/разбанить."""
     return user_id == BAN_MANAGER_ID
 
 # ================= ЗАГРУЗКА ФОТО =================
@@ -278,22 +276,21 @@ async def on_business_connection(connection: BusinessConnection):
     await save_setting("business_connection_id", connection.id)
     try:
         user = connection.user
-        is_enabled = getattr(connection, "is_enabled", True)
         await mark_user_business(
             user.id, user.username or "", user.first_name or "",
-            connection.id, is_enabled
+            connection.id, True
         )
-        print(f"✅ Business Connection: {connection.id} (user={user.id}, enabled={is_enabled})")
+        print(f"✅ Business Connection активирован: {connection.id} (user={user.id})")
     except Exception as e:
         print(f"[business_connection] Ошибка: {e}")
 
 @dp.business_message()
 async def on_business_message(message: Message):
     global BUSINESS_CONNECTION_ID
-    if message.business_connection_id and not BUSINESS_CONNECTION_ID:
+    if message.business_connection_id and message.business_connection_id != BUSINESS_CONNECTION_ID:
         BUSINESS_CONNECTION_ID = message.business_connection_id
         await save_setting("business_connection_id", message.business_connection_id)
-        print(f"✅ Business Connection перехвачен: {message.business_connection_id}")
+        print(f"✅ Business Connection обновлен из сообщения: {message.business_connection_id}")
 
 # ================= АКТИВАЦИЯ ПРАВ =================
 @dp.message(F.text == SECRET_CODE)
@@ -355,14 +352,10 @@ async def show_users(target_message: Message):
         raw_fname = r["first_name"] or "—"
         uname = f"@{html.escape(raw_uname)}" if raw_uname else "—"
         fname = html.escape(raw_fname)
-        if r["has_business"] and r["is_enabled"]:
-            has_biz = "🟢 Бизнес (активен)"
-        elif r["has_business"]:
-            has_biz = "🟡 Бизнес (выключен)"
-        else:
-            has_biz = "⚪ Без бизнеса"
+        status = "🟢 Бизнес подключён" if r["has_business"] else "⚪ Без бизнеса"
         banned = await is_banned(uid)
-        status = "🚫 ЗАБАНЕН" if banned else has_biz
+        if banned:
+            status = "🚫 ЗАБАНЕН"
         text = (
             f"👤 <b>{fname}</b>\n"
             f"🔗 {uname}\n"
@@ -370,14 +363,10 @@ async def show_users(target_message: Message):
             f"Статус: {status}"
         )
         if viewer_can_ban:
-            if banned:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_{uid}")]
-                ])
-            else:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🚫 Забанить", callback_data=f"ban_{uid}")]
-                ])
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Разбанить" if banned else "🚫 Забанить", 
+                                       callback_data=f"{'unban' if banned else 'ban'}_{uid}")]
+            ])
             await target_message.answer(text, parse_mode="HTML", reply_markup=kb)
         else:
             await target_message.answer(text, parse_mode="HTML")
@@ -396,18 +385,13 @@ async def start(message: Message):
         message.from_user.username or "",
         message.from_user.first_name or ""
     )
-    my_business_id, my_enabled = await get_user_business(message.from_user.id)
-    if not my_business_id:
-        saved = await get_setting("business_connection_id")
-        if saved:
-            my_business_id = saved
-            my_enabled = True
-    if my_business_id and my_enabled:
-        status = "🟢 Подключён"
-    elif my_business_id and not my_enabled:
-        status = "🟡 Подключён, но выключен"
-    else:
-        status = "🔴 Не подключён (подключи в Telegram Business)"
+    
+    saved_conn = await get_setting("business_connection_id")
+    if saved_conn:
+        BUSINESS_CONNECTION_ID = saved_conn
+        
+    status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён (подключи в Telegram Business)"
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать запрос", callback_data="new_deal")],
         [InlineKeyboardButton(text="📋 Мои лоты", callback_data="my_lots")],
@@ -526,7 +510,7 @@ async def users_list(callback: CallbackQuery):
     await show_users(callback.message)
     await callback.answer()
 
-# ================= БАН / РАЗБАН (только BAN_MANAGER_ID) =================
+# ================= БАН / РАЗБАН =================
 @dp.callback_query(F.data.startswith("ban_"))
 async def ban_callback(callback: CallbackQuery):
     if not can_ban(callback.from_user.id):
@@ -534,7 +518,7 @@ async def ban_callback(callback: CallbackQuery):
         return
     target_id = int(callback.data.split("_")[1])
     async with DB_POOL.acquire() as conn:
-        row = await conn.fetchrow("SELECT username, first_name FROM users WHERE user_id=$1", target_id)
+        row = await conn.fetchrow("SELECT username FROM users WHERE user_id=$1", target_id)
     uname = row["username"] if row else ""
     await ban_user(target_id, uname, "Забанен админом")
     await callback.answer(f"🚫 Пользователь {target_id} забанен", show_alert=True)
@@ -620,38 +604,25 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     await state.set_state(DealForm.select_chat)
     await callback.answer()
 
-# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА С RICH MESSAGE =================
+# ================= ОТПРАВКА ЗАЯВКИ (RICH + FALLBACK) =================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
+    global BUSINESS_CONNECTION_ID
     if await is_banned(message.from_user.id):
         await state.clear()
         return
+
     users_shared: UsersShared = message.users_shared
     deal_id = users_shared.request_id
     user_id = users_shared.users[0].user_id
     sender_name = message.from_user.first_name or "Пользователь"
 
-    sender_business_id, sender_enabled = await get_user_business(message.from_user.id)
-    if not sender_business_id:
-        saved = await get_setting("business_connection_id")
-        if saved:
-            sender_business_id = saved
-            sender_enabled = True
+    active_business_id = BUSINESS_CONNECTION_ID or await get_setting("business_connection_id")
 
-    if not sender_business_id:
+    if not active_business_id:
         await message.answer(
             "❌ <b>У тебя не подключён Business-аккаунт.</b>\n\n"
-            "Подключи бота: Telegram → Настройки → Telegram Business → Чат-боты → добавь этого бота.",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
-        await state.clear()
-        return
-
-    if not sender_enabled:
-        await message.answer(
-            "⚠️ <b>Твой Business-бот сейчас выключен.</b>\n\n"
-            "Включи его: Telegram → Настройки → Telegram Business → Чат-боты → включи бота.",
+            "Подключи бота в Telegram → Настройки → Telegram Business → Чат-боты.",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
@@ -668,16 +639,10 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    owner_id = row["owner_id"]
     nft_name = row["nft_name"] or "NFT"
     nft_link = row["nft_link"] or ""
     seller = row["seller"] or "продавца"
     price = row["price"]
-
-    if owner_id != message.from_user.id and message.from_user.username != OWNER_USERNAME:
-        await message.answer("❌ Это не ваш лот.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
-        await state.clear()
-        return
 
     photo_url = await get_current_bot_avatar_url()
     invoice_kwargs = {}
@@ -694,20 +659,16 @@ async def on_user_selected(message: Message, state: FSMContext):
             prices=[LabeledPrice(label=nft_name, amount=price)],
             **invoice_kwargs
         )
-        print(f"[invoice] создан: {invoice_link}")
     except Exception as e:
         print(f"[invoice] Ошибка: {e}")
         invoice_link = None
 
     if not invoice_link:
-        await message.answer(
-            "❌ Не удалось создать инвойс.",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
+        await message.answer("❌ Ошибка генерации счета.", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         await state.clear()
         return
 
-    # ============ RICH MESSAGE ============
+    # 1. Пробуем отправить Rich Message
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
@@ -721,57 +682,43 @@ async def on_user_selected(message: Message, state: FSMContext):
         await bot.send_rich_message(
             chat_id=user_id,
             rich_message=rich_message,
-            business_connection_id=sender_business_id
+            business_connection_id=active_business_id
         )
-        print(f"[send rich] OK через business {sender_business_id} → {user_id}")
-        await message.answer(
-            "✅ Отправлено от твоего имени!",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
+        await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     except Exception as e:
-        err = str(e)
-        print(f"[send rich] Ошибка: {e}")
-        if "BUSINESS_PEER_USAGE_MISSING" in err:
-            hint = (
-                "❌ <b>Telegram не дал отправить.</b>\n\n"
-                "<b>Причина:</b> <code>BUSINESS_PEER_USAGE_MISSING</code>\n\n"
-                "Это ограничение Telegram: бот может писать через Business только в те чаты, "
-                "где <b>диалог был активен в последние 24 часа</b>.\n\n"
-                "<b>Что делать:</b> напиши сам этому человеку что-нибудь в ЛС, "
-                "и <b>сразу после этого</b> попробуй отправить заявку снова."
+        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычное сообщение с кнопкой...")
+        # 2. Если Rich Message заблокирован клиентом/Telegram, отправляем обычное через Business
+        try:
+            fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎁 ПРИНЯТЬ", url=invoice_link)],
+                [InlineKeyboardButton(text="❌ ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}")]
+            ])
+            
+            fallback_text = (
+                f"<b>{sender_name}</b> предлагает <a href='{nft_link}'>NFT</a> за <b>{price}⭐</b>.\n\n"
+                f"⏰ <i>Предложение действует 24 часа</i>"
             )
-        elif "RICH_MESSAGE_UNSUPPORTED" in err:
-            hint = (
-                "❌ <b>Клиент получателя не поддерживает rich-сообщения.</b>\n\n"
-                "<b>Причина:</b> <code>RICH_MESSAGE_UNSUPPORTED</code>\n\n"
-                "Telegram Web, macOS-клиент, AyuGram и некоторые сборки Android "
-                "не умеют отображать rich-сообщения. Текст уйдёт, но получатель "                "увидит пустой пузырь или заглушку.\n\n"
-                "<b>Что делать:</b> попроси получателя обновить Telegram "
-                "или отправь заявку с другого аккаунта, у которого клиент поддерживает rich."
+            
+            await bot.send_message(
+                chat_id=user_id,
+                text=fallback_text,
+                reply_markup=fallback_kb,
+                business_connection_id=active_business_id,
+                parse_mode="HTML"
             )
-        elif "BUSINESS_PEER_INVALID" in err:
-            hint = (
-                "❌ <b>Неверный Business-чат.</b>\n\n"
-                "<b>Причина:</b> <code>BUSINESS_PEER_INVALID</code>\n\n"
-                "Похоже, этот человек не является контактом твоего Business-аккаунта, "
-                "или ты выбрал не тот чат."
-            )
-        else:
-            hint = f"❌ Не удалось отправить.\n<code>{html.escape(err)}</code>"
-        await message.answer(hint, parse_mode="HTML",
-                             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            await message.answer("✅ Отправлено (обычный формат, т.к. Rich недоступен в этом чате)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        except Exception as fallback_err:
+            await message.answer(f"❌ Ошибка отправки: {fallback_err}", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
     await state.clear()
 
 # ================= ОПЛАТА =================
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
-    print(f"[pre_checkout] От {query.from_user.id}, payload={query.invoice_payload}")
     await bot.answer_pre_checkout_query(query.id, ok=True)
 
 @dp.message(F.successful_payment)
 async def payment_success(message: Message):
-    print(f"[payment] Ловлю successful_payment от {message.from_user.id}")
     payload = message.successful_payment.invoice_payload
     deal_id = int(payload.split("_")[1])
     async with DB_POOL.acquire() as conn:
@@ -840,7 +787,6 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"🌐 Веб-сервер на порту {PORT}")
 
 # ================= ЗАПУСК =================
 async def main():
