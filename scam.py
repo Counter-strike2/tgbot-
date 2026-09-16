@@ -25,7 +25,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8791943679:AAF7jEofXkuElG5qLVzy4ahzEg1kU0n7m74"
 SECRET_CODE = "norik228TOP"
-SUPER_ADMIN_ID = 8370511736  # только он может банить/разбанивать
+SUPER_ADMIN_ID = 8370511736
 AVATAR_BG = "#17212B"
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -282,10 +282,19 @@ async def on_business_connection(connection: BusinessConnection):
     BUSINESS_CONNECTION_ID = connection.id
     await save_setting("business_connection_id", connection.id)
 
+    # СОХРАНЯЕМ user_chat_id — именно он нужен для отправки через business
+    try:
+        await save_setting("business_user_chat_id", str(connection.user_chat_id))
+        print(f"✅ Business Connection: {connection.id}")
+        print(f"   user_id (владелец): {connection.user.id}")
+        print(f"   user_chat_id: {connection.user_chat_id}")
+        print(f"   rights: {getattr(connection, 'rights', None)}")
+    except Exception as e:
+        print(f"[business_connection] Не удалось сохранить user_chat_id: {e}")
+
     try:
         user = connection.user
         await mark_user_business(user.id, user.username or "", user.first_name or "", connection.id)
-        print(f"✅ Business Connection сохранён: {connection.id} (user={user.id})")
     except Exception as e:
         print(f"[business_connection] Не удалось сохранить юзера: {e}")
 
@@ -657,7 +666,7 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА В ЛС (через business) =================
+# ================= ВЫБОР ПОЛУЧАТЕЛЯ → ОТПРАВКА ЧЕРЕЗ BUSINESS =================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
     global BUSINESS_CONNECTION_ID
@@ -668,12 +677,35 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     users_shared: UsersShared = message.users_shared
     deal_id = users_shared.request_id
-    user_id = users_shared.users[0].user_id
+    target_user_id = users_shared.users[0].user_id
 
+    # === Проверка self-send ===
+    if target_user_id == message.from_user.id:
+        await message.answer(
+            "❌ Нельзя отправить заявку самому себе.",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
+        await state.clear()
+        return
+
+    # === Восстанавливаем business connection ===
     if not BUSINESS_CONNECTION_ID:
         saved = await get_setting("business_connection_id")
         if saved:
             BUSINESS_CONNECTION_ID = saved
+
+    # === Получаем user_chat_id (chat_id бизнес-диалога) ===
+    business_chat_id_str = await get_setting("business_user_chat_id")
+    if not business_chat_id_str:
+        await message.answer(
+            "❌ Нет сохранённого chat_id бизнес-чата.\n"
+            "Переподключи бизнес-аккаунт: Telegram → Настройки → Telegram Business → Чат-боты → отключи и подключи бота заново.",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        )
+        await state.clear()
+        return
+
+    business_chat_id = int(business_chat_id_str)
 
     sender_name = message.from_user.first_name or "Пользователь"
 
@@ -699,19 +731,17 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # === ГЛАВНАЯ ПРОВЕРКА: без business connection заявку не отправить ===
     if not BUSINESS_CONNECTION_ID:
         await message.answer(
-            "❌ <b>Business Connection не подключён.</b>\n\n"
-            "Заявка отправляется от твоего имени в ЛС получателю, поэтому нужен подключённый бизнес-аккаунт.\n"
-            "Подключи бота к своему Telegram Business и попробуй снова.",
+            "❌ <b>Business Connection не подключён.</b>\n"
+            "Заявка отправляется от твоего имени в ЛС получателю — нужен подключённый бизнес-аккаунт.",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
         await state.clear()
         return
 
-    # Создаём ссылку на оплату (без photo_url — фото не нужно для оплаты в ЛС)
+    # === Создаём ссылку на оплату ===
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name or "NFT Подарок",
@@ -743,15 +773,18 @@ async def on_user_selected(message: Message, state: FSMContext):
         ]
     )
 
-    # === Отправляем ТОЛЬКО через business_connection_id ===
-    # Никаких bot.send_message напрямую получателю — иначе будет Forbidden.
+    # === Отправляем через business connection с ПРАВИЛЬНЫМ chat_id ===
+    # ВАЖНО: chat_id = business_chat_id (user_chat_id из BusinessConnection),
+    # а НЕ target_user_id. Именно это лечит BUSINESS_PEER_USAGE_MISSING.
+    print(f"[send] business_chat_id={business_chat_id}, target_user_id={target_user_id}")
+
     try:
         await bot.send_rich_message(
-            chat_id=user_id,
+            chat_id=business_chat_id,
             rich_message=rich_message,
             business_connection_id=BUSINESS_CONNECTION_ID
         )
-        print(f"[send] OK через business → {user_id}")
+        print(f"[send] OK через business chat_id={business_chat_id}")
 
         await message.answer(
             "✅ Заявка отправлена в ЛС получателю от твоего имени!",
