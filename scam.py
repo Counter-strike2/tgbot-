@@ -638,12 +638,13 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # Кнопка "ИГНОРИРОВАТЬ" — заглушка через callback
     rich_message = InputRichMessage(
         blocks=[
             InputRichBlockParagraph(text=f"{sender_name} предлагает {nft_link} За {price} звезд."),
             InputRichBlockParagraph(text="\n\nПредложение действует 24 часа"),
             InputRichBlockButtons(buttons=[RichMessageButton(text="ПРИНЯТЬ", url=invoice_link, style="success")]),
-            InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", url=f"https://t.me/{OWNER_USERNAME}", style="danger")])
+            InputRichBlockButtons(buttons=[RichMessageButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")])
         ]
     )
 
@@ -655,24 +656,30 @@ async def on_user_selected(message: Message, state: FSMContext):
         )
         await message.answer("✅ Отправлено (Rich Message)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     except Exception as e:
-        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычный инвойс...")
+        print(f"[send_rich failed] Ошибка API: {e}. Переключаюсь на обычный формат...")
         try:
-            await bot.send_invoice(
+            fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
+                [InlineKeyboardButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")]
+            ])
+            await bot.send_message(
                 chat_id=user_id,
-                title=nft_name,
-                description="NFT",
-                payload=f"deal_{deal_id}",
-                provider_token="",
-                currency="XTR",
-                prices=[LabeledPrice(label=nft_name, amount=price)],
+                text=f"<b>{sender_name}</b> предлагает <a href='{nft_link}'>NFT</a> за <b>{price} звезд</b>.\n\n<i>Предложение действует 24 часа</i>",
+                reply_markup=fallback_kb,
                 business_connection_id=active_business_id,
-                **invoice_kwargs
+                parse_mode="HTML"
             )
-            await message.answer("✅ Отправлено (счёт в чат)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+            await message.answer("✅ Отправлено (обычный формат)!", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         except Exception as fallback_err:
             await message.answer(f"❌ Ошибка отправки: {fallback_err}", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
 
     await state.clear()
+
+
+# ================= ЗАГЛУШКА ДЛЯ "ИГНОРИРОВАТЬ" =================
+@dp.callback_query(F.data == "ignore_button")
+async def ignore_button(callback: CallbackQuery):
+    await callback.answer()
 
 # ================= ОПЛАТА =================
 @dp.pre_checkout_query()
