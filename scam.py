@@ -19,13 +19,12 @@ from aiogram.types import (
     InputRichBlockParagraph,
     RichMessageButton,
 )
-# Пытаемся импортировать фото-блок (имя зависит от версии aiogram)
 try:
-    from aiogram.types import InputRichBlockPhoto  # aiogram >= 3.22
+    from aiogram.types import InputRichBlockPhoto
 except Exception:
     InputRichBlockPhoto = None
 try:
-    from aiogram.types import InputRichBlockImage  # альтернативное имя
+    from aiogram.types import InputRichBlockImage
 except Exception:
     InputRichBlockImage = None
 
@@ -316,15 +315,11 @@ async def upload_photo(file_path: str):
     return await upload_to_catbox(file_path)
 
 
-# ================= АВАТАРКА БОТА (из BotFather, не пользователя) =================
+# ================= АВАТАРКА БОТА =================
 _BOT_AVATAR_URL_CACHE = None
 
 
 async def get_current_bot_avatar_url(force_refresh: bool = False):
-    """
-    Берёт аватарку БОТА (которая установлена в BotFather),
-    грузит её на telegra.ph/catbox, кэширует в памяти + в settings.
-    """
     global _BOT_AVATAR_URL_CACHE
     if _BOT_AVATAR_URL_CACHE and not force_refresh:
         return _BOT_AVATAR_URL_CACHE
@@ -339,7 +334,7 @@ async def get_current_bot_avatar_url(force_refresh: bool = False):
         me = await bot.get_me()
         photos = await bot.get_user_profile_photos(user_id=me.id, limit=1)
         if not photos.total_count or not photos.photos:
-            print("[avatar] У бота нет установленной аватарки в BotFather.")
+            print("[avatar] У бота нет аватарки в BotFather.")
             return None
         sizes = photos.photos[0]
         file_id = sizes[-1].file_id
@@ -362,7 +357,6 @@ async def get_current_bot_avatar_url(force_refresh: bool = False):
 
 
 def _build_photo_block(url: str):
-    """Создаёт фото-блок для rich-сообщения с учётом доступного класса в aiogram."""
     if InputRichBlockPhoto is not None:
         try:
             return InputRichBlockPhoto(photo=url)
@@ -443,7 +437,6 @@ async def activate_admin(message: Message):
     )
 
 
-# ================= КОМАНДА ОБНОВИТЬ АВАТАРКУ БОТА =================
 @dp.message(F.text == "/refresh_avatar")
 async def refresh_avatar(message: Message):
     if not await is_admin(message.from_user.id, message.from_user.username):
@@ -458,7 +451,7 @@ async def refresh_avatar(message: Message):
         )
 
 
-# ================= ХЕЛПЕР: ПОКАЗАТЬ ЛОТЫ =================
+# ================= ХЕЛПЕР: ЛОТЫ =================
 async def show_lots(target_message: Message, owner_id: int):
     async with DB_POOL.acquire() as conn:
         rows = await conn.fetch(
@@ -484,7 +477,7 @@ async def show_lots(target_message: Message, owner_id: int):
         )
 
 
-# ================= ХЕЛПЕР: ПОКАЗАТЬ ЮЗЕРОВ =================
+# ================= ХЕЛПЕР: ЮЗЕРЫ =================
 async def show_users(target_message: Message):
     async with DB_POOL.acquire() as conn:
         rows = await conn.fetch(
@@ -544,7 +537,7 @@ async def start(message: Message):
     if saved_conn:
         BUSINESS_CONNECTION_ID = saved_conn
 
-    status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён (подключи в Telegram Business)"
+    status = "🟢 Подключён" if BUSINESS_CONNECTION_ID else "🔴 Не подключён"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать запрос", callback_data="new_deal")],
@@ -767,7 +760,7 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ================= ХЕЛПЕР: определение business-ошибки =================
+# ================= ХЕЛПЕР: business-ошибка =================
 def _is_business_peer_missing(err: Exception) -> bool:
     s = str(err).lower()
     return ("business_peer_usage_missing" in s
@@ -819,6 +812,9 @@ async def on_user_selected(message: Message, state: FSMContext):
     peer_known = await is_known_peer(active_business_id, user_id)
     print(f"[send] peer={user_id} known={peer_known} conn={active_business_id}")
 
+    # ===== ВАЖНО: счёт создаём БЕЗ business_connection_id =====
+    # Тогда в окне подтверждения оплаты Telegram покажет АВАТАРКУ БОТА,
+    # а не аватарку бизнес-аккаунта.
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
@@ -827,7 +823,6 @@ async def on_user_selected(message: Message, state: FSMContext):
             provider_token="",
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
-            business_connection_id=active_business_id,
         )
     except Exception as e:
         print(f"[invoice_link] Ошибка: {e}")
@@ -839,7 +834,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # --- АВАТАРКА БОТА (не профиля!) ---
+    # --- Аватарка бота в шапке rich-сообщения ---
     bot_avatar_url = await get_current_bot_avatar_url()
 
     blocks = []
@@ -865,7 +860,6 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     sent_ok = False
 
-    # ---- Если peer известен — шлём через бизнес (гарантированно) ----
     if peer_known:
         try:
             await bot.send_rich_message(
@@ -902,7 +896,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         except Exception as e:
             print(f"[Business/known peer] Ошибка: {e}")
 
-    # ---- Peer неизвестен: пробуем бизнес → если ошибка → обычный бот ----
     if not sent_ok:
         try:
             await bot.send_rich_message(
@@ -949,9 +942,7 @@ async def on_user_selected(message: Message, state: FSMContext):
                     sent_ok = True
                     await message.answer(
                         "⚠️ Этот получатель ещё <b>не писал</b> в твой бизнес-аккаунт — "
-                        "сообщение отправлено от имени обычного бота.\n\n"
-                        "Если хочешь отправлять от бизнес-аккаунта — попроси получателя написать "
-                        "тебе хотя бы одно сообщение в business-чат.",
+                        "сообщение отправлено от имени обычного бота.",
                         parse_mode="HTML",
                         reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
                     )
