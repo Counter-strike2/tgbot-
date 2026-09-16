@@ -222,7 +222,10 @@ async def upload_to_telegraph(file_path: str):
                 data = aiohttp.FormData()
                 data.add_field("file", f, filename="img.jpg", content_type="image/jpeg")
                 async with session.post(url, data=data) as resp:
+                    print(f"[telegra.ph] status={resp.status}")
                     if resp.status != 200:
+                        text = await resp.text()
+                        print(f"[telegra.ph] body={text[:200]}")
                         return None
                     result = await resp.json()
                     if isinstance(result, list) and result and "src" in result[0]:
@@ -234,24 +237,65 @@ async def upload_to_telegraph(file_path: str):
 async def upload_to_catbox(file_path: str):
     url = "https://catbox.moe/user/api.php"
     try:
+        headers = {"User-Agent": "Mozilla/5.0 (Bot)"}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
             with open(file_path, "rb") as f:
                 data = aiohttp.FormData()
                 data.add_field("reqtype", "fileupload")
                 data.add_field("fileToUpload", f, filename="img.jpg", content_type="image/jpeg")
-                async with session.post(url, data=data) as resp:
+                async with session.post(url, data=data, headers=headers) as resp:
                     text = (await resp.text()).strip()
+                    print(f"[catbox] status={resp.status} body={text[:200]}")
                     if text.startswith("http"):
                         return text
     except Exception as e:
         print(f"[catbox] Ошибка: {e}")
     return None
 
+async def upload_to_0x0(file_path: str):
+    url = "https://0x0.st"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            with open(file_path, "rb") as f:
+                data = aiohttp.FormData()
+                data.add_field("file", f, filename="img.jpg", content_type="image/jpeg")
+                async with session.post(url, data=data, headers=headers) as resp:
+                    text = (await resp.text()).strip()
+                    print(f"[0x0.st] status={resp.status} body={text[:200]}")
+                    if text.startswith("http"):
+                        return text
+    except Exception as e:
+        print(f"[0x0.st] Ошибка: {e}")
+    return None
+
+async def upload_to_tmpfiles(file_path: str):
+    url = "https://tmpfiles.org/api/v1/upload"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            with open(file_path, "rb") as f:
+                data = aiohttp.FormData()
+                data.add_field("file", f, filename="img.jpg", content_type="image/jpeg")
+                async with session.post(url, data=data, headers=headers) as resp:
+                    result = await resp.json()
+                    print(f"[tmpfiles] status={resp.status} body={result}")
+                    if isinstance(result, dict) and result.get("status") == "success":
+                        raw_url = result["data"]["url"]
+                        direct = raw_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                        return direct
+    except Exception as e:
+        print(f"[tmpfiles] Ошибка: {e}")
+    return None
+
 async def upload_photo(file_path: str):
-    link = await upload_to_telegraph(file_path)
-    if link:
-        return link
-    return await upload_to_catbox(file_path)
+    for uploader in (upload_to_telegraph, upload_to_catbox, upload_to_0x0, upload_to_tmpfiles):
+        link = await uploader(file_path)
+        if link:
+            print(f"[upload] Успех через {uploader.__name__}: {link}")
+            return link
+    print("[upload] Все хостинги не сработали")
+    return None
 
 # ================= FSM =================
 class DealForm(StatesGroup):
@@ -462,7 +506,6 @@ async def set_link(message: Message, state: FSMContext):
 async def set_photo(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
-    # Берём самую большую версию фото
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     local_path = f"nft_photo_{message.from_user.id}_{photo.file_unique_id}.jpg"
@@ -670,7 +713,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     if nft_photo:
         invoice_kwargs["photo_url"] = nft_photo
 
-    # create_invoice_link с business_connection_id и photo_url NFT
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
