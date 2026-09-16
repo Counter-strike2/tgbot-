@@ -89,6 +89,8 @@ async def init_db():
             )
         """)
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
+        await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_to BIGINT")
+        await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_at TIMESTAMP")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS has_business BOOLEAN DEFAULT FALSE")
@@ -272,7 +274,8 @@ async def activate_admin(message: Message):
 async def show_lots(target_message: Message, owner_id: int):
     async with DB_POOL.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, nft_name, price FROM deals WHERE status='pending' AND owner_id=$1 ORDER BY id DESC",
+            "SELECT id, nft_name, price FROM deals "
+            "WHERE owner_id=$1 AND status != 'archived' ORDER BY id DESC",
             owner_id
         )
     if not rows:
@@ -648,7 +651,6 @@ async def on_user_selected(message: Message, state: FSMContext):
                 [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
                 [InlineKeyboardButton(text="ИГНОРИРОВАТЬ", callback_data="ignore_button", style="danger")]
             ])
-            # Голая ссылка как текст (не "NFT" кликабельный)
             fallback_text = (
                 f"<b>{sender_name}</b> предлагает {nft_link} За <b>{price} звезд</b>.\n\n"
                 f"<i>Предложение действует 24 часа</i>"
@@ -681,8 +683,14 @@ async def pre_checkout(query: PreCheckoutQuery):
 async def payment_success(message: Message):
     payload = message.successful_payment.invoice_payload
     deal_id = int(payload.split("_")[1])
+    buyer_id = message.from_user.id
+
     async with DB_POOL.acquire() as conn:
-        await conn.execute("UPDATE deals SET status='sold' WHERE id=$1", deal_id)
+        # Лот остаётся в БД, запоминаем покупателя и дату продажи
+        await conn.execute(
+            "UPDATE deals SET sold_to=$1, sold_at=NOW() WHERE id=$2",
+            buyer_id, deal_id
+        )
         row = await conn.fetchrow(
             "SELECT owner_id, nft_name, seller, price FROM deals WHERE id=$1", deal_id
         )
@@ -691,7 +699,6 @@ async def payment_success(message: Message):
     price = row["price"] if row else message.successful_payment.total_amount
     deal_owner_id = row["owner_id"] if row else None
     buyer = message.from_user
-    buyer_id = buyer.id
     buyer_username = f"@{buyer.username}" if buyer.username else "—"
     buyer_first_name = buyer.first_name or "Покупатель"
     buyer_link = f'<a href="tg://user?id={buyer_id}">{html.escape(buyer_first_name)}</a>'
