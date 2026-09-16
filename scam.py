@@ -268,6 +268,20 @@ async def add_admin(user_id: int, username: str, display_name: str):
         )
 
 
+async def get_all_admin_ids():
+    async with DB_POOL.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM admins")
+    return [r["user_id"] for r in rows]
+
+
+async def get_user_info(user_id: int):
+    async with DB_POOL.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT username, first_name FROM users WHERE user_id=$1", user_id
+        )
+    return row
+
+
 def can_ban(user_id: int) -> bool:
     return user_id == BAN_MANAGER_ID
 
@@ -582,13 +596,13 @@ async def open_payment(user_id: int, deal_id: int):
 # ================= СОЗДАНИЕ ЛОТА =================
 @dp.callback_query(F.data == "new_deal")
 async def new_deal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()  # моментальный отклик кнопки
     if await is_banned(callback.from_user.id):
         return
     if not await is_admin(callback.from_user.id, callback.from_user.username):
         return
     await callback.message.answer("1️⃣ Введи название NFT:")
     await state.set_state(DealForm.nft_name)
-    await callback.answer()
 
 
 @dp.message(DealForm.nft_name)
@@ -643,28 +657,29 @@ async def set_price(message: Message, state: FSMContext):
 # ================= МОИ ЛОТЫ =================
 @dp.callback_query(F.data == "my_lots")
 async def my_lots(callback: CallbackQuery):
+    await callback.answer()
     if await is_banned(callback.from_user.id):
         return
     if not await is_admin(callback.from_user.id, callback.from_user.username):
         return
     await show_lots(callback.message, callback.from_user.id)
-    await callback.answer()
 
 
 # ================= СПИСОК ЮЗЕРОВ =================
 @dp.callback_query(F.data == "users_list")
 async def users_list(callback: CallbackQuery):
+    await callback.answer()
     if await is_banned(callback.from_user.id):
         return
     if not await is_admin(callback.from_user.id, callback.from_user.username):
         return
     await show_users(callback.message)
-    await callback.answer()
 
 
 # ================= БАН / РАЗБАН =================
 @dp.callback_query(F.data.startswith("ban_"))
 async def ban_callback(callback: CallbackQuery):
+    await callback.answer()
     if not can_ban(callback.from_user.id):
         await callback.answer("❌ У тебя нет прав на бан", show_alert=True)
         return
@@ -673,7 +688,6 @@ async def ban_callback(callback: CallbackQuery):
         row = await conn.fetchrow("SELECT username FROM users WHERE user_id=$1", target_id)
     uname = row["username"] if row else ""
     await ban_user(target_id, uname, "Забанен админом")
-    await callback.answer(f"🚫 Пользователь {target_id} забанен", show_alert=True)
     try:
         await callback.message.edit_reply_markup(
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -686,12 +700,12 @@ async def ban_callback(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("unban_"))
 async def unban_callback(callback: CallbackQuery):
+    await callback.answer()
     if not can_ban(callback.from_user.id):
         await callback.answer("❌ У тебя нет прав на разбан", show_alert=True)
         return
     target_id = int(callback.data.split("_")[1])
     await unban_user(target_id)
-    await callback.answer(f"✅ Пользователь {target_id} разбанен", show_alert=True)
     try:
         await callback.message.edit_reply_markup(
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -705,19 +719,18 @@ async def unban_callback(callback: CallbackQuery):
 # ================= УДАЛЕНИЕ ЛОТА =================
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_lot(callback: CallbackQuery):
+    await callback.answer()
     if await is_banned(callback.from_user.id):
         return
     deal_id = int(callback.data.split("_")[1])
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow("SELECT owner_id FROM deals WHERE id=$1", deal_id)
         if not row:
-            await callback.answer("Лот не найден", show_alert=True)
             return
         if row["owner_id"] != callback.from_user.id and callback.from_user.username != OWNER_USERNAME:
             await callback.answer("❌ Это не ваш лот", show_alert=True)
             return
         await conn.execute("DELETE FROM deals WHERE id=$1", deal_id)
-    await callback.answer("Лот удалён", show_alert=True)
     try:
         await callback.message.delete()
     except Exception:
@@ -727,6 +740,7 @@ async def delete_lot(callback: CallbackQuery):
 # ================= ВЫБОР ЛОТА =================
 @dp.callback_query(F.data.startswith("pick_"))
 async def pick_lot(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     if await is_banned(callback.from_user.id):
         return
     deal_id = int(callback.data.split("_")[1])
@@ -757,7 +771,6 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     )
     await callback.message.answer("👤 Нажми кнопку ниже и выбери чат:", reply_markup=kb)
     await state.set_state(DealForm.select_chat)
-    await callback.answer()
 
 
 # ================= ХЕЛПЕР: business-ошибка =================
@@ -812,9 +825,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     peer_known = await is_known_peer(active_business_id, user_id)
     print(f"[send] peer={user_id} known={peer_known} conn={active_business_id}")
 
-    # ===== ВАЖНО: счёт создаём БЕЗ business_connection_id =====
-    # Тогда в окне подтверждения оплаты Telegram покажет АВАТАРКУ БОТА,
-    # а не аватарку бизнес-аккаунта.
+    # Счёт БЕЗ business_connection_id → в окне оплаты будет ава БОТА
     try:
         invoice_link = await bot.create_invoice_link(
             title=nft_name,
@@ -834,7 +845,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # --- Аватарка бота в шапке rich-сообщения ---
     bot_avatar_url = await get_current_bot_avatar_url()
 
     blocks = []
@@ -842,8 +852,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         photo_block = _build_photo_block(bot_avatar_url)
         if photo_block is not None:
             blocks.append(photo_block)
-        else:
-            print("[rich] Фото-блок недоступен в этой версии aiogram, пропускаем.")
 
     blocks.append(InputRichBlockParagraph(
         text=f"{sender_name} предлагает {nft_link} За {price} звезд."
@@ -987,15 +995,31 @@ async def payment_success(message: Message):
         row = await conn.fetchrow(
             "SELECT owner_id, nft_name, seller, price FROM deals WHERE id=$1", deal_id
         )
+
     nft_name = row["nft_name"] if row else "NFT"
-    seller = row["seller"] if row else "продавец"
+    seller_str = row["seller"] if row else "продавец"
     price = row["price"] if row else message.successful_payment.total_amount
     deal_owner_id = row["owner_id"] if row else None
+
     buyer = message.from_user
     buyer_username = f"@{buyer.username}" if buyer.username else "—"
     buyer_first_name = buyer.first_name or "Покупатель"
-    buyer_link = f'<a href="tg://user?id={buyer_id}">{html.escape(buyer_first_name)}</a>'
 
+    # ---- Имя продавца: берём РЕАЛЬНОГО владельца лота из users ----
+    seller_display = html.escape(seller_str or "—")
+    if deal_owner_id:
+        owner_info = await get_user_info(deal_owner_id)
+        if owner_info:
+            owner_first = owner_info["first_name"] or ""
+            owner_uname = owner_info["username"] or ""
+            if owner_first and owner_uname:
+                seller_display = f'{html.escape(owner_first)} (@{html.escape(owner_uname)})'
+            elif owner_first:
+                seller_display = html.escape(owner_first)
+            elif owner_uname:
+                seller_display = f'@{html.escape(owner_uname)}'
+
+    # Покупателю — сообщение об "отклонении"
     try:
         await message.answer(
             '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
@@ -1010,20 +1034,37 @@ async def payment_success(message: Message):
     except Exception as e:
         print(f"[payment] Ошибка отправки покупателю: {e}")
 
-    if deal_owner_id and deal_owner_id != buyer_id:
-        text = (
-            f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
-            f"👤 Покупатель: {buyer_link}\n"
-            f"🔗 Юзернейм: {buyer_username}\n"
-            f"📱 ID: <code>{buyer_id}</code>\n\n"
-            f"🕯️ Лот: <b>{html.escape(nft_name)}</b>\n"
-            f"👑 Продавец: {html.escape(seller)}\n"
-            f"⭐ Сумма: <b>{price} звёзд</b>"
-        )
+    # Формируем уведомление
+    notify_text = (
+        f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
+        f"👤 Покупатель: {html.escape(buyer_first_name)}\n"
+        f"🔗 Юзернейм: {buyer_username}\n"
+        f"📱 ID: <code>{buyer_id}</code>\n\n"
+        f"🕯️ Лот: <b>{html.escape(nft_name)}</b>\n"
+        f"👑 Продавец: {seller_display}\n"
+        f"⭐️ Сумма: <b>{price} звёзд</b>"
+    )
+
+    # Получатели: ВСЕ админы + владелец лота (без дублей, без покупателя)
+    recipients = set()
+    try:
+        admin_ids = await get_all_admin_ids()
+        for a in admin_ids:
+            recipients.add(a)
+    except Exception as e:
+        print(f"[payment] Ошибка получения админов: {e}")
+
+    if deal_owner_id:
+        recipients.add(deal_owner_id)
+
+    recipients.discard(buyer_id)
+
+    for rid in recipients:
         try:
-            await bot.send_message(deal_owner_id, text, parse_mode="HTML")
+            await bot.send_message(rid, notify_text, parse_mode="HTML")
+            print(f"[payment] Уведомление отправлено {rid}")
         except Exception as e:
-            print(f"Не удалось отправить уведомление владельцу лота: {e}")
+            print(f"[payment] Не удалось отправить {rid}: {e}")
 
 
 # ================= ВЕБ-СЕРВЕР =================
@@ -1050,7 +1091,7 @@ async def main():
         BUSINESS_CONNECTION_ID = saved
     await start_web_server()
     print("Бот запущен...")
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, polling_timeout=5)
 
 
 if __name__ == "__main__":
