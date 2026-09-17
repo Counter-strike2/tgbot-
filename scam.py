@@ -1069,12 +1069,15 @@ async def process_successful_payment(message: Message):
             "SELECT owner_id, nft_name, seller, price FROM deals WHERE id=$1", deal_id
         )
         # Ищем того, кто реально отправил лот (из send_log)
+        # Убрали условие recipient_id, чтобы найти отправителя, даже если ID получателя не совпал
         log_row = await conn.fetchrow(
             "SELECT sender_id, sender_username FROM send_log "
-            "WHERE deal_id = $1 AND recipient_id = $2 "
+            "WHERE deal_id = $1 "
             "ORDER BY sent_at DESC LIMIT 1",
-            deal_id, buyer_id
+            deal_id
         )
+
+    print(f"[payment] log_row={log_row}")
 
     nft_name = row["nft_name"] if row else "NFT"
     seller_str = row["seller"] if row else "продавец"
@@ -1083,19 +1086,22 @@ async def process_successful_payment(message: Message):
 
     buyer_username = f"@{buyer.username}" if buyer.username else "—"
     buyer_first_name = buyer.first_name or "Покупатель"
-    
+
     # Делаем покупателя кликабельным
-    buyer_link = f'<a href="tg://user?id={buyer.id}">{html.escape(buyer_first_name)}</a>'
+    if buyer.username:
+        buyer_link = f'<a href="tg://user?id={buyer.id}">{html.escape(buyer_first_name)}</a> (@{html.escape(buyer.username)})'
+    else:
+        buyer_link = f'<a href="tg://user?id={buyer.id}">{html.escape(buyer_first_name)}</a>'
 
     # Определяем продавца
     seller_display = html.escape(seller_str or "—")
-    
+
     # Приоритет 1: Тот, кто отправил лот (из send_log)
     if log_row:
         sender_id = log_row["sender_id"]
         sender_uname = log_row["sender_username"] or ""
         sender_info = await get_user_info(sender_id)
-        
+
         if sender_info:
             sender_first = sender_info["first_name"] or ""
             if sender_first and sender_uname:
@@ -1111,7 +1117,7 @@ async def process_successful_payment(message: Message):
                 seller_display = f'<a href="tg://user?id={sender_id}">@{html.escape(sender_uname)}</a>'
             else:
                 seller_display = f'<a href="tg://user?id={sender_id}">ID: {sender_id}</a>'
-    
+
     # Приоритет 2: Владелец лота (если нет логов отправки)
     elif deal_owner_id:
         owner_info = await get_user_info(deal_owner_id)
