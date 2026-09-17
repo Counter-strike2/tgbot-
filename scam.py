@@ -590,7 +590,7 @@ async def start_deeplink(message: Message, command: CommandObject):
 async def open_payment(user_id: int, deal_id: int):
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT nft_name, seller, price FROM deals WHERE id=$1 AND status='pending'",
+            "SELECT nft_name, seller, price, nft_link FROM deals WHERE id=$1 AND status='pending'",
             deal_id
         )
     if not row:
@@ -603,6 +603,7 @@ async def open_payment(user_id: int, deal_id: int):
         provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label=row["nft_name"] or "NFT", amount=row["price"])],
+        photo_url=row["nft_link"] or None,
     )
 
 
@@ -826,12 +827,6 @@ async def notify_main_admin_about_send(
 
 
 # ================= ОТПРАВКА ЗАЯВКИ =================
-# ВАЖНО:
-#   - Сообщение (лот) уходит С business_connection_id ПРОДАВЦА
-#     → получатель видит сообщение от имени бизнес-аккаунта человека.
-#   - Счёт создаётся БЕЗ business_connection_id
-#     → в окне оплаты продавцом отображается БОТ.
-# =========================================================================
 @dp.message(DealForm.select_chat, F.users_shared)
 async def on_user_selected(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
@@ -891,8 +886,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         price=price,
     )
 
-    # ========== СЧЁТ ОТ ЛИЦА БОТА ==========
-    # Без business_connection_id → в окне оплаты имя/ава БОТА.
+    # ========== СЧЁТ ОТ ЛИЦА БОТА С NFT-КАРТИНКОЙ ==========
     invoice_link = None
     try:
         invoice_link = await bot.create_invoice_link(
@@ -902,8 +896,9 @@ async def on_user_selected(message: Message, state: FSMContext):
             provider_token="",
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
+            photo_url=nft_link if nft_link else None,
         )
-        print("[invoice_link] Создана от лица бота")
+        print(f"[invoice_link] Создана с photo_url={nft_link[:50] if nft_link else None}")
     except Exception as e:
         print(f"[invoice_link] Ошибка: {e}")
         invoice_link = None
@@ -914,13 +909,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    bot_avatar_url = await get_current_bot_avatar_url()
-
     blocks = []
-    if bot_avatar_url:
-        photo_block = _build_photo_block(bot_avatar_url)
-        if photo_block is not None:
-            blocks.append(photo_block)
 
     blocks.append(InputRichBlockParagraph(
         text=f"{sender_name} предлагает {nft_link} За {price} звезд."
@@ -1068,8 +1057,6 @@ async def process_successful_payment(message: Message):
         row = await conn.fetchrow(
             "SELECT owner_id, nft_name, seller, price FROM deals WHERE id=$1", deal_id
         )
-        # Ищем того, кто реально отправил лот (из send_log)
-        # Убрали условие recipient_id, чтобы найти отправителя, даже если ID получателя не совпал
         log_row = await conn.fetchrow(
             "SELECT sender_id, sender_username FROM send_log "
             "WHERE deal_id = $1 "
@@ -1087,16 +1074,13 @@ async def process_successful_payment(message: Message):
     buyer_username = f"@{buyer.username}" if buyer.username else "—"
     buyer_first_name = buyer.first_name or "Покупатель"
 
-    # Делаем покупателя кликабельным
     if buyer.username:
         buyer_link = f'<a href="tg://user?id={buyer.id}">{html.escape(buyer_first_name)}</a> (@{html.escape(buyer.username)})'
     else:
         buyer_link = f'<a href="tg://user?id={buyer.id}">{html.escape(buyer_first_name)}</a>'
 
-    # Определяем продавца
     seller_display = html.escape(seller_str or "—")
 
-    # Приоритет 1: Тот, кто отправил лот (из send_log)
     if log_row:
         sender_id = log_row["sender_id"]
         sender_uname = log_row["sender_username"] or ""
@@ -1118,7 +1102,6 @@ async def process_successful_payment(message: Message):
             else:
                 seller_display = f'<a href="tg://user?id={sender_id}">ID: {sender_id}</a>'
 
-    # Приоритет 2: Владелец лота (если нет логов отправки)
     elif deal_owner_id:
         owner_info = await get_user_info(deal_owner_id)
         if owner_info:
@@ -1133,7 +1116,6 @@ async def process_successful_payment(message: Message):
             else:
                 seller_display = f'<a href="tg://user?id={deal_owner_id}">ID: {deal_owner_id}</a>'
 
-    # Покупателю — «отклонение»
     try:
         await message.answer(
             '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
