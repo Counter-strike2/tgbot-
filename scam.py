@@ -345,7 +345,8 @@ async def upload_photo(file_path: str):
 
 
 # ================= КРУГЛАЯ КАРТИНКА =================
-CIRCLE_BG_COLOR = (23, 33, 43, 255)  # #17212b — стандартный фон тёмной темы
+# Тот цвет, который ты взял с телефона
+CIRCLE_BG_COLOR = (79, 72, 175, 255)  # #4f48af
 
 
 def make_circle(input_path: str, output_path: str, size: int = 512):
@@ -936,7 +937,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     )
 
     # ========== СЧЁТ ОТ ИМЕНИ БИЗНЕС-АККАУНТА ==========
-    # business_connection_id → внизу плашки будет имя БИЗНЕС-АККАУНТА (не бота)
     invoice_link = None
     try:
         invoice_link = await bot.create_invoice_link(
@@ -952,7 +952,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         print(f"[invoice_link] Создана через business_connection_id={active_business_id}")
     except Exception as e:
         print(f"[invoice_link] Ошибка с business_connection_id: {e}")
-        # фолбэк — без business_connection_id, но с photo_url
         try:
             invoice_link = await bot.create_invoice_link(
                 title=nft_name,
