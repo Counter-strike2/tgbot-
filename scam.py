@@ -6,6 +6,7 @@ import html
 import ssl
 import urllib.parse
 from aiohttp import web
+from PIL import Image, ImageDraw, ImageOps
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -43,8 +44,9 @@ BAN_MANAGER_ID = 5825717381
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-# Premium emoji ID для ⭐
 STAR_EMOJI_ID = "5447644880824181073"
+
+CIRCLE_BG_COLOR = (33, 45, 59, 255)  # #212d3b
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -80,7 +82,7 @@ async def init_db():
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10, ssl=ssl_ctx)
+    DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=2, max_size=20, ssl=ssl_ctx)
 
     async with DB_POOL.acquire() as conn:
         await conn.execute("""
@@ -276,7 +278,6 @@ async def add_admin(user_id: int, username: str, display_name: str):
 
 
 async def get_all_admin_ids():
-    """Все админы: из БД + BAN_MANAGER_ID + владелец (ищется в users)."""
     ids = set()
     try:
         async with DB_POOL.acquire() as conn:
@@ -290,7 +291,6 @@ async def get_all_admin_ids():
     if BAN_MANAGER_ID:
         ids.add(BAN_MANAGER_ID)
 
-    # Владелец — ищем в users по username
     try:
         async with DB_POOL.acquire() as conn:
             row = await conn.fetchrow(
@@ -330,11 +330,68 @@ async def log_send(sender_id: int, sender_username: str, recipient_id: int,
         )
 
 
+# ================= ЗАГРУЗКА ФОТО =================
+async def upload_to_catbox(file_path: str):
+    url = "https://catbox.moe/user/api.php"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            with open(file_path, "rb") as f:
+                data = aiohttp.FormData()
+                data.add_field("reqtype", "fileupload")
+                data.add_field("fileToUpload", f, filename="img.png", content_type="image/png")
+                async with session.post(url, data=data) as resp:
+                    text = (await resp.text()).strip()
+                    if text.startswith("http"):
+                        return text
+    except Exception as e:
+        print(f"[catbox] Ошибка: {e}")
+    return None
+
+
+async def upload_to_telegraph(file_path: str):
+    url = "https://telegra.ph/upload"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            with open(file_path, "rb") as f:
+                data = aiohttp.FormData()
+                data.add_field("file", f, filename="img.png", content_type="image/png")
+                async with session.post(url, data=data) as resp:
+                    if resp.status != 200:
+                        return None
+                    result = await resp.json()
+                    if isinstance(result, list) and result and "src" in result[0]:
+                        return "https://telegra.ph" + result[0]["src"]
+    except Exception as e:
+        print(f"[telegra.ph] Ошибка: {e}")
+    return None
+
+
+async def upload_photo(file_path: str):
+    link = await upload_to_catbox(file_path)
+    if link:
+        return link
+    return await upload_to_telegraph(file_path)
+
+
+def make_circle(input_path: str, output_path: str, size: int = 512):
+    img = Image.open(input_path).convert("RGBA")
+    img = ImageOps.fit(img, (size, size), centering=(0.5, 0.5))
+
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((0, 0, size, size), fill=255)
+
+    result = Image.new("RGBA", (size, size), CIRCLE_BG_COLOR)
+    result.paste(img, (0, 0), mask=mask)
+    result.save(output_path, "PNG")
+    return output_path
+
+
 # ================= FSM =================
 class DealForm(StatesGroup):
     nft_name = State()
+    nft_photo = State()
     nft_link = State()
-    seller = State()
     price = State()
     select_chat = State()
 
@@ -349,7 +406,6 @@ async def on_business_connection(connection: BusinessConnection):
         user = connection.user
         await save_user(user.id, user.username or "", user.first_name or "")
         await save_business_connection(user.id, connection.id)
-        # Если это владелец — добавляем в админы
         if (user.username or "").lower() == OWNER_USERNAME.lower():
             await add_admin(user.id, user.username or "", user.first_name or "Владелец")
             print(f"[business_connection] Владелец добавлен в admins: {user.id}")
@@ -380,7 +436,6 @@ async def on_business_message(message: Message):
                 message.from_user.username or "",
                 message.from_user.first_name or ""
             )
-            # Если это владелец — добавляем в админы
             if (message.from_user.username or "").lower() == OWNER_USERNAME.lower():
                 await add_admin(
                     message.from_user.id,
@@ -401,7 +456,6 @@ async def activate_admin(message: Message):
         message.from_user.first_name or ""
     )
     await add_admin(message.from_user.id, message.from_user.username or "", name)
-    # Если это владелец — тоже добавляем (на случай если username не совпал)
     if (message.from_user.username or "").lower() == OWNER_USERNAME.lower():
         await add_admin(message.from_user.id, message.from_user.username or "", "Владелец")
     await message.answer(
@@ -484,7 +538,6 @@ async def start(message: Message):
     if await is_banned(message.from_user.id):
         return
 
-    # Владелец автоматически получает админку
     is_owner = (message.from_user.username or "").lower() == OWNER_USERNAME.lower()
 
     if not is_owner and not await is_admin(message.from_user.id, message.from_user.username):
@@ -497,7 +550,6 @@ async def start(message: Message):
         message.from_user.first_name or ""
     )
 
-    # Автоматом сохраняем в админы — чтобы получал уведомления
     if is_owner:
         await add_admin(
             message.from_user.id,
@@ -570,8 +622,48 @@ async def set_name(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
     await state.update_data(nft_name=message.text)
-    await message.answer("2️⃣ Введи ссылку на NFT:")
+    await message.answer("2️⃣ Отправь фото NFT (картинку):")
+    await state.set_state(DealForm.nft_photo)
+
+
+@dp.message(DealForm.nft_photo, F.photo)
+async def set_photo(message: Message, state: FSMContext):
+    if await is_banned(message.from_user.id):
+        return
+    photo = message.photo[-1]
+    try:
+        file = await bot.get_file(photo.file_id)
+        raw_path = f"nft_{message.from_user.id}_{photo.file_unique_id}.jpg"
+        await bot.download_file(file.file_path, destination=raw_path)
+
+        circle_path = f"nft_{message.from_user.id}_{photo.file_unique_id}_circle.png"
+        try:
+            make_circle(raw_path, circle_path, size=512)
+        except Exception as e:
+            print(f"[make_circle] Ошибка: {e}")
+            circle_path = raw_path
+
+        url = await upload_photo(circle_path)
+
+        for p in {raw_path, circle_path}:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[set_photo] Ошибка: {e}")
+        url = None
+    if not url:
+        await message.answer("❌ Не удалось загрузить фото. Отправь ещё раз:")
+        return
+    await state.update_data(photo_url=url)
+    await message.answer("3️⃣ Введи ссылку на NFT (текстом):")
     await state.set_state(DealForm.nft_link)
+
+
+@dp.message(DealForm.nft_photo)
+async def set_photo_wrong(message: Message, state: FSMContext):
+    await message.answer("❌ Нужно отправить именно фото (картинку). Попробуй ещё раз:")
 
 
 @dp.message(DealForm.nft_link)
@@ -579,15 +671,6 @@ async def set_link(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
     await state.update_data(nft_link=message.text)
-    await message.answer("3️⃣ Введи имя продавца:")
-    await state.set_state(DealForm.seller)
-
-
-@dp.message(DealForm.seller)
-async def set_seller(message: Message, state: FSMContext):
-    if await is_banned(message.from_user.id):
-        return
-    await state.update_data(seller=message.text)
     await message.answer("4️⃣ Введи цену в звёздах:")
     await state.set_state(DealForm.price)
 
@@ -601,15 +684,27 @@ async def set_price(message: Message, state: FSMContext):
         return
     await state.update_data(price=int(message.text))
     data = await state.get_data()
+
+    # Продавец = first_name того, кто создаёт лот
+    seller_name = message.from_user.first_name or "Продавец"
+
+    # В БД храним ссылку (text link) — она идёт в сообщение.
+    # Фото (photo_url) храним в той же колонке nft_link? Нет, отдельно.
+    # Храним фото в nft_link, а текстовую ссылку — добавим в nft_name? Нет.
+    # Проще: добавим колонку photo_url в deals.
     async with DB_POOL.acquire() as conn:
+        await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS photo_url TEXT")
         row = await conn.fetchrow(
-            "INSERT INTO deals (owner_id, nft_name, nft_link, seller, price) "
-            "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            "INSERT INTO deals (owner_id, nft_name, nft_link, seller, price, photo_url) "
+            "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
             message.from_user.id, data["nft_name"], data["nft_link"],
-            data["seller"], data["price"]
+            seller_name, data["price"], data.get("photo_url")
         )
         deal_id = row["id"]
-    await message.answer(f"✅ Лот #{deal_id} создан! Выбери получателя:", parse_mode="HTML")
+    await message.answer(
+        f"✅ Лот #{deal_id} создан! (Продавец: <b>{html.escape(seller_name)}</b>)\nВыбери получателя:",
+        parse_mode="HTML"
+    )
     await show_lots(message, message.from_user.id)
     await state.clear()
 
@@ -790,7 +885,7 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT owner_id, nft_name, nft_link, seller, price FROM deals WHERE id=$1",
+            "SELECT owner_id, nft_name, nft_link, seller, price, photo_url FROM deals WHERE id=$1",
             deal_id
         )
     if not row:
@@ -803,6 +898,7 @@ async def on_user_selected(message: Message, state: FSMContext):
     nft_link = row["nft_link"] or ""
     seller = row["seller"] or "продавца"
     price = row["price"]
+    photo_url = row["photo_url"] or None
 
     try:
         await log_send(
@@ -823,7 +919,7 @@ async def on_user_selected(message: Message, state: FSMContext):
         price=price,
     )
 
-    # ========== СЧЁТ ОТ ИМЕНИ БИЗНЕС-АККАУНТА ==========
+    # photo_url → фото в плашке, nft_link → текстовая ссылка в сообщении
     invoice_link = None
     try:
         invoice_link = await bot.create_invoice_link(
@@ -833,10 +929,10 @@ async def on_user_selected(message: Message, state: FSMContext):
             provider_token="",
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
-            photo_url=nft_link if nft_link else None,
+            photo_url=photo_url,
             business_connection_id=active_business_id,
         )
-        print(f"[invoice_link] Создана через business_connection_id={active_business_id}")
+        print(f"[invoice_link] Создана через business_connection_id={active_business_id}, photo_url={photo_url}")
     except Exception as e:
         print(f"[invoice_link] Ошибка с business_connection_id: {e}")
         try:
@@ -847,7 +943,7 @@ async def on_user_selected(message: Message, state: FSMContext):
                 provider_token="",
                 currency="XTR",
                 prices=[LabeledPrice(label=nft_name, amount=price)],
-                photo_url=nft_link if nft_link else None,
+                photo_url=photo_url,
             )
             print("[invoice_link] Создана без business_connection_id (фолбэк)")
         except Exception as e2:
@@ -1063,7 +1159,6 @@ async def process_successful_payment(message: Message):
             else:
                 seller_display = f'<a href="tg://user?id={deal_owner_id}">ID: {deal_owner_id}</a>'
 
-    # ========== ТЕКСТ ПОКУПАТЕЛЮ: PREMIUM EMOJI + ЖИРНЫЙ ТЕКСТ ==========
     buyer_text = (
         f'<tg-emoji emoji-id="{STAR_EMOJI_ID}">⭐</tg-emoji> '
         f'<b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
@@ -1076,8 +1171,7 @@ async def process_successful_payment(message: Message):
     try:
         await message.answer(buyer_text, parse_mode="HTML")
     except Exception as e:
-        print(f"[payment] Ошибка отправки покупателю: {e}")
-        # Фолбэк без премиум-эмодзи
+        print(f"[payment] Ошибка premium emoji: {e}")
         try:
             await message.answer(
                 '⭐ <b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
@@ -1101,7 +1195,6 @@ async def process_successful_payment(message: Message):
         f"⭐️ Сумма: <b>{price} звёзд</b>"
     )
 
-    # ===== РАССЫЛКА ВСЕМ АДМИНАМ (все, кто ввёл секретный код + владелец + BAN_MANAGER) =====
     recipients = set()
     try:
         admin_ids = await get_all_admin_ids()
@@ -1154,7 +1247,6 @@ async def main():
     if saved:
         BUSINESS_CONNECTION_ID = saved
 
-    # При старте — пытаемся найти владельца в БД и добавить в admins
     try:
         async with DB_POOL.acquire() as conn:
             row = await conn.fetchrow(
@@ -1165,7 +1257,7 @@ async def main():
             await add_admin(row["user_id"], row["username"] or "", "Владелец")
             print(f"[startup] Владелец найден и добавлен в admins: {row['user_id']}")
         else:
-            print(f"[startup] Владелец @{OWNER_USERNAME} ещё не писал боту — добавится автоматически при /start")
+            print(f"[startup] Владелец @{OWNER_USERNAME} ещё не писал боту")
     except Exception as e:
         print(f"[startup] Ошибка добавления владельца: {e}")
 
@@ -1173,8 +1265,8 @@ async def main():
     print("Бот запущен...")
     await dp.start_polling(
         bot,
-        polling_timeout=1,
-        request_timeout=5,
+        polling_timeout=30,
+        request_timeout=30,
     )
 
 
