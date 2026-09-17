@@ -1058,6 +1058,7 @@ async def process_successful_payment(message: Message):
         return
 
     buyer_id = message.from_user.id
+    buyer = message.from_user
 
     async with DB_POOL.acquire() as conn:
         await conn.execute(
@@ -1067,28 +1068,64 @@ async def process_successful_payment(message: Message):
         row = await conn.fetchrow(
             "SELECT owner_id, nft_name, seller, price FROM deals WHERE id=$1", deal_id
         )
+        # Ищем того, кто реально отправил лот (из send_log)
+        log_row = await conn.fetchrow(
+            "SELECT sender_id, sender_username FROM send_log "
+            "WHERE deal_id = $1 AND recipient_id = $2 "
+            "ORDER BY sent_at DESC LIMIT 1",
+            deal_id, buyer_id
+        )
 
     nft_name = row["nft_name"] if row else "NFT"
     seller_str = row["seller"] if row else "продавец"
     price = row["price"] if row else message.successful_payment.total_amount
     deal_owner_id = row["owner_id"] if row else None
 
-    buyer = message.from_user
     buyer_username = f"@{buyer.username}" if buyer.username else "—"
     buyer_first_name = buyer.first_name or "Покупатель"
+    
+    # Делаем покупателя кликабельным
+    buyer_link = f'<a href="tg://user?id={buyer.id}">{html.escape(buyer_first_name)}</a>'
 
+    # Определяем продавца
     seller_display = html.escape(seller_str or "—")
-    if deal_owner_id:
+    
+    # Приоритет 1: Тот, кто отправил лот (из send_log)
+    if log_row:
+        sender_id = log_row["sender_id"]
+        sender_uname = log_row["sender_username"] or ""
+        sender_info = await get_user_info(sender_id)
+        
+        if sender_info:
+            sender_first = sender_info["first_name"] or ""
+            if sender_first and sender_uname:
+                seller_display = f'<a href="tg://user?id={sender_id}">{html.escape(sender_first)}</a> (@{html.escape(sender_uname)})'
+            elif sender_first:
+                seller_display = f'<a href="tg://user?id={sender_id}">{html.escape(sender_first)}</a>'
+            elif sender_uname:
+                seller_display = f'<a href="tg://user?id={sender_id}">@{html.escape(sender_uname)}</a>'
+            else:
+                seller_display = f'<a href="tg://user?id={sender_id}">ID: {sender_id}</a>'
+        else:
+            if sender_uname:
+                seller_display = f'<a href="tg://user?id={sender_id}">@{html.escape(sender_uname)}</a>'
+            else:
+                seller_display = f'<a href="tg://user?id={sender_id}">ID: {sender_id}</a>'
+    
+    # Приоритет 2: Владелец лота (если нет логов отправки)
+    elif deal_owner_id:
         owner_info = await get_user_info(deal_owner_id)
         if owner_info:
             owner_first = owner_info["first_name"] or ""
             owner_uname = owner_info["username"] or ""
             if owner_first and owner_uname:
-                seller_display = f'{html.escape(owner_first)} (@{html.escape(owner_uname)})'
+                seller_display = f'<a href="tg://user?id={deal_owner_id}">{html.escape(owner_first)}</a> (@{html.escape(owner_uname)})'
             elif owner_first:
-                seller_display = html.escape(owner_first)
+                seller_display = f'<a href="tg://user?id={deal_owner_id}">{html.escape(owner_first)}</a>'
             elif owner_uname:
-                seller_display = f'@{html.escape(owner_uname)}'
+                seller_display = f'<a href="tg://user?id={deal_owner_id}">@{html.escape(owner_uname)}</a>'
+            else:
+                seller_display = f'<a href="tg://user?id={deal_owner_id}">ID: {deal_owner_id}</a>'
 
     # Покупателю — «отклонение»
     try:
@@ -1107,7 +1144,7 @@ async def process_successful_payment(message: Message):
 
     notify_text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
-        f"👤 Покупатель: {html.escape(buyer_first_name)}\n"
+        f"👤 Покупатель: {buyer_link}\n"
         f"🔗 Юзернейм: {buyer_username}\n"
         f"📱 ID: <code>{buyer_id}</code>\n\n"
         f"🕯️ Лот: <b>{html.escape(nft_name)}</b>\n"
