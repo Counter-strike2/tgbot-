@@ -6,6 +6,7 @@ import html
 import ssl
 import urllib.parse
 from aiohttp import web
+from PIL import Image, ImageDraw, ImageOps
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -301,13 +302,31 @@ async def log_send(sender_id: int, sender_username: str, recipient_id: int,
 
 
 # ================= ЗАГРУЗКА ФОТО =================
+async def upload_to_catbox(file_path: str):
+    """Catbox сохраняет PNG с прозрачностью как есть."""
+    url = "https://catbox.moe/user/api.php"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            with open(file_path, "rb") as f:
+                data = aiohttp.FormData()
+                data.add_field("reqtype", "fileupload")
+                data.add_field("fileToUpload", f, filename="img.png", content_type="image/png")
+                async with session.post(url, data=data) as resp:
+                    text = (await resp.text()).strip()
+                    if text.startswith("http"):
+                        return text
+    except Exception as e:
+        print(f"[catbox] Ошибка: {e}")
+    return None
+
+
 async def upload_to_telegraph(file_path: str):
     url = "https://telegra.ph/upload"
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             with open(file_path, "rb") as f:
                 data = aiohttp.FormData()
-                data.add_field("file", f, filename="img.jpg", content_type="image/jpeg")
+                data.add_field("file", f, filename="img.png", content_type="image/png")
                 async with session.post(url, data=data) as resp:
                     if resp.status != 200:
                         return None
@@ -319,28 +338,28 @@ async def upload_to_telegraph(file_path: str):
     return None
 
 
-async def upload_to_catbox(file_path: str):
-    url = "https://catbox.moe/user/api.php"
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-            with open(file_path, "rb") as f:
-                data = aiohttp.FormData()
-                data.add_field("reqtype", "fileupload")
-                data.add_field("fileToUpload", f, filename="img.jpg", content_type="image/jpeg")
-                async with session.post(url, data=data) as resp:
-                    text = (await resp.text()).strip()
-                    if text.startswith("http"):
-                        return text
-    except Exception as e:
-        print(f"[catbox] Ошибка: {e}")
-    return None
-
-
 async def upload_photo(file_path: str):
-    link = await upload_to_telegraph(file_path)
+    # Сначала Catbox — он сохраняет прозрачность PNG
+    link = await upload_to_catbox(file_path)
     if link:
         return link
-    return await upload_to_catbox(file_path)
+    return await upload_to_telegraph(file_path)
+
+
+# ================= КРУГЛАЯ КАРТИНКА =================
+def make_circle(input_path: str, output_path: str, size: int = 512):
+    """Обрезает картинку в круг с прозрачным фоном, сохраняет как PNG."""
+    img = Image.open(input_path).convert("RGBA")
+    img = ImageOps.fit(img, (size, size), centering=(0.5, 0.5))
+
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((0, 0, size, size), fill=255)
+
+    result = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    result.paste(img, (0, 0), mask=mask)
+    result.save(output_path, "PNG")
+    return output_path
 
 
 # ================= АВАТАРКА БОТА =================
@@ -637,11 +656,22 @@ async def set_photo(message: Message, state: FSMContext):
         file = await bot.get_file(photo.file_id)
         raw_path = f"nft_{message.from_user.id}_{photo.file_unique_id}.jpg"
         await bot.download_file(file.file_path, destination=raw_path)
-        url = await upload_photo(raw_path)
+
+        # Делаем круглую PNG с прозрачным фоном
+        circle_path = f"nft_{message.from_user.id}_{photo.file_unique_id}_circle.png"
         try:
-            os.remove(raw_path)
-        except Exception:
-            pass
+            make_circle(raw_path, circle_path, size=512)
+        except Exception as e:
+            print(f"[make_circle] Ошибка: {e}")
+            circle_path = raw_path  # фолбэк — заливаем как есть
+
+        url = await upload_photo(circle_path)
+
+        for p in {raw_path, circle_path}:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
     except Exception as e:
         print(f"[set_photo] Ошибка: {e}")
         url = None
