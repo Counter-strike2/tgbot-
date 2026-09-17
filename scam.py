@@ -345,8 +345,7 @@ async def upload_photo(file_path: str):
 
 
 # ================= КРУГЛАЯ КАРТИНКА =================
-# Тот цвет, который ты взял с телефона
-CIRCLE_BG_COLOR = (79, 72, 175, 255)  # #4f48af
+CIRCLE_BG_COLOR = (33, 45, 59, 255)  # #212d3b
 
 
 def make_circle(input_path: str, output_path: str, size: int = 512):
