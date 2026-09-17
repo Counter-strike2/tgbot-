@@ -34,7 +34,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "8791943679:AAF7jEofXkuElG5qLVzy4ahzEg1kU0n7m74"
+BOT_TOKEN = "8843406221:AAGC-L5XaFDzKW_pLgm1NWlacLq4t8O0Ll0"
 OWNER_USERNAME = "NorikAmiri"
 SECRET_CODE = "norik228TOP"
 PORT = int(os.environ.get("PORT", 10000))
