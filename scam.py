@@ -303,7 +303,7 @@ async def log_send(sender_id: int, sender_username: str, recipient_id: int,
 
 # ================= ЗАГРУЗКА ФОТО =================
 async def upload_to_catbox(file_path: str):
-    """Catbox сохраняет PNG с прозрачностью как есть."""
+    """Catbox сохраняет PNG как есть, без пережатия."""
     url = "https://catbox.moe/user/api.php"
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
@@ -339,7 +339,6 @@ async def upload_to_telegraph(file_path: str):
 
 
 async def upload_photo(file_path: str):
-    # Сначала Catbox — он сохраняет прозрачность PNG
     link = await upload_to_catbox(file_path)
     if link:
         return link
@@ -347,8 +346,15 @@ async def upload_photo(file_path: str):
 
 
 # ================= КРУГЛАЯ КАРТИНКА =================
+# Цвет фона под тему Telegram (подбери под свой скрин, если не совпадает):
+#   #1c2733 — тёмно-синий (Telegram Dark)
+#   #17212b — ещё темнее
+#   #0e1621 — почти чёрный
+CIRCLE_BG_COLOR = (28, 39, 51, 255)  # #1c2733
+
+
 def make_circle(input_path: str, output_path: str, size: int = 512):
-    """Обрезает картинку в круг с прозрачным фоном, сохраняет как PNG."""
+    """Обрезает картинку в круг, заливает углы цветом фона Telegram."""
     img = Image.open(input_path).convert("RGBA")
     img = ImageOps.fit(img, (size, size), centering=(0.5, 0.5))
 
@@ -356,7 +362,7 @@ def make_circle(input_path: str, output_path: str, size: int = 512):
     draw = ImageDraw.Draw(mask)
     draw.ellipse((0, 0, size, size), fill=255)
 
-    result = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    result = Image.new("RGBA", (size, size), CIRCLE_BG_COLOR)
     result.paste(img, (0, 0), mask=mask)
     result.save(output_path, "PNG")
     return output_path
@@ -657,13 +663,12 @@ async def set_photo(message: Message, state: FSMContext):
         raw_path = f"nft_{message.from_user.id}_{photo.file_unique_id}.jpg"
         await bot.download_file(file.file_path, destination=raw_path)
 
-        # Делаем круглую PNG с прозрачным фоном
         circle_path = f"nft_{message.from_user.id}_{photo.file_unique_id}_circle.png"
         try:
             make_circle(raw_path, circle_path, size=512)
         except Exception as e:
             print(f"[make_circle] Ошибка: {e}")
-            circle_path = raw_path  # фолбэк — заливаем как есть
+            circle_path = raw_path
 
         url = await upload_photo(circle_path)
 
