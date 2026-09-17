@@ -350,7 +350,7 @@ async def upload_photo(file_path: str):
 #   #1c2733 — тёмно-синий (Telegram Dark)
 #   #17212b — ещё темнее
 #   #0e1621 — почти чёрный
-CIRCLE_BG_COLOR = (28, 39, 51, 255)  # #1c2733
+CIRCLE_BG_COLOR = (14, 22, 33, 255)  # #0e1621
 
 
 def make_circle(input_path: str, output_path: str, size: int = 512):
