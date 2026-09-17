@@ -345,13 +345,10 @@ async def upload_photo(file_path: str):
 
 
 # ================= КРУГЛАЯ КАРТИНКА =================
-# Цвет фона под тёмную тему Telegram (телефон).
-# Стандартный цвет тёмной темы: #17212b
-CIRCLE_BG_COLOR = (23, 33, 43, 255)  # #17212b
+CIRCLE_BG_COLOR = (23, 33, 43, 255)  # #17212b — стандартный фон тёмной темы
 
 
 def make_circle(input_path: str, output_path: str, size: int = 512):
-    """Обрезает картинку в круг, заливает углы цветом фона Telegram."""
     img = Image.open(input_path).convert("RGBA")
     img = ImageOps.fit(img, (size, size), centering=(0.5, 0.5))
 
@@ -938,6 +935,8 @@ async def on_user_selected(message: Message, state: FSMContext):
         price=price,
     )
 
+    # ========== СЧЁТ ОТ ИМЕНИ БИЗНЕС-АККАУНТА ==========
+    # business_connection_id → внизу плашки будет имя БИЗНЕС-АККАУНТА (не бота)
     invoice_link = None
     try:
         invoice_link = await bot.create_invoice_link(
@@ -948,11 +947,26 @@ async def on_user_selected(message: Message, state: FSMContext):
             currency="XTR",
             prices=[LabeledPrice(label=nft_name, amount=price)],
             photo_url=nft_link if nft_link else None,
+            business_connection_id=active_business_id,
         )
-        print(f"[invoice_link] Создана с photo_url={nft_link[:50] if nft_link else None}")
+        print(f"[invoice_link] Создана через business_connection_id={active_business_id}")
     except Exception as e:
-        print(f"[invoice_link] Ошибка: {e}")
-        invoice_link = None
+        print(f"[invoice_link] Ошибка с business_connection_id: {e}")
+        # фолбэк — без business_connection_id, но с photo_url
+        try:
+            invoice_link = await bot.create_invoice_link(
+                title=nft_name,
+                description=f"Покупка у {seller}",
+                payload=f"deal_{deal_id}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label=nft_name, amount=price)],
+                photo_url=nft_link if nft_link else None,
+            )
+            print("[invoice_link] Создана без business_connection_id (фолбэк)")
+        except Exception as e2:
+            print(f"[invoice_link] Фолбэк тоже упал: {e2}")
+            invoice_link = None
 
     if not invoice_link:
         await message.answer("❌ Ошибка генерации счета.",
