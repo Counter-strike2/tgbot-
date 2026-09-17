@@ -303,7 +303,6 @@ async def log_send(sender_id: int, sender_username: str, recipient_id: int,
 
 # ================= ЗАГРУЗКА ФОТО =================
 async def upload_to_catbox(file_path: str):
-    """Catbox сохраняет PNG как есть, без пережатия."""
     url = "https://catbox.moe/user/api.php"
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
@@ -346,10 +345,8 @@ async def upload_photo(file_path: str):
 
 
 # ================= КРУГЛАЯ КАРТИНКА =================
-# Цвет фона под тему Telegram (подбери под свой скрин, если не совпадает):
-#   #1c2733 — тёмно-синий (Telegram Dark)
-#   #17212b — ещё темнее
-#   #0e1621 — почти чёрный
+# Цвет фона под тёмную тему Telegram (телефон).
+# Стандартный цвет тёмной темы: #17212b
 CIRCLE_BG_COLOR = (23, 33, 43, 255)  # #17212b
 
 
