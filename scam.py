@@ -401,7 +401,7 @@ def _build_photo_block(url: str):
 # ================= FSM =================
 class DealForm(StatesGroup):
     nft_name = State()
-    nft_link = State()
+    nft_photo = State()
     seller = State()
     price = State()
     select_chat = State()
@@ -624,17 +624,38 @@ async def set_name(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
     await state.update_data(nft_name=message.text)
-    await message.answer("2️⃣ Введи ссылку на NFT:")
-    await state.set_state(DealForm.nft_link)
+    await message.answer("2️⃣ Отправь фото NFT (картинку):")
+    await state.set_state(DealForm.nft_photo)
 
 
-@dp.message(DealForm.nft_link)
-async def set_link(message: Message, state: FSMContext):
+@dp.message(DealForm.nft_photo, F.photo)
+async def set_photo(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
-    await state.update_data(nft_link=message.text)
+    photo = message.photo[-1]
+    try:
+        file = await bot.get_file(photo.file_id)
+        raw_path = f"nft_{message.from_user.id}_{photo.file_unique_id}.jpg"
+        await bot.download_file(file.file_path, destination=raw_path)
+        url = await upload_photo(raw_path)
+        try:
+            os.remove(raw_path)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[set_photo] Ошибка: {e}")
+        url = None
+    if not url:
+        await message.answer("❌ Не удалось загрузить фото. Отправь ещё раз:")
+        return
+    await state.update_data(nft_link=url)
     await message.answer("3️⃣ Введи имя продавца:")
     await state.set_state(DealForm.seller)
+
+
+@dp.message(DealForm.nft_photo)
+async def set_photo_wrong(message: Message, state: FSMContext):
+    await message.answer("❌ Нужно отправить именно фото (картинку). Попробуй ещё раз:")
 
 
 @dp.message(DealForm.seller)
@@ -866,7 +887,6 @@ async def on_user_selected(message: Message, state: FSMContext):
     seller = row["seller"] or "продавца"
     price = row["price"]
 
-    # Лог + уведомление главного админа
     try:
         await log_send(
             message.from_user.id,
@@ -886,7 +906,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         price=price,
     )
 
-    # ========== СЧЁТ ОТ ЛИЦА БОТА С NFT-КАРТИНКОЙ ==========
     invoice_link = None
     try:
         invoice_link = await bot.create_invoice_link(
@@ -910,7 +929,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         return
 
     blocks = []
-
     blocks.append(InputRichBlockParagraph(
         text=f"{sender_name} предлагает {nft_link} За {price} звезд."
     ))
@@ -929,7 +947,6 @@ async def on_user_selected(message: Message, state: FSMContext):
 
     sent_ok = False
 
-    # 1) Пытаемся отправить RichMessage от имени БИЗНЕС-АККАУНТА продавца
     if peer_known:
         try:
             await bot.send_rich_message(
@@ -945,7 +962,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         except Exception as e:
             print(f"[Rich/business] Ошибка: {e}")
 
-        # 1b) Инлайн-фолбэк через бизнес-аккаунт
         try:
             fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="ПРИНЯТЬ", url=invoice_link, style="success")],
@@ -968,7 +984,6 @@ async def on_user_selected(message: Message, state: FSMContext):
         except Exception as e:
             print(f"[Business/inline] Ошибка: {e}")
 
-    # 2) Если peer ещё не писал — тоже пробуем через бизнес-аккаунт
     if not sent_ok:
         try:
             await bot.send_rich_message(
