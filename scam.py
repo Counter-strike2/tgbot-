@@ -159,6 +159,14 @@ async def init_db():
                 sent_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS processed_payments (
+                charge_id TEXT PRIMARY KEY,
+                deal_id INTEGER,
+                buyer_id BIGINT,
+                processed_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS owner_id BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_to BIGINT")
         await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS sold_at TIMESTAMP")
@@ -685,7 +693,6 @@ async def set_price(message: Message, state: FSMContext):
     await state.update_data(price=int(message.text))
     data = await state.get_data()
 
-    # Продавец = first_name того, кто создаёт лот
     seller_name = message.from_user.first_name or "Продавец"
 
     async with DB_POOL.acquire() as conn:
@@ -1080,12 +1087,31 @@ async def process_successful_payment(message: Message):
     try:
         payload = message.successful_payment.invoice_payload
         deal_id = int(payload.split("_")[1])
+        charge_id = message.successful_payment.telegram_payment_charge_id
     except Exception as e:
         print(f"[payment] Некорректный payload: {e}")
         return
 
     buyer_id = message.from_user.id
     buyer = message.from_user
+
+    # === ФИКС ДУБЛЕЙ ===
+    # Атомарный захват платежа: если deal уже продан (или этот charge_id уже обработан) —
+    # второй вызов (business_message + message) сразу выходит.
+    try:
+        async with DB_POOL.acquire() as conn:
+            inserted = await conn.fetchrow(
+                "INSERT INTO processed_payments (charge_id, deal_id, buyer_id) "
+                "VALUES ($1, $2, $3) "
+                "ON CONFLICT (charge_id) DO NOTHING "
+                "RETURNING charge_id",
+                charge_id, deal_id, buyer_id
+            )
+            if not inserted:
+                print(f"[payment] Дубликат charge_id={charge_id} — пропускаем")
+                return
+    except Exception as e:
+        print(f"[payment] Ошибка проверки дубля: {e}")
 
     async with DB_POOL.acquire() as conn:
         await conn.execute(
@@ -1164,8 +1190,7 @@ async def process_successful_payment(message: Message):
         f'<b>По вопросам возврата вы можете обратиться в официальную поддержку Telegram.</b>'
     )
 
-    # === ИЗМЕНЕНИЕ 1: покупателю пишет САМ БОТ (напрямую в его чат с ботом),
-    # а не через business connection бизнес-аккаунта ===
+    # Покупателю пишет САМ БОТ (напрямую, а не через business connection)
     try:
         await bot.send_message(buyer_id, buyer_text, parse_mode="HTML")
     except Exception as e:
@@ -1206,9 +1231,7 @@ async def process_successful_payment(message: Message):
     if deal_owner_id:
         recipients.add(deal_owner_id)
 
-    # === ИЗМЕНЕНИЕ 2: строка recipients.discard(buyer_id) убрана,
-    # теперь уведомление о новой оплате приходит ВСЕМ админам,
-    # включая того, кто сам совершил покупку ===
+    # discard(buyer_id) НЕ делаем — пусть админ-покупатель тоже видит уведомление
 
     print(f"[payment] Итого получателей: {recipients}")
 
